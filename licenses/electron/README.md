@@ -29,11 +29,15 @@ The MPL 1.1 and MPL 2.0 texts are included separately. Release maintainers must 
 Use Electron's [versioned build instructions](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-gn.md) and [macOS prerequisites](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-macos.md). Synchronize the exact Electron commit above and its DEPS; apply Electron's patch set through its normal synchronization hooks. In the synchronized `src` directory:
 
 ```sh
-gn gen out/Release --args='import("//electron/build/args/release.gn") target_cpu="arm64"'
+gn gen out/Release --args='import("//electron/build/args/release.gn") target_cpu="arm64" override_electron_version="45.3.1" chrome_pgo_phase=0 v8_builtins_profiling_log_file=""'
 ninja -C out/Release ffmpeg
 # To rebuild the framework and the complete Electron distribution:
 ninja -C out/Release electron:electron_dist_zip
 ```
+
+The explicit version override avoids relying on Git tags when starting from source archives. This replacement configuration disables C++ PGO and V8 builtins profile input; it does not require Electron's release-training profiles and does not reproduce release performance exactly. The original profile state files and download scripts remain in the Electron source tree.
+
+Apply **all** patch groups listed in `electron/patches/config.json`, not just the four FFmpeg patches. Within each group, retain its `.patches` ordering. The root Chromium archive alone omits separate DEPS checkouts such as Node, V8, Skia, BoringSSL and WebRTC; these must be populated at their pinned paths before rebuilding the framework.
 
 These are upstream build recipes, not a claim that Alpi has reproduced Electron bit for bit. Building Electron requires substantial disk space, downloads and a compatible Apple toolchain. No compiler or SDK is bundled with Alpi.
 
