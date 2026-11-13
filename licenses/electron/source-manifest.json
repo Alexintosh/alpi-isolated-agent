@@ -105,7 +105,7 @@
     {
       "url": "https://github.com/electron/electron.git",
       "revision": "3025e0491e87674c112f7a7d2646292c0efa4599",
-      "archiveUrl": "https://codeload.github.com/electron/electron/tar.gz/3025e0491e87674c112f7a7d2646292c0efa4599",
+      "archiveUrl": "https://codeload.github.com/electron/electron/tar.gz/refs/tags/v45.3.1",
       "placements": [
         "src/electron"
       ],
@@ -688,7 +688,7 @@
     {
       "url": "https://github.com/nodejs/node.git",
       "revision": "f7f273a9bb6445f6f7fb6349105e7532972045fb",
-      "archiveUrl": "https://codeload.github.com/nodejs/node/tar.gz/f7f273a9bb6445f6f7fb6349105e7532972045fb",
+      "archiveUrl": "https://codeload.github.com/nodejs/node/tar.gz/refs/tags/v24.22.2",
       "placements": [
         "src/third_party/electron_node"
       ],
