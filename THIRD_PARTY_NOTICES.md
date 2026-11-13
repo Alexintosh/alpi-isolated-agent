@@ -12,7 +12,7 @@ Alpi's original code is licensed under the [MIT License](LICENSE). That grant do
 
 | Project | Version / license | Role |
 | --- | --- | --- |
-| [Electron](https://github.com/electron/electron/tree/v45.3.1) | [MIT](https://github.com/electron/electron/blob/v45.3.1/LICENSE), plus bundled Chromium/dependency licenses | Native shell. Local builds retain Electron's complete LICENSE and LICENSES.chromium.html. |
+| [Electron](https://github.com/electron/electron/tree/v45.3.1) | [MIT](https://github.com/electron/electron/blob/v45.3.1/LICENSE), plus bundled Chromium/dependency licenses | Native shell. Client builds and the DMG retain Electron's complete LICENSE and LICENSES.chromium.html; matching component source archives accompany the release. |
 | [gRPC for Node](https://github.com/grpc/grpc-node) | grpc-js 1.14.7, proto-loader 0.8.0; Apache-2.0 | Iron extension protocol. |
 | [js-yaml](https://github.com/nodeca/js-yaml/tree/4.3.2) | 4.3.2; MIT | Host profile parsing. |
 | [Undici](https://github.com/nodejs/undici/tree/v7.30.2) | 7.30.2; MIT | HTTP transport. |
@@ -40,10 +40,12 @@ These projects are used by Alpi's runtime design but are **not redistributed in 
 | [Chromium](https://www.chromium.org/) | BSD-style core plus many third-party licenses | The adapted ARM64 image also needs its own provenance and complete inventory. |
 | [Google Chrome](https://www.google.com/chrome/terms/) / Widevine | Proprietary executable/component terms in addition to open-source components | The pinned desktop contains Widevine material requiring separate redistribution permission. No such agreement is asserted here. |
 
-## Why there is no public runtime or binary bundle yet
+## Client DMG and separate VM runtime
 
-The existing local payload has unresolved WrapVM redistribution permissions, Chrome/Widevine restrictions and complete corresponding-source/notice obligations for GPL, LGPL and MPL components. Separating downloads does not remove those obligations. The source prerelease also avoids distributing an Electron binary until its complete bundled-component distribution requirements have been addressed.
+The **client-only DMG** includes Electron 45.3.1, its full bundled notices and Alpi's production dependency notices. FFmpeg and LGPL-covered Blink portions are used in this client; NSPR and Symphonia carry MPL 2.0, while the Mozilla-derived URL parser retains MPL 1.1 and its alternative grants. [Source provenance and rights](licenses/electron/README.md), [rebuild/replacement instructions](licenses/electron/REBUILD.md), and the [source manifest](licenses/electron/source-manifest.json) identify the matching material co-published with the DMG in the [release](https://github.com/Alexintosh/alpi-isolated-agent/releases/tag/v0.1.0-alpha.2). The three source parts retain the original licenses and upstream changes. Alpi's original code remains MIT.
 
-GPL/LGPL software can be redistributed with compliance; these licenses do not automatically relicense independent Alpi code merely because the programs are used together. Before a binary release, inventory the actual artifacts, preserve notices, provide required corresponding source/build information and honor applicable replacement/relinking rights. Runtime integrity verification must not be assumed to settle licensing rights.
+The separate VM payload still has unresolved WrapVM redistribution permissions, Chrome/Widevine restrictions and complete corresponding-source/notice obligations for GPL, LGPL and MPL components. It is **not** in the DMG or source release. Separating runtime downloads does not remove those obligations.
+
+GPL/LGPL software can be redistributed with compliance; these licenses do not automatically relicense independent Alpi code merely because the programs are used together. Any future binary/runtime release must inventory its actual artifacts, preserve notices, provide required corresponding source/build information and honor applicable replacement/relinking rights. Runtime integrity verification must not be assumed to settle licensing rights.
 
 Useful primary references: [MPL 2.0 obligations](https://www.mozilla.org/en-US/MPL/2.0/), [FFmpeg legal guidance](https://ffmpeg.org/legal.html), [Canonical's policy](https://canonical.com/legal/intellectual-property-policy), [smolvm notices](https://github.com/smol-machines/smolvm/blob/v1.34.1/THIRD-PARTY-NOTICES.md), and the exact license files linked above.

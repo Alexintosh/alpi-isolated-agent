@@ -26,14 +26,7 @@ The MPL 1.1 and MPL 2.0 texts are included separately. Release maintainers must 
 
 ## Rebuilding and replacing
 
-Use Electron's [versioned build instructions](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-gn.md) and [macOS prerequisites](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-macos.md). Synchronize the exact Electron commit above and its DEPS; apply Electron's patch set through its normal synchronization hooks. In the synchronized `src` directory:
-
-```sh
-gn gen out/Release --args='import("//electron/build/args/release.gn") target_cpu="arm64" override_electron_version="45.3.1" chrome_pgo_phase=0 v8_builtins_profiling_log_file=""'
-ninja -C out/Release ffmpeg
-# To rebuild the framework and the complete Electron distribution:
-ninja -C out/Release electron:electron_dist_zip
-```
+Use Electron's [versioned build instructions](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-gn.md) and [macOS prerequisites](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-macos.md). Synchronize the exact Electron commit above and its DEPS; apply Electron's patch set through its normal synchronization hooks. Follow the explicit local, system-Xcode commands in [REBUILD.md](REBUILD.md); that recipe fixes the Electron version and disables remote execution, Siso and release-training profile dependencies.
 
 The explicit version override avoids relying on Git tags when starting from source archives. This replacement configuration disables C++ PGO and V8 builtins profile input; it does not require Electron's release-training profiles and does not reproduce release performance exactly. The original profile state files and download scripts remain in the Electron source tree.
 
@@ -51,6 +44,8 @@ The framework can also be replaced with a matching rebuilt `Electron Framework.f
 
 Changing a signed bundle invalidates its signature. The maintainer packaging script demonstrates local ad-hoc re-signing with `codesign --force --deep --sign - --preserve-metadata=entitlements,flags,runtime` and subsequent `codesign --verify --deep --strict`. Apply this only to your modified copy. An incompatible replacement may fail to load; replacement and rebuild execution have not been validated in this alpha.
 
-## Release-source status
+## Release-source downloads
 
-This document records the pinned source chain and replacement instructions. It is not a written source offer or a claim that a complete matching source attachment has already been published. The DMG publication gate requires assembling and checking the source materials alongside the binary before public distribution.
+The [Alpi alpha.2 release](https://github.com/Alexintosh/alpi-isolated-agent/releases/tag/v0.1.0-alpha.2) co-publishes three `electron-sources-*.tar` parts, the source manifest and checksums beside the client DMG. Download **all three parts** to obtain the selected source set. They contain 157 unique Git archives (158 placements), three Chromium JavaScript dependency archives and the immutable Electron Yarn package cache. Original notices and licenses remain in the archives. The Yarn cache also contains locked native build-tool packages; it is not exclusively JavaScript source.
+
+The [source manifest](source-manifest.json) maps every archive to its checkout path, revision, source-part member and SHA-256. [REBUILD.md](REBUILD.md) gives pinned reconstruction and replacement steps; [build-inputs.json](build-inputs.json) records external tool prerequisites. These materials do not include Apple SDKs or a hermetic compiler distribution. No completed Electron rebuild or modified-library execution is claimed. This is direct source availability, not a three-year written source offer. Keep the source attachments available when superseding a release, including for the MPL 1.1 period described above.

@@ -24,7 +24,7 @@
   <a href="AGENTS.md">Agent setup</a>
 </p>
 
-> **Developer preview.** This prerelease publishes Alpi's source; downloadable application binaries and VM images are not included. The separately verified VM runtime payload is not included. It is not yet a one-click installation on a fresh machine. Linux host support and full release acceptance remain unfinished. See [setup and release limits](docs/setup.md).
+> **Developer preview.** [Download Alpi for macOS Apple Silicon](https://github.com/Alexintosh/alpi-isolated-agent/releases/download/v0.1.0-alpha.2/Alpi-0.1.0-alpha.2-macOS-arm64.dmg) · [Release notes and checksums](https://github.com/Alexintosh/alpi-isolated-agent/releases/tag/v0.1.0-alpha.2). The DMG installs the client; **the VM runtime package is separate and is not distributed yet**. A fresh Mac cannot start a guest from the DMG alone. The app is ad-hoc signed, not notarized. Linux host support and full release acceptance remain unfinished. See [setup and release limits](docs/setup.md).
 
 ## Why Alpi
 
@@ -69,10 +69,10 @@ The security goal treats **root inside the guest as untrusted**. Enforcement bel
 
 ## Run on macOS
 
-**Current target: Apple Silicon.** The client uses macOS virtualization and Keychain facilities. Local client builds are ad-hoc signed, not notarized; Intel Macs have not been validated.
+**Current target: Apple Silicon.** The client uses macOS virtualization and Keychain facilities. The downloadable client and local builds are ad-hoc signed, not notarized; Intel Macs have not been validated.
 
 1. Read the [prerelease notes](https://github.com/Alexintosh/alpi-isolated-agent/releases).
-2. Build the macOS client from source using the commands below. A verified runtime package is required to start guests; this prerelease does not distribute that package.
+2. [Download the DMG](https://github.com/Alexintosh/alpi-isolated-agent/releases/download/v0.1.0-alpha.2/Alpi-0.1.0-alpha.2-macOS-arm64.dmg), open it and drag **Alpi.app** to **Applications**. A verified runtime package is required to start guests; this prerelease does not distribute that package. See [installation instructions](docs/macos-distribution.md), including first launch and safe updates.
 3. With a compatible runtime package available, open **Settings → Install runtime package**, select it, then choose an environment and **Connect**.
 4. Configure your explicitly authorized model providers, import their configuration in **Models**, and review network requests as they arrive.
 

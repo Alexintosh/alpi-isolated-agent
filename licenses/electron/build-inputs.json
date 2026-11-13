@@ -1,0 +1,2679 @@
+{
+  "version": 1,
+  "target": {
+    "electron": "45.3.1",
+    "chromium": "156.0.8078.96",
+    "os": "darwin",
+    "cpu": "arm64",
+    "host_os": "mac",
+    "host_cpu": "arm64"
+  },
+  "scope": "Pinned external build prerequisites and configuration. Tool payloads are not part of the Alpi DMG or a hermetic SDK distribution. Test-only payloads are not established shipped components.",
+  "nonGitInputs": [
+    {
+      "path": "src/third_party/js_code_coverage/node_modules",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-nodejs",
+      "objects": [
+        {
+          "object_name": "js_code_coverage/e932c86d2d4f250416970dc270002a9cb6acecbec034998cdadf9a394d0f1abc",
+          "sha256sum": "e932c86d2d4f250416970dc270002a9cb6acecbec034998cdadf9a394d0f1abc",
+          "size_bytes": 1557200,
+          "generation": 1742338539536352,
+          "downloadUrl": "https://storage.googleapis.com/chromium-nodejs/js_code_coverage/e932c86d2d4f250416970dc270002a9cb6acecbec034998cdadf9a394d0f1abc?generation=1742338539536352",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "source",
+      "roleDetail": "Packaged JavaScript source dependencies used by build/test tools; retain as source package, not a git checkout.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/buildtools/mac_arm64-format",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\" and host_cpu == \"arm64\" and non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "bucket": "chromium-clang-format",
+      "dep_type": "gcs",
+      "objects": [
+        {
+          "object_name": "945e45cbcb5443c3e569d5e0783fd012154fc4a7",
+          "sha256sum": "a1fb17260eda2971f52ed341501b93703b0fce69ffb43a179b891b66f6f63e5a",
+          "size_bytes": 3245456,
+          "generation": 1779297393605542,
+          "output_file": "clang-format",
+          "downloadUrl": "https://storage.googleapis.com/chromium-clang-format/945e45cbcb5443c3e569d5e0783fd012154fc4a7?generation=1779297393605542",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/node/linux",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-nodejs",
+      "objects": [
+        {
+          "object_name": "744e6926ffdd4a4fb2080ae2b9ce4575490261e7",
+          "sha256sum": "bdea62a6857735d62165ec97242d79a693564c72d551890c4d009d2355abf14c",
+          "size_bytes": 53566970,
+          "generation": 1767604834866657,
+          "output_file": "node-linux-x64.tar.gz",
+          "downloadUrl": "https://storage.googleapis.com/chromium-nodejs/744e6926ffdd4a4fb2080ae2b9ce4575490261e7?generation=1767604834866657",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/node/mac",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\" and non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-nodejs",
+      "objects": [
+        {
+          "object_name": "9202c05a8e7c67cb2bb2fec1e50fb6188d26f281",
+          "sha256sum": "a25cd3ef35d8b4b5a59498a5a62b5b12cc271dc420ee809abaa76110d12c156e",
+          "size_bytes": 49563652,
+          "generation": 1767604826991919,
+          "output_file": "node-darwin-x64.tar.gz",
+          "downloadUrl": "https://storage.googleapis.com/chromium-nodejs/9202c05a8e7c67cb2bb2fec1e50fb6188d26f281?generation=1767604826991919",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/node/mac_arm64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\" and non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-nodejs",
+      "objects": [
+        {
+          "object_name": "6661e9b9bd7df6b45daf506c82d06d303597cb27",
+          "sha256sum": "b1be502d1635330ebf51d85f8d32a0d3dd92b35c6700def56ae6f903906ea825",
+          "size_bytes": 48369082,
+          "generation": 1767604830942392,
+          "output_file": "node-darwin-arm64.tar.gz",
+          "downloadUrl": "https://storage.googleapis.com/chromium-nodejs/6661e9b9bd7df6b45daf506c82d06d303597cb27?generation=1767604830942392",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/node/node_modules",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "bucket": "chromium-nodejs",
+      "dep_type": "gcs",
+      "objects": [
+        {
+          "object_name": "44f845cd5bd9d805cb1c73a98d5726b38ed8662a",
+          "sha256sum": "146cb2af600aa8cf80635592b65219fc94ff3deb384a46a41261405feb46c228",
+          "size_bytes": 11312049,
+          "generation": 1789349489677960,
+          "output_file": "node_modules.tar.gz",
+          "downloadUrl": "https://storage.googleapis.com/chromium-nodejs/44f845cd5bd9d805cb1c73a98d5726b38ed8662a?generation=1789349489677960",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "source",
+      "roleDetail": "Packaged JavaScript source dependencies used by build/test tools; retain as source package, not a git checkout.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/chromium-bidi/node_modules",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-nodejs",
+      "objects": [
+        {
+          "object_name": "chromium-bidi/028c7baf9de02f6ae103b1911ab13d1aeb48f0ddd8fa702f9c150cdaf8cb5f5b",
+          "sha256sum": "028c7baf9de02f6ae103b1911ab13d1aeb48f0ddd8fa702f9c150cdaf8cb5f5b",
+          "size_bytes": 20652261,
+          "generation": 1790318403990383,
+          "output_file": "node_modules.tar.gz",
+          "downloadUrl": "https://storage.googleapis.com/chromium-nodejs/chromium-bidi/028c7baf9de02f6ae103b1911ab13d1aeb48f0ddd8fa702f9c150cdaf8cb5f5b?generation=1790318403990383",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "source",
+      "roleDetail": "Packaged JavaScript source dependencies used by build/test tools; retain as source package, not a git checkout.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/llvm-build/Release+Asserts",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "not llvm_force_head_revision",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-browser-clang",
+      "objects": [
+        {
+          "object_name": "Mac_arm64/clang-llvmorg-24-init-7747-g62397f8b-53.tar.xz",
+          "sha256sum": "7ce015cde974fc32bb80e1f48aa7dddbdcbe44fd6f8614de5e63cae4733960d5",
+          "size_bytes": 44452152,
+          "generation": 1790402697155562,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/clang-llvmorg-24-init-7747-g62397f8b-53.tar.xz?generation=1790402697155562",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "Mac_arm64/clang-tidy-llvmorg-24-init-7747-g62397f8b-53.tar.xz",
+          "sha256sum": "2ceae9e75cb49181c7e493a420171ceafc0266b7853ee3d3892805fd8f38eb77",
+          "size_bytes": 12223460,
+          "generation": 1790402697231304,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\" and checkout_clang_tidy",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/clang-tidy-llvmorg-24-init-7747-g62397f8b-53.tar.xz?generation=1790402697231304",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "Mac_arm64/llvmobjdump-llvmorg-24-init-7747-g62397f8b-53.tar.xz",
+          "sha256sum": "f93f89580341f51b80c713776a2f9645f090a971d82e459abbcc11fdd21b2ae4",
+          "size_bytes": 5202064,
+          "generation": 1790402697359142,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/llvmobjdump-llvmorg-24-init-7747-g62397f8b-53.tar.xz?generation=1790402697359142",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/rust-toolchain",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "not rust_force_head_revision",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-browser-clang",
+      "objects": [
+        {
+          "object_name": "Mac_arm64/rust-toolchain-1edd55dcfcd573872c727fa3e086369a71661ee0-2-llvmorg-24-init-7747-g62397f8b.tar.xz",
+          "sha256sum": "5db21ffd4909ce82c0832df9d1eb06b01b15a54176b7341e39f7181f4b483dbc",
+          "size_bytes": 248304876,
+          "generation": 1789143391575553,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/rust-toolchain-1edd55dcfcd573872c727fa3e086369a71661ee0-2-llvmorg-24-init-7747-g62397f8b.tar.xz?generation=1789143391575553",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/llvm-libclang",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-browser-clang",
+      "objects": [
+        {
+          "object_name": "Mac_arm64/rust-libclang-1edd55dcfcd573872c727fa3e086369a71661ee0-2-llvmorg-24-init-7747-g62397f8b.tar.xz",
+          "sha256sum": "d330fd41100be52b4e804c9252b3f3bb34cfed16d2973934de0930b297f7201e",
+          "size_bytes": 20689276,
+          "generation": 1789143393459608,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/rust-libclang-1edd55dcfcd573872c727fa3e086369a71661ee0-2-llvmorg-24-init-7747-g62397f8b.tar.xz?generation=1789143393459608",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/buildtools/mac",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\"",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "gn/gn/mac-${arch}",
+          "version": "git_revision:510ec7992c30f172205792f190e96111a896ba8f",
+          "resolvedPackage": "gn/gn/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/gn/gn/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/content/test/data/gpu/meet_effects_videos",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_gpu_meet_effects and non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/testing/meet-effects-videos",
+          "version": "I5ME8r-BP_A2lRn-c5E-9POZkrJwGS8BNnRdREhYbs8C",
+          "resolvedPackage": "chromium/testing/meet-effects-videos",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "I5ME8r-BP_A2lRn-c5E-9POZkrJwGS8BNnRdREhYbs8C",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/testing/meet-effects-videos"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/content/test/data/gpu/meet_effects",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_gpu_meet_effects and non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "meet-bundles",
+      "objects": [
+        {
+          "object_name": "meet-gpu-tests/989382331.tar.gz",
+          "sha256sum": "be3da8cf0ccaca852bfa465c6c9903b53d5ad89d39bec611a30a1b6ecc651301",
+          "size_bytes": 321597675,
+          "generation": 1790585496253598,
+          "downloadUrl": "https://storage.googleapis.com/meet-bundles/meet-gpu-tests/989382331.tar.gz?generation=1790585496253598",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/apache-mac",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac or checkout_ios",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/httpd-php/mac-amd64",
+          "version": "version:2@httpd2.4.38.php7.3.31.chromium.3",
+          "resolvedPackage": "infra/3pp/tools/httpd-php/mac-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/httpd-php/mac-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/apache-mac-arm64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac or checkout_ios",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/httpd-php/mac-arm64",
+          "version": "version:2@httpd2.4.38.php7.3.31.chromium.3",
+          "resolvedPackage": "infra/3pp/tools/httpd-php/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/httpd-php/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chrome_mac_universal/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chrome_mac_universal",
+          "version": "version:2@156.0.8067.0",
+          "resolvedPackage": "chromium/third_party/updater/chrome_mac_universal",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chrome_mac_universal"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chrome_mac_universal_prod/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chrome_mac_universal_prod",
+          "version": "version:2@152.0.7933.0",
+          "resolvedPackage": "chromium/third_party/updater/chrome_mac_universal_prod",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chrome_mac_universal_prod"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chrome_mac_universal_sans_iid/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chrome_mac_universal",
+          "version": "gzutuY-G7u8n5746jgmishm8uWjUR070TXdFc23Ea7YC",
+          "resolvedPackage": "chromium/third_party/updater/chrome_mac_universal",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "gzutuY-G7u8n5746jgmishm8uWjUR070TXdFc23Ea7YC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chrome_mac_universal"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chrome_mac_universal_prod_sans_iid/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chrome_mac_universal_prod",
+          "version": "IrAigaqukp1GbaksroZcR3Jo0oOYKg9kzatjzNNbXKQC",
+          "resolvedPackage": "chromium/third_party/updater/chrome_mac_universal_prod",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "IrAigaqukp1GbaksroZcR3Jo0oOYKg9kzatjzNNbXKQC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chrome_mac_universal_prod"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chromium_mac_amd64/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chromium_mac_amd64",
+          "version": "version:2@1701051",
+          "resolvedPackage": "chromium/third_party/updater/chromium_mac_amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chromium_mac_amd64"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chromium_mac_arm64/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chromium_mac_arm64",
+          "version": "version:2@1701045",
+          "resolvedPackage": "chromium/third_party/updater/chromium_mac_arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chromium_mac_arm64"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chromium_mac_amd64_sans_iid/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chromium_mac_amd64",
+          "version": "zVv93X5XSClxTR1YejkQuBdSpye7JfPS_h6GcH1N4i4C",
+          "resolvedPackage": "chromium/third_party/updater/chromium_mac_amd64",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "zVv93X5XSClxTR1YejkQuBdSpye7JfPS_h6GcH1N4i4C",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chromium_mac_amd64"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/updater/chromium_mac_arm64_sans_iid/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/updater/chromium_mac_arm64",
+          "version": "Va20qxSst3lq4WfEZlWiwzXCpSo5XbhhuqJXyqzvhF8C",
+          "resolvedPackage": "chromium/third_party/updater/chromium_mac_arm64",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "Va20qxSst3lq4WfEZlWiwzXCpSo5XbhhuqJXyqzvhF8C",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/updater/chromium_mac_arm64"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/enterprise_companion/chromium_mac_amd64/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/enterprise_companion/chromium_mac_amd64",
+          "version": "rS1qtwKmH6SIUzWeONWFLRnru-VrY7ahLEw-gqHgcG0C",
+          "resolvedPackage": "chromium/third_party/enterprise_companion/chromium_mac_amd64",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "rS1qtwKmH6SIUzWeONWFLRnru-VrY7ahLEw-gqHgcG0C",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/enterprise_companion/chromium_mac_amd64"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/enterprise_companion/chromium_mac_arm64/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/enterprise_companion/chromium_mac_arm64",
+          "version": "8Ycdju9pEwFGnOXO9wu3x_mvTMTvbiQQoTSpafwkvUoC",
+          "resolvedPackage": "chromium/third_party/enterprise_companion/chromium_mac_arm64",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "8Ycdju9pEwFGnOXO9wu3x_mvTMTvbiQQoTSpafwkvUoC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/enterprise_companion/chromium_mac_arm64"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/chrome/test/data/safe_browsing/dmg",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/chrome/test/data/safe_browsing/dmg",
+          "version": "03TLfNQgc59nHmyWtYWJfFaUrEW8QDJJzXwm-672m-QC",
+          "resolvedPackage": "chromium/chrome/test/data/safe_browsing/dmg",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "03TLfNQgc59nHmyWtYWJfFaUrEW8QDJJzXwm-672m-QC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/chrome/test/data/safe_browsing/dmg"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/components/variations/test_data/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/chrome/test/data/variations/cipd",
+          "version": "Voe8CwQHmgZRogp7bLS2Vd5XUPeVJzjJKNS_kxQJ5ZoC",
+          "resolvedPackage": "chromium/chrome/test/data/variations/cipd",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "Voe8CwQHmgZRogp7bLS2Vd5XUPeVJzjJKNS_kxQJ5ZoC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/chrome/test/data/variations/cipd"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/tools/luci-go",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/tools/luci/cas/${platform}",
+          "version": "git_revision:b5ab8c6e7688d99a5702022cfaa95e9f8ce464f2",
+          "resolvedPackage": "infra/tools/luci/cas/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/tools/luci/cas/mac-arm64"
+        },
+        {
+          "package": "infra/tools/luci/isolate/${platform}",
+          "version": "git_revision:b5ab8c6e7688d99a5702022cfaa95e9f8ce464f2",
+          "resolvedPackage": "infra/tools/luci/isolate/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/tools/luci/isolate/mac-arm64"
+        },
+        {
+          "package": "infra/tools/luci/swarming/${platform}",
+          "version": "git_revision:b5ab8c6e7688d99a5702022cfaa95e9f8ce464f2",
+          "resolvedPackage": "infra/tools/luci/swarming/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/tools/luci/swarming/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/blink/renderer/core/css/perftest_data",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-style-perftest",
+      "objects": [
+        {
+          "object_name": "e9ce994346c62f8c9fd6d0cecb2b2b0b93b4c2d8",
+          "sha256sum": "519019df16c628c6c0893df18928faeaa3150a9d8f26a787a16ce7c6b2cec2ad",
+          "size_bytes": 601672,
+          "generation": 1664794185950162,
+          "output_file": "ecommerce.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/e9ce994346c62f8c9fd6d0cecb2b2b0b93b4c2d8?generation=1664794185950162",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "756068da5e551516b23b0ba133e55c144f623d38",
+          "sha256sum": "84ef87a8163335a95111d9709306596f96742539da0b34fbe7397f799946a168",
+          "size_bytes": 2156935,
+          "generation": 1664794188995509,
+          "output_file": "encyclopedia.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/756068da5e551516b23b0ba133e55c144f623d38?generation=1664794188995509",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "314e4e0d5e89ea9e9e9a234c617b4413adf48aa9",
+          "sha256sum": "a721ada40011a286631baae6d76878f2023ff000151792228c83b1958ea8a197",
+          "size_bytes": 608840,
+          "generation": 1664794191929032,
+          "output_file": "extension.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/314e4e0d5e89ea9e9e9a234c617b4413adf48aa9?generation=1664794191929032",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "3a19b42a7c46257b716d55d6733f070c87180b1e",
+          "sha256sum": "f203ff9e8c8a6a3b714f0a26db38cc940544a907435c62c79b21f4bd3f8bee8e",
+          "size_bytes": 1750837,
+          "generation": 1664794194891567,
+          "output_file": "news.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/3a19b42a7c46257b716d55d6733f070c87180b1e?generation=1664794194891567",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "fdc43ee18cbd65487249441849f58aa13484aaef",
+          "sha256sum": "0e92de92f49abc9a521f7175106c80744196f8cefc0263bc0f4a6b4f724a7d10",
+          "size_bytes": 1310798,
+          "generation": 1664794197855470,
+          "output_file": "search.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/fdc43ee18cbd65487249441849f58aa13484aaef?generation=1664794197855470",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "7fc9338af75b7d9d185c91ddf262a356def5623d",
+          "sha256sum": "34e92acae8aade2a186abe79ed1f379c266f04f72f1eb54bd3a912e889bc5cc0",
+          "size_bytes": 2280846,
+          "generation": 1664794200867034,
+          "output_file": "social1.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/7fc9338af75b7d9d185c91ddf262a356def5623d?generation=1664794200867034",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "c2d7e9ce67522dad138c7feb0a6911b828bfb130",
+          "sha256sum": "95c6b148577b891310c024b2daa5d68faf644a37707ac0cb21501eefe8a399a3",
+          "size_bytes": 411708,
+          "generation": 1664794203829582,
+          "output_file": "social2.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/c2d7e9ce67522dad138c7feb0a6911b828bfb130?generation=1664794203829582",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "031d5599c8a21118754e30dbea141be66104f556",
+          "sha256sum": "8e7b765d72bb8e7742f5bf955f4bf64d5469f61197dad8b632304095a52322d7",
+          "size_bytes": 3203922,
+          "generation": 1664794206824773,
+          "output_file": "sports.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/031d5599c8a21118754e30dbea141be66104f556?generation=1664794206824773",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "8aac3db2a8c9e44babec81e539a3d60aeab4985c",
+          "sha256sum": "6aeb0036dfafaf5e905abdb0ffe515a3952ffe35a7c59afb0fc8b233b27c6ce4",
+          "size_bytes": 5902660,
+          "generation": 1664794209886788,
+          "output_file": "video.json",
+          "downloadUrl": "https://storage.googleapis.com/chromium-style-perftest/8aac3db2a8c9e44babec81e539a3d60aeab4985c?generation=1664794209886788",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/tools/perf/page_sets/maps_perf_test/dataset",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-telemetry",
+      "objects": [
+        {
+          "object_name": "e6bf26977c2fd80c18789d1f279d474096a7b0d1",
+          "sha256sum": "f5f7fe360ad2b9c3d9dda2612f17336c0541bac15b4e4992f2c167e059a190fa",
+          "size_bytes": 3285237,
+          "generation": 1513305740113238,
+          "output_file": "load_dataset",
+          "downloadUrl": "https://storage.googleapis.com/chromium-telemetry/e6bf26977c2fd80c18789d1f279d474096a7b0d1?generation=1513305740113238",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/cpython3/linux-amd64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/cpython3/linux-amd64",
+          "version": "version:3@3.11.9.chromium.38",
+          "resolvedPackage": "infra/3pp/tools/cpython3/linux-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/cpython3/linux-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/cpython3/host",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/cpython3/${platform}",
+          "version": "version:3@3.11.9.chromium.38",
+          "resolvedPackage": "infra/3pp/tools/cpython3/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/cpython3/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/ninja",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/ninja/${platform}",
+          "version": "version:3@1.12.1.chromium.4",
+          "resolvedPackage": "infra/3pp/tools/ninja/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/ninja/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/siso/cipd",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "build/siso/${platform}",
+          "version": "git_revision:c574896b272b40aac6e44c228ee0b471ea7e3d7d",
+          "resolvedPackage": "build/siso/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/build/siso/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/opus/tests/resources",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-webrtc-resources",
+      "objects": [
+        {
+          "object_name": "009a3ee778767c2402b1d2c920bc2449265f5a2c",
+          "sha256sum": "34de3161f242895a682d9cdcbbf4ad50246742b6db46873386104cfde8a24332",
+          "size_bytes": 26889600,
+          "generation": 1392811661954000,
+          "output_file": "speech_mono_32_48kHz.pcm",
+          "downloadUrl": "https://storage.googleapis.com/chromium-webrtc-resources/009a3ee778767c2402b1d2c920bc2449265f5a2c?generation=1392811661954000",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/base/tracing/test/data",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "bucket": "perfetto",
+      "objects": [
+        {
+          "object_name": "test_data/chrome_fcp_lcp_navigations.pftrace-ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3",
+          "sha256sum": "ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3",
+          "size_bytes": 2398645,
+          "generation": 1697714434866488,
+          "output_file": "chrome_fcp_lcp_navigations.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/chrome_fcp_lcp_navigations.pftrace-ae01d849fbd75a98be1b7ddd5a8873217c377b393a1d5bbd788ed3364f7fefc3?generation=1697714434866488",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/chrome_input_with_frame_view.pftrace-a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975",
+          "sha256sum": "a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975",
+          "size_bytes": 6392331,
+          "generation": 1711402389089075,
+          "output_file": "chrome_input_with_frame_view.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/chrome_input_with_frame_view.pftrace-a93548822e481508c728ccc5da3ad34afcd0aec02ca7a7a4dad84ff340ee5975?generation=1711402389089075",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_offsets_trace_2.pftrace-2ddd9f78d91d51e39c72c520bb54fdc9dbf1333ae722e87633fc345159296289",
+          "sha256sum": "2ddd9f78d91d51e39c72c520bb54fdc9dbf1333ae722e87633fc345159296289",
+          "size_bytes": 1496388,
+          "generation": 1712592637141461,
+          "output_file": "scroll_offsets_trace_2.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_offsets_trace_2.pftrace-2ddd9f78d91d51e39c72c520bb54fdc9dbf1333ae722e87633fc345159296289?generation=1712592637141461",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/top_level_java_choreographer_slices-8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a",
+          "sha256sum": "8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a",
+          "size_bytes": 5323017,
+          "generation": 1671708979893186,
+          "output_file": "top_level_java_choreographer_slices",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/top_level_java_choreographer_slices-8001e73b2458e94f65a606bb558a645ba5bca553b57fe416001f6c2175675a8a?generation=1671708979893186",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/chrome_page_load_all_categories_not_extended.pftrace.gz-6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493",
+          "sha256sum": "6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493",
+          "size_bytes": 1277750,
+          "generation": 1652442088902445,
+          "output_file": "chrome_page_load_all_categories_not_extended.pftrace.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/chrome_page_load_all_categories_not_extended.pftrace.gz-6586e9e2bbc0c996caddb321a0374328654983733e6ffd7f4635ac07db32a493?generation=1652442088902445",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/jetstream_3.pftrace.gz-8b5915cdf7f4182a74345cc080c34ce190835e5b46c30e921ce81433119acfda",
+          "sha256sum": "8b5915cdf7f4182a74345cc080c34ce190835e5b46c30e921ce81433119acfda",
+          "size_bytes": 78162,
+          "generation": 1771505932279144,
+          "output_file": "jetstream_3.pftrace.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/jetstream_3.pftrace.gz-8b5915cdf7f4182a74345cc080c34ce190835e5b46c30e921ce81433119acfda?generation=1771505932279144",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/speedometer_21.perfetto_trace.gz-8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529",
+          "sha256sum": "8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529",
+          "size_bytes": 891088,
+          "generation": 1716566741068306,
+          "output_file": "speedometer_21.perfetto_trace.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/speedometer_21.perfetto_trace.gz-8a159b354d74a3ca0d38ce9cd071ef47de322db4261ee266bfafe04d70310529?generation=1716566741068306",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/speedometer_3.perfetto_trace.gz-b2c77fbe2c17363432a1ad0c05c1c1c20d3ebc62bda92c041d39918011af6f02",
+          "sha256sum": "b2c77fbe2c17363432a1ad0c05c1c1c20d3ebc62bda92c041d39918011af6f02",
+          "size_bytes": 1301036,
+          "generation": 1716566914245446,
+          "output_file": "speedometer_3.perfetto_trace.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/speedometer_3.perfetto_trace.gz-b2c77fbe2c17363432a1ad0c05c1c1c20d3ebc62bda92c041d39918011af6f02?generation=1716566914245446",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_jank_with_pinch.pftrace-8587d2016fdb5d39b5f852704b6e3925e9e6527af01696396be767bed04d4a45",
+          "sha256sum": "8587d2016fdb5d39b5f852704b6e3925e9e6527af01696396be767bed04d4a45",
+          "size_bytes": 3914720,
+          "generation": 1717497788778335,
+          "output_file": "scroll_jank_with_pinch.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_jank_with_pinch.pftrace-8587d2016fdb5d39b5f852704b6e3925e9e6527af01696396be767bed04d4a45?generation=1717497788778335",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/cpu_powerups_1.pb-70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386",
+          "sha256sum": "70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386",
+          "size_bytes": 2033064,
+          "generation": 1669652389509708,
+          "output_file": "cpu_powerups_1.pb",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/cpu_powerups_1.pb-70f5511ba0cd6ce1359e3cadb4d1d9301fb6e26be85158e3384b06f41418d386?generation=1669652389509708",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/chrome_5672_histograms.pftrace.gz-a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+          "sha256sum": "a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee",
+          "size_bytes": 1127472,
+          "generation": 1684946598804577,
+          "output_file": "chrome_5672_histograms.pftrace.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/chrome_5672_histograms.pftrace.gz-a09bd44078ac71bcfbc901b0544750e8344d0d0f6f96e220f700a5a53fa932ee?generation=1684946598804577",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/chrome_custom_navigation_trace.gz-ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939",
+          "sha256sum": "ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939",
+          "size_bytes": 7572484,
+          "generation": 1666713705258900,
+          "output_file": "chrome_custom_navigation_trace.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/chrome_custom_navigation_trace.gz-ff68279e3cec94076b69259d756eed181a63eaf834d8b956a7f4ba665fabf939?generation=1666713705258900",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_offsets.pftrace-62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98",
+          "sha256sum": "62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98",
+          "size_bytes": 769741,
+          "generation": 1693402148909129,
+          "output_file": "scroll_offsets.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_offsets.pftrace-62101edb5204fec8bea30124f65d4e49bda0808d7b036e95f89445aaad6d8d98?generation=1693402148909129",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/chrome_input_with_frame_view_new.pftrace-e901ad9577088e62c921dd8bfcb43d652ecf49fa69b5b57f81bb3d27dbe94e12",
+          "sha256sum": "e901ad9577088e62c921dd8bfcb43d652ecf49fa69b5b57f81bb3d27dbe94e12",
+          "size_bytes": 1967821,
+          "generation": 1719520814352733,
+          "output_file": "chrome_input_with_frame_view_new.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/chrome_input_with_frame_view_new.pftrace-e901ad9577088e62c921dd8bfcb43d652ecf49fa69b5b57f81bb3d27dbe94e12?generation=1719520814352733",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_m131.pftrace-14171c9e502a65a454f39fe14fce8b313c7012a2c14394bed496fc93b1644b0d",
+          "sha256sum": "14171c9e502a65a454f39fe14fce8b313c7012a2c14394bed496fc93b1644b0d",
+          "size_bytes": 1247290,
+          "generation": 1729619115836875,
+          "output_file": "scroll_m131.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_m131.pftrace-14171c9e502a65a454f39fe14fce8b313c7012a2c14394bed496fc93b1644b0d?generation=1729619115836875",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_m132.pftrace-779e1fa6cab1abc0ab2dcafa4bbbf826ea8fc052878886ab168c783ca32f3bbe",
+          "sha256sum": "779e1fa6cab1abc0ab2dcafa4bbbf826ea8fc052878886ab168c783ca32f3bbe",
+          "size_bytes": 1854184,
+          "generation": 1732117381568969,
+          "output_file": "scroll_m132.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_m132.pftrace-779e1fa6cab1abc0ab2dcafa4bbbf826ea8fc052878886ab168c783ca32f3bbe?generation=1732117381568969",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_m132_with_atrace.pftrace-b1fe189738a4a714cef7dd13b12318c89d6c4345fbe65096b4680ffa79f2872a",
+          "sha256sum": "b1fe189738a4a714cef7dd13b12318c89d6c4345fbe65096b4680ffa79f2872a",
+          "size_bytes": 18887098,
+          "generation": 1730148514067154,
+          "output_file": "scroll_m132_with_atrace.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_m132_with_atrace.pftrace-b1fe189738a4a714cef7dd13b12318c89d6c4345fbe65096b4680ffa79f2872a?generation=1730148514067154",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_m133beta.pftrace-2acc70545be1caeb3fb43218ab52872c2c749b49577b973cb8400057c680fc19",
+          "sha256sum": "2acc70545be1caeb3fb43218ab52872c2c749b49577b973cb8400057c680fc19",
+          "size_bytes": 1448694,
+          "generation": 1738338471679054,
+          "output_file": "scroll_m133beta.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_m133beta.pftrace-2acc70545be1caeb3fb43218ab52872c2c749b49577b973cb8400057c680fc19?generation=1738338471679054",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_with_input_not_forwarded_to_renderer.pftrace-ceb2ff3cb64c99ddb28a29867bc82f1491c4b413bfacd8638551b80936240faf",
+          "sha256sum": "ceb2ff3cb64c99ddb28a29867bc82f1491c4b413bfacd8638551b80936240faf",
+          "size_bytes": 729606,
+          "generation": 1732902685002882,
+          "output_file": "scroll_with_input_not_forwarded_to_renderer.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_with_input_not_forwarded_to_renderer.pftrace-ceb2ff3cb64c99ddb28a29867bc82f1491c4b413bfacd8638551b80936240faf?generation=1732902685002882",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/scroll_m144.pftrace-6a3426ee6a441cf71ec8b634b662fe800700b8c3d2d1e9f247feaba890315843",
+          "sha256sum": "6a3426ee6a441cf71ec8b634b662fe800700b8c3d2d1e9f247feaba890315843",
+          "size_bytes": 4384532,
+          "generation": 1769534965677794,
+          "output_file": "scroll_m144.pftrace",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/scroll_m144.pftrace-6a3426ee6a441cf71ec8b634b662fe800700b8c3d2d1e9f247feaba890315843?generation=1769534965677794",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "test_data/loadline2_phone_perfetto_trace.pb.gz-446e12518282e078360cb1ab55ebb3e3788c3863b269601d2392c9e5d058a92c",
+          "sha256sum": "446e12518282e078360cb1ab55ebb3e3788c3863b269601d2392c9e5d058a92c",
+          "size_bytes": 1214995,
+          "generation": 1763134487216405,
+          "output_file": "loadline2_phone_perfetto_trace.pb.gz",
+          "downloadUrl": "https://storage.googleapis.com/perfetto/test_data/loadline2_phone_perfetto_trace.pb.gz-446e12518282e078360cb1ab55ebb3e3788c3863b269601d2392c9e5d058a92c?generation=1763134487216405",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "dep_type": "gcs",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/subresource-filter-ruleset/data",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-ads-detection",
+      "objects": [
+        {
+          "object_name": "22a0a5fc9e38d0de4e68eaf7e961dbbd2bebf234bebffbcd21bd496c0813fcde",
+          "sha256sum": "22a0a5fc9e38d0de4e68eaf7e961dbbd2bebf234bebffbcd21bd496c0813fcde",
+          "size_bytes": 158519,
+          "generation": 1789431671005402,
+          "output_file": "UnindexedRules",
+          "downloadUrl": "https://storage.googleapis.com/chromium-ads-detection/22a0a5fc9e38d0de4e68eaf7e961dbbd2bebf234bebffbcd21bd496c0813fcde?generation=1789431671005402",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/swift-format",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/swift-format/mac-${arch}",
+          "version": "version:2@505.chromium.1",
+          "resolvedPackage": "infra/3pp/tools/swift-format/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/swift-format/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/swift-toolchain",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/tools/swift-toolchain/mac-amd64",
+          "version": "version:2@5.8-release",
+          "resolvedPackage": "chromium/tools/swift-toolchain/mac-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/tools/swift-toolchain/mac-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/test_fonts/test_fonts",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "gcs",
+      "bucket": "chromium-fonts",
+      "objects": [
+        {
+          "object_name": "9c07d19d9c5ee1ff94f717e6fb17e0c8c354e6f9",
+          "sha256sum": "f0e9628f9e43e3f3476cde06a1849058de460e0e037b7449ce0d42b9a73c37d5",
+          "size_bytes": 33413117,
+          "generation": 1775663926405386,
+          "downloadUrl": "https://storage.googleapis.com/chromium-fonts/9c07d19d9c5ee1ff94f717e6fb17e0c8c354e6f9?generation=1775663926405386",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/typescript/linux-amd64/src",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/typescript/linux-amd64",
+          "version": "version:2@7.0.2",
+          "resolvedPackage": "chromium/third_party/typescript/linux-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/typescript/linux-amd64"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/typescript/mac-arm64/src",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\" and host_cpu == \"arm64\" and non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "dep_type": "cipd",
+      "packages": [
+        {
+          "package": "chromium/third_party/typescript/mac-arm64",
+          "version": "version:2@7.0.2",
+          "resolvedPackage": "chromium/third_party/typescript/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/typescript/mac-arm64"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/tools/skia_goldctl/mac_amd64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "skia/tools/goldctl/mac-amd64",
+          "version": "0uY46ZT5pC0z344dAzMC-uw1lvOILmzOzk7ixbRA2XYC",
+          "resolvedPackage": "skia/tools/goldctl/mac-amd64",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "0uY46ZT5pC0z344dAzMC-uw1lvOILmzOzk7ixbRA2XYC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/skia/tools/goldctl/mac-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/tools/skia_goldctl/mac_arm64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "skia/tools/goldctl/mac-arm64",
+          "version": "qtinrB1vxVUkZFUyxCPslWwaMO9FRH58pRXnuMeIflAC",
+          "resolvedPackage": "skia/tools/goldctl/mac-arm64",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "qtinrB1vxVUkZFUyxCPslWwaMO9FRH58pRXnuMeIflAC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/skia/tools/goldctl/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/tools/resultdb",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "infra/tools/result_adapter/${platform}",
+          "version": "git_revision:5fb3ca203842fd691cab615453f8e5a14302a1d8",
+          "resolvedPackage": "infra/tools/result_adapter/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/tools/result_adapter/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/ui/gl/resources/angle-metal",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac or checkout_ios",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/gpu/angle-metal-shader-libraries",
+          "version": "S0FPOVKrgaiqyuR20SSHiPorLgYez29bfwEdKBobUMMC",
+          "resolvedPackage": "chromium/gpu/angle-metal-shader-libraries",
+          "pinKind": "cipd-instance-id",
+          "instanceId": "S0FPOVKrgaiqyuR20SSHiPorLgYez29bfwEdKBobUMMC",
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/gpu/angle-metal-shader-libraries"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/screen-ai/macos_amd64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/third_party/screen-ai/mac-amd64",
+          "version": "version:153.03",
+          "resolvedPackage": "chromium/third_party/screen-ai/mac-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/screen-ai/mac-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/screen-ai/macos_arm64",
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "condition": "checkout_mac",
+      "inheritedCondition": "checkout_chromium and process_deps",
+      "packages": [
+        {
+          "package": "chromium/third_party/screen-ai/mac-arm64",
+          "version": "version:153.03",
+          "resolvedPackage": "chromium/third_party/screen-ai/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/chromium/third_party/screen-ai/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "builddata",
+      "roleDetail": "Selected test/runtime data or prebuilt support artifact; DEPS selection does not establish that Electron links it.",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/dawn/tools/golang/mac-amd64",
+      "sourceParent": "src/third_party/dawn",
+      "sourceManifest": "https://dawn.googlesource.com/dawn.git/+/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04/DEPS?format=TEXT",
+      "condition": "(checkout_ios or checkout_mac) and non_git_source",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/go/mac-amd64",
+          "version": "version:3@1.26.6",
+          "resolvedPackage": "infra/3pp/tools/go/mac-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/go/mac-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/dawn/tools/golang/mac-arm64",
+      "sourceParent": "src/third_party/dawn",
+      "sourceManifest": "https://dawn.googlesource.com/dawn.git/+/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04/DEPS?format=TEXT",
+      "condition": "(checkout_ios or checkout_mac) and non_git_source",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/go/mac-arm64",
+          "version": "version:3@1.26.6",
+          "resolvedPackage": "infra/3pp/tools/go/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/go/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/dawn/third_party/ninja",
+      "sourceParent": "src/third_party/dawn",
+      "sourceManifest": "https://dawn.googlesource.com/dawn.git/+/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04/DEPS?format=TEXT",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/ninja/${platform}",
+          "version": "version:3@1.12.1.chromium.4",
+          "resolvedPackage": "infra/3pp/tools/ninja/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/ninja/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/openscreen/src/third_party/llvm-build/Release+Asserts",
+      "sourceParent": "src/third_party/openscreen/src",
+      "sourceManifest": "https://chromium.googlesource.com/openscreen/+/a515d3a249e7411fa251a27125815a06a2d73862/DEPS?format=TEXT",
+      "condition": "not llvm_force_head_revision",
+      "dep_type": "gcs",
+      "bucket": "chromium-browser-clang",
+      "objects": [
+        {
+          "object_name": "Mac_arm64/clang-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+          "sha256sum": "b1d5d53f8dba60834fc3287ff53276fbed4273eee6a8f31a1ff7825f91db77c1",
+          "size_bytes": 47539924,
+          "generation": 1789127826521173,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/clang-llvmorg-24-init-7747-g62397f8b-27.tar.xz?generation=1789127826521173",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "Mac_arm64/clang-tidy-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+          "sha256sum": "26ed86e035feb6a3085969aec14b6d8f58fa7db1630aa4315e907c85cdce688f",
+          "size_bytes": 12996816,
+          "generation": 1789127826637982,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\" and checkout_clang_tidy",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/clang-tidy-llvmorg-24-init-7747-g62397f8b-27.tar.xz?generation=1789127826637982",
+          "pinKind": "sha256-and-gcs-generation"
+        },
+        {
+          "object_name": "Mac_arm64/llvmobjdump-llvmorg-24-init-7747-g62397f8b-27.tar.xz",
+          "sha256sum": "f2ea6f562955bbaca69358e83a194ee967886d36f8b5cf18fbae79d99450c4bd",
+          "size_bytes": 5641596,
+          "generation": 1789127826597258,
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+          "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/Mac_arm64/llvmobjdump-llvmorg-24-init-7747-g62397f8b-27.tar.xz?generation=1789127826597258",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/openscreen/src/buildtools/mac_arm64-format",
+      "sourceParent": "src/third_party/openscreen/src/buildtools",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src/buildtools/+/4277578aa9c45906e51ad33cac1a5a7ad5288010/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+      "bucket": "chromium-clang-format",
+      "dep_type": "gcs",
+      "objects": [
+        {
+          "object_name": "945e45cbcb5443c3e569d5e0783fd012154fc4a7",
+          "sha256sum": "a1fb17260eda2971f52ed341501b93703b0fce69ffb43a179b891b66f6f63e5a",
+          "size_bytes": 3245456,
+          "generation": 1779297393605542,
+          "output_file": "clang-format",
+          "downloadUrl": "https://storage.googleapis.com/chromium-clang-format/945e45cbcb5443c3e569d5e0783fd012154fc4a7?generation=1779297393605542",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/devtools-frontend/src/third_party/esbuild",
+      "sourceParent": "src/third_party/devtools-frontend/src",
+      "sourceManifest": "https://chromium.googlesource.com/devtools/devtools-frontend/+/904b77f9fcadfba90bc2d34e370ffeac1e9603d5/DEPS?format=TEXT",
+      "condition": "non_git_source",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/esbuild/${platform}",
+          "version": "version:3@0.28.2.chromium.2",
+          "resolvedPackage": "infra/3pp/tools/esbuild/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/esbuild/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/webpagereplay/buildtools/mac_arm64-format",
+      "sourceParent": "src/third_party/webpagereplay",
+      "sourceManifest": "https://chromium.googlesource.com/webpagereplay.git/+/219ee9a2bb0d0d1440832a0e1d44716833da1ff3/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+      "bucket": "chromium-clang-format",
+      "dep_type": "gcs",
+      "objects": [
+        {
+          "object_name": "8503422f469ae56cc74f0ea2c03f2d872f4a2303",
+          "sha256sum": "dabf93691361e8bd1d07466d67584072ece5c24e2b812c16458b8ff801c33e29",
+          "size_bytes": 3212560,
+          "generation": 1738622390717009,
+          "output_file": "clang-format",
+          "downloadUrl": "https://storage.googleapis.com/chromium-clang-format/8503422f469ae56cc74f0ea2c03f2d872f4a2303?generation=1738622390717009",
+          "pinKind": "sha256-and-gcs-generation"
+        }
+      ],
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/webpagereplay/third_party/golang/mac/x64",
+      "sourceParent": "src/third_party/webpagereplay",
+      "sourceManifest": "https://chromium.googlesource.com/webpagereplay.git/+/219ee9a2bb0d0d1440832a0e1d44716833da1ff3/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\"",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/go/mac-amd64",
+          "version": "version:3@1.26.2",
+          "resolvedPackage": "infra/3pp/tools/go/mac-amd64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/go/mac-amd64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/third_party/webpagereplay/third_party/golang/mac/arm64",
+      "sourceParent": "src/third_party/webpagereplay",
+      "sourceManifest": "https://chromium.googlesource.com/webpagereplay.git/+/219ee9a2bb0d0d1440832a0e1d44716833da1ff3/DEPS?format=TEXT",
+      "condition": "host_os == \"mac\"",
+      "packages": [
+        {
+          "package": "infra/3pp/tools/go/mac-arm64",
+          "version": "version:3@1.26.2",
+          "resolvedPackage": "infra/3pp/tools/go/mac-arm64",
+          "pinKind": "cipd-tag",
+          "instanceId": null,
+          "packagePage": "https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/go/mac-arm64"
+        }
+      ],
+      "dep_type": "cipd",
+      "role": "toolchain",
+      "selectionOrigin": "DEPS"
+    },
+    {
+      "path": "src/electron/build/pgo_profiles/electron-macos-arm64-1794328634-ca26bb46b8.profdata",
+      "role": "builddata",
+      "dep_type": "https",
+      "selectionOrigin": "hook",
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "hook": "electron_pgo_profiles_mac",
+      "stateFile": "src/electron/build/pgo_profiles/macos-arm64.pgo.txt",
+      "stateSourceUrl": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/build/pgo_profiles/macos-arm64.pgo.txt",
+      "downloadUrl": "https://dev-cdn-experimental.electronjs.org/pgo/electron-macos-arm64-1794328634-ca26bb46b8.profdata",
+      "sha256sum": "7cddeca0cec7f035b8f4711bb8c4e852c5411db9fd1315be0fc9ffded90fcc5d",
+      "pinKind": "sha256",
+      "note": "Profile requested by the selected release-build hook."
+    },
+    {
+      "path": "src/electron/build/pgo_profiles/electron-macos-x64-1794328634-ca26bb46b8.profdata",
+      "role": "builddata",
+      "dep_type": "https",
+      "selectionOrigin": "hook",
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "hook": "electron_pgo_profiles_mac",
+      "stateFile": "src/electron/build/pgo_profiles/macos-x64.pgo.txt",
+      "stateSourceUrl": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/build/pgo_profiles/macos-x64.pgo.txt",
+      "downloadUrl": "https://dev-cdn-experimental.electronjs.org/pgo/electron-macos-x64-1794328634-ca26bb46b8.profdata",
+      "sha256sum": "97802bc84f8576da103577402e97c77dade8e51d8fd15bfd6a5beae0ed9bee6f",
+      "pinKind": "sha256",
+      "note": "macos-x64 is retained because the selected mac hook requests both architectures."
+    },
+    {
+      "path": "src/electron/build/pgo_profiles/electron-v8-builtins.profile",
+      "role": "builddata",
+      "dep_type": "https",
+      "selectionOrigin": "hook",
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "hook": "electron_pgo_profiles_v8_builtins",
+      "stateFile": "src/electron/build/pgo_profiles/v8-builtins.pgo.txt",
+      "stateSourceUrl": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/build/pgo_profiles/v8-builtins.pgo.txt",
+      "downloadUrl": "https://dev-cdn-experimental.electronjs.org/pgo/electron-v8-x64-1794324530-ca26bb46b8.profile",
+      "sha256sum": "8407438f09eafcc099dd91020d2f3e3dd82c156895369013cc081df52a47332a",
+      "pinKind": "sha256",
+      "note": "Profile requested by the selected release-build hook."
+    },
+    {
+      "path": "src/tools/clang/dsymutil/bin/dsymutil",
+      "role": "toolchain",
+      "dep_type": "gcs-hook",
+      "selectionOrigin": "hook",
+      "sourceParent": "src",
+      "hook": "dsymutil_mac_arm64",
+      "bucket": "chromium-browser-clang",
+      "object_name": "d72733d9365a8c75966b524a739bccb23151a021",
+      "sha1sum": "d72733d9365a8c75966b524a739bccb23151a021",
+      "downloadUrl": "https://storage.googleapis.com/chromium-browser-clang/d72733d9365a8c75966b524a739bccb23151a021",
+      "pinKind": "sha1",
+      "stateSourceUrl": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/tools/clang/dsymutil/bin/dsymutil.arm64.sha1?format=TEXT"
+    },
+    {
+      "path": "src/build/mac_files/xcode_binaries",
+      "role": "toolchain",
+      "dep_type": "cipd-hook",
+      "selectionOrigin": "hook",
+      "sourceParent": "src",
+      "hook": "mac_toolchain",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/build/mac_toolchain.py?format=TEXT",
+      "package": "infra_internal/ios/xcode/xcode_binaries/mac-amd64",
+      "instanceId": "c5txl4HTukDs4xiCybqz3zK9jxr4N4PwzHRNOhjBDOQC",
+      "pinKind": "cipd-instance-id",
+      "status": "not-acquired; recipe/environment and authenticated package access unverified",
+      "note": "The fixed script names this universal Xcode/SDK/Metal toolchain even on arm64. Do not replace it with an invented mac-arm64 package. Local SDK/build-recipe requirements remain separate."
+    },
+    {
+      "path": "src/.vpython-environment",
+      "role": "toolchain",
+      "dep_type": "python-packages",
+      "selectionOrigin": "hook",
+      "sourceParent": "src",
+      "hook": "vpython3_common",
+      "manifestPath": "src/vpython.toml",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/vpython.toml?format=TEXT",
+      "status": "package closure not expanded",
+      "note": "Use the checked-in hashed uv lock (requires-python >=3.11,<3.12). The spec contains conditional and open constraints, but its companion lock supplies concrete versions/hashes. Wheel payloads/platform resolution were not acquired or expanded; no git sources occur in the lock.",
+      "lockPath": "src/vpython.toml.uv.lock",
+      "lockSourceUrl": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/vpython.toml.uv.lock?format=TEXT",
+      "lockSha256": "b074d0fb733bbe31f11eccbc2ec88d90307a2382efa8bb54ae010624758c7249"
+    },
+    {
+      "path": "src/electron/node_modules",
+      "role": "source",
+      "dep_type": "npm-packages",
+      "selectionOrigin": "hook",
+      "sourceParent": "src/electron",
+      "hook": "electron_npm_deps",
+      "manifestPaths": [
+        "src/electron/package.json",
+        "src/electron/yarn.lock"
+      ],
+      "sourceUrls": [
+        "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/package.json",
+        "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/yarn.lock"
+      ],
+      "status": "package tarball closure not expanded",
+      "note": "Selected hook runs vendored Yarn 4.18.0 install --immutable. Preserve yarn.lock checksums. No git-backed resolutions were found in this root yarn.lock; NPM package payloads/install-time artifacts remain separate."
+    }
+  ],
+  "patchApplication": {
+    "configPath": "src/electron/patches/config.json",
+    "sourceUrl": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/patches/config.json",
+    "orderedRepositories": [
+      {
+        "patch_dir": "src/electron/patches/chromium",
+        "repo": "src"
+      },
+      {
+        "patch_dir": "src/electron/patches/boringssl",
+        "repo": "src/third_party/boringssl/src"
+      },
+      {
+        "patch_dir": "src/electron/patches/ffmpeg",
+        "repo": "src/third_party/ffmpeg"
+      },
+      {
+        "patch_dir": "src/electron/patches/v8",
+        "repo": "src/v8"
+      },
+      {
+        "patch_dir": "src/electron/patches/node",
+        "repo": "src/third_party/electron_node"
+      },
+      {
+        "patch_dir": "src/electron/patches/nan",
+        "repo": "src/third_party/nan"
+      },
+      {
+        "patch_dir": "src/electron/patches/libaddressinput",
+        "repo": "src/third_party/libaddressinput/src"
+      },
+      {
+        "patch_dir": "src/electron/patches/perfetto",
+        "repo": "src/third_party/perfetto"
+      },
+      {
+        "patch_dir": "src/electron/patches/squirrel.mac",
+        "repo": "src/third_party/squirrel.mac"
+      },
+      {
+        "patch_dir": "src/electron/patches/ReactiveObjC",
+        "repo": "src/third_party/squirrel.mac/vendor/ReactiveObjC"
+      },
+      {
+        "patch_dir": "src/electron/patches/webrtc",
+        "repo": "src/third_party/webrtc"
+      },
+      {
+        "patch_dir": "src/electron/patches/sqlite",
+        "repo": "src/third_party/sqlite/src"
+      },
+      {
+        "patch_dir": "src/electron/patches/skia",
+        "repo": "src/third_party/skia"
+      },
+      {
+        "patch_dir": "src/electron/patches/angle",
+        "repo": "src/third_party/angle"
+      },
+      {
+        "patch_dir": "src/electron/patches/pdfium",
+        "repo": "src/third_party/pdfium"
+      },
+      {
+        "patch_dir": "src/electron/patches/dawn",
+        "repo": "src/third_party/dawn"
+      },
+      {
+        "patch_dir": "src/electron/patches/minigbm",
+        "repo": "src/third_party/minigbm/src"
+      }
+    ],
+    "dependencyNamedFilesChangedByPatches": [
+      {
+        "patch": "patches/chromium/cherry-pick-6d0582d26423.patch",
+        "file": "components/permissions/DEPS"
+      },
+      {
+        "patch": "patches/chromium/revert_oscrypt_remove_sync_backend.patch",
+        "file": "components/os_crypt/sync/DEPS"
+      }
+    ],
+    "note": "Preserve Electron patch queues and order. Observed DEPS patch changes affect include-rule files only, not any selected download manifest."
+  },
+  "selectedHooks": [
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "pre_deps_hooks",
+      "workingDirectory": ".",
+      "name": "generate_mtime_cache",
+      "condition": "(checkout_chromium and apply_patches and use_mtime_cache) and process_deps",
+      "pattern": "src/electron",
+      "action": [
+        "python3",
+        "src/electron/script/patches-mtime-cache.py",
+        "generate",
+        "--cache-file",
+        "src/electron/patches/mtime-cache.json",
+        "--patches-config",
+        "src/electron/patches/config.json"
+      ]
+    },
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "patch_chromium",
+      "condition": "(checkout_chromium and apply_patches) and process_deps",
+      "pattern": "src/electron",
+      "action": [
+        "python3",
+        "src/electron/script/apply_all_patches.py",
+        "src/electron/patches/config.json"
+      ]
+    },
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "apply_mtime_cache",
+      "condition": "(checkout_chromium and apply_patches and use_mtime_cache) and process_deps",
+      "pattern": "src/electron",
+      "action": [
+        "python3",
+        "src/electron/script/patches-mtime-cache.py",
+        "apply",
+        "--cache-file",
+        "src/electron/patches/mtime-cache.json"
+      ]
+    },
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "electron_npm_deps",
+      "pattern": "src/electron/package.json",
+      "action": [
+        "python3",
+        "-c",
+        "import os, subprocess; os.chdir(os.path.join(\"src\", \"electron\")); subprocess.check_call([\"node\", \".yarn/releases/yarn-4.18.0.cjs\", \"install\", \"--immutable\"]);"
+      ]
+    },
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "gen_siso_revision",
+      "condition": "checkout_chromium and process_deps",
+      "pattern": "src/electron",
+      "action": [
+        "node",
+        "src/electron/script/gen-siso-revision.js"
+      ]
+    },
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "electron_pgo_profiles_mac",
+      "pattern": "src/electron/build/pgo_profiles",
+      "condition": "checkout_mac and process_deps",
+      "action": [
+        "python3",
+        "src/electron/script/pgo/download-profiles.py",
+        "--targets",
+        "macos-x64,macos-arm64"
+      ]
+    },
+    {
+      "sourceParent": "src/electron",
+      "sourceManifest": "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/DEPS",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "electron_pgo_profiles_v8_builtins",
+      "pattern": "src/electron/build/pgo_profiles",
+      "condition": "process_deps",
+      "action": [
+        "python3",
+        "src/electron/script/pgo/download-profiles.py",
+        "--targets",
+        "v8-builtins"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "vpython3_common",
+      "pattern": ".",
+      "action": [
+        "vpython3",
+        "-vpython-spec",
+        "src/vpython.toml",
+        "-vpython-tool",
+        "install"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "landmines",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/landmines.py"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "disable_depot_tools_selfupdate",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/third_party/depot_tools/update_depot_tools_toggle.py",
+        "--disable"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "remove_stale_files",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/tools/remove_stale_files.py",
+        "src/third_party/test_fonts/test_fonts.tar.gz",
+        "src/third_party/node/node_modules.tar.gz",
+        "src/third_party/tfhub_models",
+        "src/tools/clang/crashreports"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "remove_stale_pyc_files",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/tools/remove_stale_pyc_files.py",
+        "src/android_webview/tools",
+        "src/build/android",
+        "src/gpu/gles2_conform_support",
+        "src/infra",
+        "src/ppapi",
+        "src/printing",
+        "src/third_party/blink/renderer/build/scripts",
+        "src/third_party/blink/tools",
+        "src/third_party/catapult",
+        "src/third_party/mako",
+        "src/tools"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "mac_toolchain",
+      "pattern": ".",
+      "condition": "checkout_mac or checkout_ios",
+      "action": [
+        "python3",
+        "src/build/mac_toolchain.py"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "lastchange",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/util/lastchange.py",
+        "-o",
+        "src/build/util/LASTCHANGE"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "gpu_lists_version",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/util/lastchange.py",
+        "-m",
+        "GPU_LISTS_VERSION",
+        "--revision-id-only",
+        "--header",
+        "src/gpu/config/gpu_lists_version.h"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "lastchange_skia",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/util/lastchange.py",
+        "-m",
+        "SKIA_COMMIT_HASH",
+        "-s",
+        "src/third_party/skia",
+        "--header",
+        "src/skia/ext/skia_commit_hash.h"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "lastchange_dawn",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/util/lastchange.py",
+        "-m",
+        "DAWN_COMMIT_HASH",
+        "-s",
+        "src/third_party/dawn",
+        "--revision",
+        "src/gpu/webgpu/DAWN_VERSION",
+        "--header",
+        "src/gpu/webgpu/dawn_commit_hash.h"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "dsymutil_mac_arm64",
+      "pattern": ".",
+      "condition": "host_os == \"mac\" and host_cpu == \"arm64\"",
+      "action": [
+        "python3",
+        "src/third_party/depot_tools/download_from_google_storage.py",
+        "--no_resume",
+        "--bucket",
+        "chromium-browser-clang",
+        "-s",
+        "src/tools/clang/dsymutil/bin/dsymutil.arm64.sha1",
+        "-o",
+        "src/tools/clang/dsymutil/bin/dsymutil"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "configure_reclient_cfgs",
+      "pattern": ".",
+      "condition": "not download_remoteexec_cfg",
+      "action": [
+        "python3",
+        "src/buildtools/reclient_cfgs/configure_reclient_cfgs.py",
+        "--rbe_instance",
+        "projects/rbe-chrome-untrusted/instances/default_instance",
+        "--reproxy_cfg_template",
+        "reproxy.cfg.template",
+        "--rewrapper_cfg_project",
+        "",
+        "--skip_remoteexec_cfg_fetch",
+        "--quiet"
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "configure_siso",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/config/siso/configure_siso.py",
+        "--rbe_instance",
+        "projects/rbe-chrome-untrusted/instances/default_instance",
+        "--reapi_instance",
+        "",
+        "--reapi_address",
+        "",
+        "--reapi_backend_config_path",
+        "",
+        "--credential-helper",
+        ""
+      ]
+    },
+    {
+      "sourceParent": "src",
+      "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+      "kind": "hooks",
+      "workingDirectory": ".",
+      "name": "tast_control",
+      "pattern": ".",
+      "action": [
+        "python3",
+        "src/build/util/tast_control.py",
+        "-o",
+        "src/chromeos/tast_control.gni",
+        "-t",
+        "src/chromeos/tast_control.gni.template",
+        "-i",
+        "src/chromeos/tast_control_disabled_tests.txt",
+        "--input-public",
+        "src/chromeos/tast_control_disabled_tests_public_builders.txt",
+        "-f",
+        "src/chromeos/tast_control_flaky_tests.txt"
+      ]
+    }
+  ],
+  "cipd": [
+    {
+      "package": "gn/gn/mac-arm64",
+      "version": "git_revision:510ec7992c30f172205792f190e96111a896ba8f",
+      "instanceId": "pt5SZX89AaBzsAqpHbUS-F066dKywK1GlJzaToIE9ioC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "a6de52657f3d01a073b00aa91db512f85d3ae9d2b2c0ad46949cda4e8204f62a"
+      },
+      "declarations": [
+        {
+          "path": "src/buildtools/mac",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "host_os == \"mac\"",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "local-build-tool",
+        "detail": "Pinned GN generator, needed before compiling any target.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/httpd-php/mac-amd64",
+      "version": "version:2@httpd2.4.38.php7.3.31.chromium.3",
+      "instanceId": "Eu8P7C8ZAybaPphLWwK2feNK8cTEAhQfYI6M9i3E7JcC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "12ef0fec2f190326da3e984b5b02b67de34af1c4c402141f608e8cf62dc4ec97"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/apache-mac",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac or checkout_ios",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-server-tool",
+        "detail": "Web test server; not a prerequisite of the bounded electron/ffmpeg target list.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/httpd-php/mac-arm64",
+      "version": "version:2@httpd2.4.38.php7.3.31.chromium.3",
+      "instanceId": "SHR7sSVFDk9lgPj83FZ7ks8lMtfu1F4nPzW7FKwI20wC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "48747bb125450e4f6580f8fcdc567b92cf2532d7eed45e273f35bb14ac08db4c"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/apache-mac-arm64",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac or checkout_ios",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-server-tool",
+        "detail": "Web test server; not a prerequisite of the bounded electron/ffmpeg target list.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/updater/chrome_mac_universal",
+      "version": "version:2@156.0.8067.0",
+      "instanceId": "8fBSldTqMhzPQgESICxjVPRxYLX2FpQjZfHD5DOaQhYC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "f1f05295d4ea321ccf420112202c6354f47160b5f616942365f1c3e4339a4216"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/updater/chrome_mac_universal/cipd",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "builddata"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-payload-excluded",
+        "detail": "Fixed BUILD.gn target is testonly; metadata resolved only, payload must not be acquired or redistributed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/updater/chrome_mac_universal_prod",
+      "version": "version:2@152.0.7933.0",
+      "instanceId": "szWSOtT9y-pol4d1xOqUM7Fv-eEPK90WgozapzBboMEC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "b335923ad4fdcbea68978775c4ea9433b16ff9e10f2bdd16828cdaa7305ba0c1"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/updater/chrome_mac_universal_prod/cipd",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "builddata"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-payload-excluded",
+        "detail": "Fixed BUILD.gn target is testonly; metadata resolved only, payload must not be acquired or redistributed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/updater/chromium_mac_amd64",
+      "version": "version:2@1701051",
+      "instanceId": "RXB9UDarDToSEz4HTGJkii0qKGqvw3ksA58V8Z9U8NsC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "45707d5036ab0d3a12133e074c62648a2d2a286aafc3792c039f15f19f54f0db"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/updater/chromium_mac_amd64/cipd",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "builddata"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-payload-excluded",
+        "detail": "Fixed BUILD.gn target is testonly; metadata resolved only, payload must not be acquired or redistributed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/updater/chromium_mac_arm64",
+      "version": "version:2@1701045",
+      "instanceId": "SUd5G0wTXIlN_GUy_u_90EiuVyvWgL2ceodZTj8bjSwC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "4947791b4c135c894dfc6532feeffdd048ae572bd680bd9c7a87594e3f1b8d2c"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/updater/chromium_mac_arm64/cipd",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "builddata"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-payload-excluded",
+        "detail": "Fixed BUILD.gn target is testonly; metadata resolved only, payload must not be acquired or redistributed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/tools/luci/cas/mac-arm64",
+      "version": "git_revision:b5ab8c6e7688d99a5702022cfaa95e9f8ce464f2",
+      "instanceId": "qSMntHLU1CNujLV3MT0C0rRO8gTQapK_5zED3434Od4C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "a92327b472d4d4236e8cb577313d02d2b44ef204d06a92bfe73103df8df839de"
+      },
+      "declarations": [
+        {
+          "path": "src/tools/luci-go",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "ci-test-infrastructure-tool",
+        "detail": "LUCI/result tooling retained by conservative DEPS inventory; not required for local compilation/relinking target list.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/tools/luci/isolate/mac-arm64",
+      "version": "git_revision:b5ab8c6e7688d99a5702022cfaa95e9f8ce464f2",
+      "instanceId": "oaxlFa2uvnxI6qdyShkqLyEEsDhrMydArOzJ_RyWtdoC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "a1ac6515adaebe7c48eaa7724a192a2f2104b0386b332740acecc9fd1c96b5da"
+      },
+      "declarations": [
+        {
+          "path": "src/tools/luci-go",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "ci-test-infrastructure-tool",
+        "detail": "LUCI/result tooling retained by conservative DEPS inventory; not required for local compilation/relinking target list.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/tools/luci/swarming/mac-arm64",
+      "version": "git_revision:b5ab8c6e7688d99a5702022cfaa95e9f8ce464f2",
+      "instanceId": "ohXdtTx62kNNmfpJlgU4fx7q_r22xPBHUdc5H2X5zSEC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "a215ddb53c7ada434d99fa499605387f1eeafebdb6c4f04751d7391f65f9cd21"
+      },
+      "declarations": [
+        {
+          "path": "src/tools/luci-go",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "ci-test-infrastructure-tool",
+        "detail": "LUCI/result tooling retained by conservative DEPS inventory; not required for local compilation/relinking target list.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/cpython3/linux-amd64",
+      "version": "version:3@3.11.9.chromium.38",
+      "instanceId": "t7igptFxuJGP2lGu4db_6wyKFMeR-x0LxddFTIydlJsC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "b7b8a0a6d171b8918fda51aee1d6ffeb0c8a14c791fb1d0bc5d7454c8c9d949b"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/cpython3/linux-amd64",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "remote-build-tool",
+        "detail": "DEPS-retained Linux tool, not local macOS executable prerequisite.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/cpython3/mac-arm64",
+      "version": "version:3@3.11.9.chromium.38",
+      "instanceId": "z6bO4Z5kwtk0uh9oxGXOd5O7LyZDAnmlO-e86nZLRiEC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "cfa6cee19e64c2d934ba1f68c465ce7793bb2f26430279a53be7bcea764b4621"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/cpython3/host",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "host-python-tool",
+        "detail": "Pinned public Python 3.11.9; vpython lock requires Python >=3.11,<3.12.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/ninja/mac-arm64",
+      "version": "version:3@1.12.1.chromium.4",
+      "instanceId": "xem0_6s7Lt77xBhJ_IHxFsjQR7JYkGvswGG-nsrwSv0C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "c5e9b4ffab3b2edefbc41849fc81f116c8d047b258906becc061be9ecaf04afd"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/ninja",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        },
+        {
+          "path": "src/third_party/dawn/third_party/ninja",
+          "sourceParent": "src/third_party/dawn",
+          "sourceManifest": "https://dawn.googlesource.com/dawn.git/+/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04/DEPS?format=TEXT",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "local-build-executor",
+        "detail": "Use for bounded local build with use_siso=false; duplicate declaration shares this instance.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "build/siso/mac-arm64",
+      "version": "git_revision:c574896b272b40aac6e44c228ee0b471ea7e3d7d",
+      "instanceId": "CG2WefKwsr5qF6CeCCHuavTSzHvfrpnlHtbAUWB8rLEC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "086d9679f2b0b2be6a17a09e0821ee6af4d2cc7bdfae99e51ed6c051607cacb1"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/siso/cipd",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "alternative-build-executor",
+        "detail": "Public upstream Siso; unnecessary for explicit Ninja route. Electron CI separately builds this revision with checked-in Siso patches.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/swift-format/mac-arm64",
+      "version": "version:2@505.chromium.1",
+      "instanceId": "-Erm8SuaIiB_ErZXLgHq_3RGIqWA09xbafZgvCOVgSUC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "f84ae6f12b9a22207f12b6572e01eaff744622a580d3dc5b69f660bc23958125"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/swift-format",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "host_os == mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "formatting-tool",
+        "detail": "Formatting tool, unnecessary for compilation/relinking.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/tools/swift-toolchain/mac-amd64",
+      "version": "version:2@5.8-release",
+      "instanceId": "n44SQgyPtxkYi3uHz82WkHUrFTmgjqxT7apUyEAj4m0C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "9f8e12420c8fb719188b7b87cfcd9690752b1539a08eac53edaa54c84023e26d"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/swift-toolchain",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "host_os == mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "ios-only-toolchain",
+        "detail": "build/toolchain/apple/toolchain.gni restricts hermetic Swift choice to iOS; native Mac uses selected Xcode tools if Swift needed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/typescript/linux-amd64",
+      "version": "version:2@7.0.2",
+      "instanceId": "hIyBmNWGJz0M1vIcZtUlEMJ73s0DlU2azFoMlYlKCnEC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "848c8198d586273d0cd6f21c66d52510c27bdecd03954d9acc5a0c95894a0a71"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/typescript/linux-amd64/src",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "remote-build-tool",
+        "detail": "Retained by DEPS but local native macOS type compiler is selected with remote execution disabled; do not execute Linux package on host.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/typescript/mac-arm64",
+      "version": "version:2@7.0.2",
+      "instanceId": "63sEajfB6_MIU0PehstKopK1_P_yfUm21-o-zedkrz0C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "eb7b046a37c1ebf3085343de86cb4aa292b5fcfff27d49b6d7ea3ecde764af3d"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/typescript/mac-arm64/src",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "host_os == \"mac\" and host_cpu == \"arm64\" and non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "native-type-compiler",
+        "detail": "Native TypeScript 7.0.2 used by Chromium/DevTools; Electron also locks separate npm TypeScript 7.0.2 with native Darwin arm64 optional package.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/tools/result_adapter/mac-arm64",
+      "version": "git_revision:5fb3ca203842fd691cab615453f8e5a14302a1d8",
+      "instanceId": "UY2dOJAakoXf_MWODwoCVYoSoAw74W46X0CCs3ES6l0C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "518d9d38901a9285dffcc58e0f0a02558a12a00c3be16e3a5f4082b37112ea5d"
+      },
+      "declarations": [
+        {
+          "path": "src/tools/resultdb",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "ci-test-infrastructure-tool",
+        "detail": "LUCI/result tooling retained by conservative DEPS inventory; not required for local compilation/relinking target list.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/screen-ai/mac-amd64",
+      "version": "version:153.03",
+      "instanceId": "j1fwQ5IZ6LdBSTWgDxgQflyl_Az6EwIXS5pjOw9Do1AC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "8f57f0439219e8b7414935a00f18107e5ca5fc0cfa1302174b9a633b0f43a350"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/screen-ai/macos_amd64",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "builddata"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-payload-excluded",
+        "detail": "Fixed BUILD.gn target is testonly; metadata resolved only, payload must not be acquired or redistributed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "chromium/third_party/screen-ai/mac-arm64",
+      "version": "version:153.03",
+      "instanceId": "P78NWFOz8Gdri_NwYTpnFg738Y-SN7K0HXsHCn41DvQC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "3fbf0d5853b3f0676b8bf370613a67160ef7f18f9237b2b41d7b070a7e350ef4"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/screen-ai/macos_arm64",
+          "sourceParent": "src",
+          "sourceManifest": "https://chromium.googlesource.com/chromium/src.git/+/2ad9b7f5a86846e0b264090723a6a78964bb84c4/DEPS?format=TEXT",
+          "condition": "checkout_mac",
+          "inheritedCondition": "checkout_chromium and process_deps",
+          "role": "builddata"
+        }
+      ],
+      "buildClassification": {
+        "role": "test-payload-excluded",
+        "detail": "Fixed BUILD.gn target is testonly; metadata resolved only, payload must not be acquired or redistributed.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/go/mac-amd64",
+      "version": "version:3@1.26.6",
+      "instanceId": "gmIDpM_WPwPcd-_j_qFgQF5KV_5GpxTYola19F7pIY8C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "826203a4cfd63f03dc77efe3fea160405e4a57fe46a714d8a256b5f45ee9218f"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/dawn/tools/golang/mac-amd64",
+          "sourceParent": "src/third_party/dawn",
+          "sourceManifest": "https://dawn.googlesource.com/dawn.git/+/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04/DEPS?format=TEXT",
+          "condition": "(checkout_ios or checkout_mac) and non_git_source",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "conditional-generator-tool",
+        "detail": "Dawn/WebPageReplay generator support; necessity depends on exact target graph. Neither is the Siso source-build prerequisite (its go.mod requests 1.26.8).",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/go/mac-arm64",
+      "version": "version:3@1.26.6",
+      "instanceId": "GV753evfC30xSfiiI6ycB66mmNJupBAGnkcJo8F_mn4C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "195ef9ddebdf0b7d3149f8a223ac9c07aea698d26ea410069e4709a3c17f9a7e"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/dawn/tools/golang/mac-arm64",
+          "sourceParent": "src/third_party/dawn",
+          "sourceManifest": "https://dawn.googlesource.com/dawn.git/+/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04/DEPS?format=TEXT",
+          "condition": "(checkout_ios or checkout_mac) and non_git_source",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "conditional-generator-tool",
+        "detail": "Dawn/WebPageReplay generator support; necessity depends on exact target graph. Neither is the Siso source-build prerequisite (its go.mod requests 1.26.8).",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/esbuild/mac-arm64",
+      "version": "version:3@0.28.2.chromium.2",
+      "instanceId": "faF4X_ujxOEXHoLYZqpZRoN8oCfc6QYhuK1EObbgNBkC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "7da1785ffba3c4e1171e82d866aa5946837ca027dce90621b8ad4439b6e03419"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/devtools-frontend/src/third_party/esbuild",
+          "sourceParent": "src/third_party/devtools-frontend/src",
+          "sourceManifest": "https://chromium.googlesource.com/devtools/devtools-frontend/+/904b77f9fcadfba90bc2d34e370ffeac1e9603d5/DEPS?format=TEXT",
+          "condition": "non_git_source",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "devtools-build-tool",
+        "detail": "DevTools scripts/build/esbuild.js explicitly selects third_party/esbuild/esbuild; needed when building bundled DevTools resources.",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/go/mac-amd64",
+      "version": "version:3@1.26.2",
+      "instanceId": "v3TpiPsA1GhFqd-h0qV9Jq86lLtBIrL94hMsUM8krT4C",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "bf74e988fb00d46845a9dfa1d2a57d26af3a94bb4122b2fde2132c50cf24ad3e"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/webpagereplay/third_party/golang/mac/x64",
+          "sourceParent": "src/third_party/webpagereplay",
+          "sourceManifest": "https://chromium.googlesource.com/webpagereplay.git/+/219ee9a2bb0d0d1440832a0e1d44716833da1ff3/DEPS?format=TEXT",
+          "condition": "host_os == \"mac\"",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "conditional-generator-tool",
+        "detail": "Dawn/WebPageReplay generator support; necessity depends on exact target graph. Neither is the Siso source-build prerequisite (its go.mod requests 1.26.8).",
+        "electronShippedComponentEstablished": false
+      }
+    },
+    {
+      "package": "infra/3pp/tools/go/mac-arm64",
+      "version": "version:3@1.26.2",
+      "instanceId": "Vhas_H96K3CWyrj1QV9lbfAO5umBBVxe-RP_dspayfYC",
+      "objectRef": {
+        "hashAlgo": "SHA256",
+        "hexDigest": "5616acfc7f7a2b7096cab8f5415f656df00ee6e981055c5ef913ff76ca5ac9f6"
+      },
+      "declarations": [
+        {
+          "path": "src/third_party/webpagereplay/third_party/golang/mac/arm64",
+          "sourceParent": "src/third_party/webpagereplay",
+          "sourceManifest": "https://chromium.googlesource.com/webpagereplay.git/+/219ee9a2bb0d0d1440832a0e1d44716833da1ff3/DEPS?format=TEXT",
+          "condition": "host_os == \"mac\"",
+          "role": "toolchain"
+        }
+      ],
+      "buildClassification": {
+        "role": "conditional-generator-tool",
+        "detail": "Dawn/WebPageReplay generator support; necessity depends on exact target graph. Neither is the Siso source-build prerequisite (its go.mod requests 1.26.8).",
+        "electronShippedComponentEstablished": false
+      }
+    }
+  ]
+}

@@ -6,15 +6,19 @@ This recipe targets Electron **45.3.1**, Chromium **156.0.8078.96**, on macOS AR
 
 Preserve the complete source archive set, source placement manifest, checksums and Electron's ordered patch queues together. The Chromium root archive includes Blink, Mozilla-derived URL/NSPR source, Chromium's Opus integration and vendored Symphonia crates. Separate source archives populate the DEPS git checkouts. The Electron Yarn cache and Chromium's packaged JavaScript dependencies accompany their original locks and configuration.
 
+The external tool pins are listed in [build-inputs.json](build-inputs.json). In particular GN is `pt5SZX89AaBzsAqpHbUS-F066dKywK1GlJzaToIE9ioC`, Ninja is `xem0_6s7Lt77xBhJ_IHxFsjQR7JYkGvswGG-nsrwSv0C`, Chromium Clang is `llvmorg-24-init-7747-g62397f8b-53`, and Rust is `1edd55dcfcd573872c727fa3e086369a71661ee0-2`. Preserve `vpython.toml.uv.lock` for the Python build environment, not only its broader version constraints. Chromium/DevTools additionally use pinned native Node, TypeScript and esbuild tools; Electron's Yarn cache includes its separate native TypeScript/Rolldown dependencies. These external build prerequisites must be installed through the pinned upstream mechanisms before compilation.
+
 Use a machine with enough free disk space for a full Chromium/Electron checkout and build; the compressed download size is not an estimate of build space. Install a compatible Apple Xcode/SDK through Apple's normal process and accept its terms yourself. Node.js >=22.18.0, Python 3.11, Git and Chromium's depot_tools are build prerequisites. Alpi's installer does not install or accept SDK licenses.
 
 The pinned manifests also describe compilers, GN, Ninja/Siso, language runtimes and test tools fetched upstream. These tool prerequisites are separate from source for the application and linked libraries. Source availability does not imply that proprietary test artifacts or Apple's SDK may be redistributed. Do not acquire a private Google Xcode package or authenticate as a Googler to follow this recipe.
 
 ## Pinned upstream reconstruction
 
-The canonical upstream workflow reconstructs Git metadata and generates the configuration files consumed by the build. Use a new directory, never Alpi's application-data or VM directories. With depot_tools available on PATH:
+The canonical upstream workflow reconstructs Git metadata and generates the configuration files consumed by the build. Use a new directory, never Alpi's application-data or VM directories. Use depot_tools revision `a07c06fe67a1a9d64ac4728df3a11c1ceb0cf73e` from the source set and disable its automatic updates (`DEPOT_TOOLS_UPDATE=0`). Leave `FORCE_MAC_TOOLCHAIN` **unset**; setting it to the string `0` still selects the private toolchain path. With depot_tools available on PATH:
 
 ```sh
+unset FORCE_MAC_TOOLCHAIN
+export DEPOT_TOOLS_UPDATE=0
 mkdir electron-alpi-rebuild
 cd electron-alpi-rebuild
 gclient config --name src/electron --unmanaged https://github.com/electron/electron
@@ -45,14 +49,14 @@ For the Electron JavaScript dependencies, the acquired cache was produced with i
 In `src`:
 
 ```sh
-gn gen out/Release --args='import("//electron/build/args/release.gn") target_cpu="arm64" is_debug=false override_electron_version="45.3.1" chrome_pgo_phase=0 v8_builtins_profiling_log_file="" use_remoteexec=false'
+./buildtools/mac/gn gen out/Release --args='import("//electron/build/args/release.gn") target_os="mac" target_cpu="arm64" is_debug=false override_electron_version="45.3.1" use_system_xcode=true use_siso=false use_remoteexec=false use_reclient=false chrome_pgo_phase=0 v8_builtins_profiling_log_file="" enable_dsyms=false'
 # FFmpeg only:
-ninja -C out/Release ffmpeg
+./third_party/ninja/ninja -C out/Release ffmpeg
 # Complete runtime, including the framework containing Blink:
-ninja -C out/Release electron:electron_dist_zip
+./third_party/ninja/ninja -C out/Release electron:electron_dist_zip
 ```
 
-`chrome_pgo_phase=0` disables C++ PGO; the empty builtins profile path disables that V8 profile input. These are replacement-build settings, not the official release-training configuration. The original settings, profile identifiers and download scripts remain in Electron's source. No bit-identical or performance-equivalent result is claimed.
+`use_system_xcode=true` selects an already installed full Apple Xcode SDK, while the pinned Chromium Clang remains the compiler. `use_siso=false` selects local Ninja, and remote execution is disabled. `enable_dsyms=false` avoids the separate dSYM tool input. `chrome_pgo_phase=0` disables C++ PGO; the empty builtins profile path disables that V8 profile input. These are replacement-build settings, not the official release-training configuration. The original settings, profile identifiers and download scripts remain in Electron's source. No bit-identical or performance-equivalent result is claimed.
 
 Modify the relevant library source before rebuilding. For Blink, replace the complete matching framework/resources or use the complete rebuilt Electron shell with Alpi's application source. A stripped original Electron Framework does not provide the objects needed to relink a modified Blink.
 

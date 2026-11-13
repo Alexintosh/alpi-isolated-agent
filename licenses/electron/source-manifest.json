@@ -1,0 +1,2117 @@
+{
+  "version": 1,
+  "alpi": "0.1.0-alpha.2",
+  "electron": "45.3.1",
+  "chromium": "156.0.8078.96",
+  "target": "darwin-arm64",
+  "sourceScope": "Complete selected Git source placements, three Chromium GCS JavaScript source sets and the immutable Electron Yarn build-package cache (including native tool packages). Toolchains/Apple SDK are prerequisites, not redistributed here. No complete compilation or modified-library execution claimed.",
+  "rebuildInstructions": "https://github.com/Alexintosh/alpi-isolated-agent/blob/v0.1.0-alpha.2/licenses/electron/REBUILD.md",
+  "assets": [
+    {
+      "name": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "bytes": 1799997440,
+      "sha256": "2403488acc819bd129d7aab427134f2d050cafb4808ce1e75aa90b0fd36c53f6"
+    },
+    {
+      "name": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "bytes": 1799987200,
+      "sha256": "9f3341b584df06ba5ba2835e6c8d10698a135cb63d6ee7ae52da2bd7ef78560d"
+    },
+    {
+      "name": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "bytes": 1314867200,
+      "sha256": "f66e814ea8d1fe909f7142aa8eb6efa196bd87883b350208dda9c5ef8c2665fa"
+    }
+  ],
+  "sources": [
+    {
+      "url": "https://chromium.googlesource.com/chromium/src.git",
+      "revision": "2ad9b7f5a86846e0b264090723a6a78964bb84c4",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/src.git/+archive/2ad9b7f5a86846e0b264090723a6a78964bb84c4.tar.gz",
+      "placements": [
+        "src"
+      ],
+      "bytes": 1482792268,
+      "sha256": "f2b8559b3665512cb61fa8f904cd8af59b641c3f08c1872d3e56bb65680af7c2",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "member": "archives/chromium-156.0.8078.96.googlesource.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/agents.git",
+      "revision": "865684c4f7092e4ab05adcd3fcf068672ff28d27",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/agents.git/+archive/865684c4f7092e4ab05adcd3fcf068672ff28d27.tar.gz",
+      "placements": [
+        "src/agents/shared"
+      ],
+      "bytes": 50342,
+      "sha256": "57a016e802b1266b58ed713820df034bbb763b9a791ec2c9b3b71ccfa66e17ce",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0b4281826d69a866.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/canvas_bench.git",
+      "revision": "a7b40ea5ae0239517d78845a5fc9b12976bfc732",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/canvas_bench.git/+archive/a7b40ea5ae0239517d78845a5fc9b12976bfc732.tar.gz",
+      "placements": [
+        "src/chrome/test/data/perf/canvas_bench"
+      ],
+      "bytes": 19486363,
+      "sha256": "09c2cdfba3dd5722483e32748de6d8fe9203f0f955cbf17a95d55a1c16b92481",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/7a874f3d45b37d96.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/frame_rate/content.git",
+      "revision": "c10272c88463efeef6bb19c9ec07c42bc8fe22b9",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/frame_rate/content.git/+archive/c10272c88463efeef6bb19c9ec07c42bc8fe22b9.tar.gz",
+      "placements": [
+        "src/chrome/test/data/perf/frame_rate/content"
+      ],
+      "bytes": 6669240,
+      "sha256": "9a65f993f8b51d5c7978f202653ed50b75d16ef539417a1757d0314e18d50f5f",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d9a4b402b8fa04e6.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/toji/webvr.info.git",
+      "revision": "c58ae99b9ff9e2aa4c524633519570bf33536248",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/toji/webvr.info.git/+archive/c58ae99b9ff9e2aa4c524633519570bf33536248.tar.gz",
+      "placements": [
+        "src/chrome/test/data/xr/webvr_info"
+      ],
+      "bytes": 96145197,
+      "sha256": "3a5b6264f9ba5d01a3dbe7c456a987bf9adf18429396c7acd72a4b780a187f9e",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/6d00f58d6d4dc306.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/website.git",
+      "revision": "70bb13377fed8671966ab9565b7627f2e73ae1a2",
+      "archiveUrl": "https://chromium.googlesource.com/website.git/+archive/70bb13377fed8671966ab9565b7627f2e73ae1a2.tar.gz",
+      "placements": [
+        "src/docs/website"
+      ],
+      "bytes": 4604262,
+      "sha256": "ce211eb6153b6dde9d09bf77481c2672b936b1ba1b8fc34bb47846af252b4344",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/82f2a5e85507370f.tar.gz"
+    },
+    {
+      "url": "https://github.com/electron/electron.git",
+      "revision": "3025e0491e87674c112f7a7d2646292c0efa4599",
+      "archiveUrl": "https://codeload.github.com/electron/electron/tar.gz/3025e0491e87674c112f7a7d2646292c0efa4599",
+      "placements": [
+        "src/electron"
+      ],
+      "bytes": 20543513,
+      "sha256": "a5f61e8a6d11b072a278cd52dd5750bbba84ddc3986979f4ad1a673a80486896",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/electron-45.3.1.tar.gz"
+    },
+    {
+      "placements": [
+        "src/electron"
+      ],
+      "bytes": 401838080,
+      "sha256": "cb7ea104141930e4618c9ba0805d2aaae6fb80f30381fc1d98726b94586a5eaf",
+      "stripComponents": 0,
+      "kind": "locked-yarn-cache",
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/electron-45.3.1-yarn-source-cache.tar"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/cdm.git",
+      "revision": "d6c4e1ea4c8fc3dcd98ac3ab5a981f63067223a4",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/cdm.git/+archive/d6c4e1ea4c8fc3dcd98ac3ab5a981f63067223a4.tar.gz",
+      "placements": [
+        "src/media/cdm/api"
+      ],
+      "bytes": 15119,
+      "sha256": "6c94fd7f91a96974de5c606721d51ebad9769e74c21faf04d72b8db7eb700210",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/bb7555cf220d0bfc.tar.gz"
+    },
+    {
+      "url": "https://quiche.googlesource.com/quiche.git",
+      "revision": "a1628192cf32ba40d21e0dd80f485d68c24ff87a",
+      "archiveUrl": "https://quiche.googlesource.com/quiche.git/+archive/a1628192cf32ba40d21e0dd80f485d68c24ff87a.tar.gz",
+      "placements": [
+        "src/net/third_party/quiche/src"
+      ],
+      "bytes": 3673566,
+      "sha256": "0023997fedcb2e51966f1cb8b3141c009410d4d62cfac4653f8cfc1dce9b65c5",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/ab3b49039ca16bf6.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/v8/fuzzer_wasm_corpus.git",
+      "revision": "1df5e50a45db9518a56ebb42cb020a94a090258b",
+      "archiveUrl": "https://chromium.googlesource.com/v8/fuzzer_wasm_corpus.git/+archive/1df5e50a45db9518a56ebb42cb020a94a090258b.tar.gz",
+      "placements": [
+        "src/testing/libfuzzer/fuzzers/wasm_corpus"
+      ],
+      "bytes": 3590996,
+      "sha256": "7292fe430365be52a6b4c7edc10cad467e6e807ba33fa8abcde846b631bc0b90",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a3817a1242ee8c78.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/angle/angle.git",
+      "revision": "f10470c77e4810ece55cbe8e08469a31610e92f4",
+      "archiveUrl": "https://chromium.googlesource.com/angle/angle.git/+archive/f10470c77e4810ece55cbe8e08469a31610e92f4.tar.gz",
+      "placements": [
+        "src/third_party/angle"
+      ],
+      "bytes": 17005535,
+      "sha256": "dfe8da98b20f73ecb67b9bcb46278c7e09061f4bc516f2eaf78f4221eadfa4d1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/081dd2e7f72873cd.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/VK-GL-CTS",
+      "revision": "93bca01861b0e3ef3c387027a9791e6d065f900c",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/VK-GL-CTS/+archive/93bca01861b0e3ef3c387027a9791e6d065f900c.tar.gz",
+      "placements": [
+        "src/third_party/angle/third_party/VK-GL-CTS/src"
+      ],
+      "bytes": 71319908,
+      "sha256": "288144620988b090748ec3506b9364fcf62db96e0f4919b1a4e2f35ee282af19",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/3eba7a4e9392dcdc.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/glmark2/glmark2",
+      "revision": "6edcf02205fd1e8979dc3f3964257a81959b80c8",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/glmark2/glmark2/+archive/6edcf02205fd1e8979dc3f3964257a81959b80c8.tar.gz",
+      "placements": [
+        "src/third_party/angle/third_party/glmark2/src"
+      ],
+      "bytes": 9263141,
+      "sha256": "f5461f1b3ae2d858966b4f9cd7587acb25abbb9896aac077608181c7c7a382f2",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4735d4be83a08a7a.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/Tencent/rapidjson",
+      "revision": "24b5e7a8b27f42fa16b96fc70aade9106cf7102f",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/Tencent/rapidjson/+archive/24b5e7a8b27f42fa16b96fc70aade9106cf7102f.tar.gz",
+      "placements": [
+        "src/third_party/angle/third_party/rapidjson/src"
+      ],
+      "bytes": 1128470,
+      "sha256": "2dd4ad763cb84b07531032b01e73da7fbcd0a9997ecb38542894c70a211db2bc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d8315462aafa9f7e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/anonymous-tokens.git",
+      "revision": "1ae8df5e40bab28959cc182c2c0d88923059e278",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/anonymous-tokens.git/+archive/1ae8df5e40bab28959cc182c2c0d88923059e278.tar.gz",
+      "placements": [
+        "src/third_party/anonymous_tokens/src"
+      ],
+      "bytes": 172497,
+      "sha256": "5b78ccdbee7b0a21c45b745d7d68c6f3665f73f6123ccd15166e42e7be5d74ac",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/445ac33928eab33e.tar.gz"
+    },
+    {
+      "url": "https://boringssl.googlesource.com/boringssl.git",
+      "revision": "2ea3200c3a3ec176613ab7a0b9a4ffc6db846120",
+      "archiveUrl": "https://boringssl.googlesource.com/boringssl.git/+archive/2ea3200c3a3ec176613ab7a0b9a4ffc6db846120.tar.gz",
+      "placements": [
+        "src/third_party/boringssl/src"
+      ],
+      "bytes": 75181309,
+      "sha256": "78e3ddbcb331746fc4c06c677d78f6657bd2f8d99319f90b0c5403c9669955f7",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/boringssl-2ea3200c3a3ec176613ab7a0b9a4ffc6db846120.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/breakpad/breakpad.git",
+      "revision": "868abe6f016cfeabfb7208681e89031ae667c336",
+      "archiveUrl": "https://chromium.googlesource.com/breakpad/breakpad.git/+archive/868abe6f016cfeabfb7208681e89031ae667c336.tar.gz",
+      "placements": [
+        "src/third_party/breakpad/breakpad"
+      ],
+      "bytes": 5879434,
+      "sha256": "897db376b9da483ea189e59b8fca9610bf6e4eae71f7baf3ae0b6a98f035945f",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/22d6ba53e00478c8.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/cast_core/public",
+      "revision": "f5ee589bdaea60418f670fa176be15ccb9a34942",
+      "archiveUrl": "https://chromium.googlesource.com/cast_core/public/+archive/f5ee589bdaea60418f670fa176be15ccb9a34942.tar.gz",
+      "placements": [
+        "src/third_party/cast_core/public/src"
+      ],
+      "bytes": 26290,
+      "sha256": "5559d09d1b0aeeba0206d2281e50b9f57069ac1c437ff537b0db8c4a5446e052",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a59a66fcced1a40a.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/catapult.git",
+      "revision": "f411808cd159db5e47be79ebee59fffca3da1bd4",
+      "archiveUrl": "https://chromium.googlesource.com/catapult.git/+archive/f411808cd159db5e47be79ebee59fffca3da1bd4.tar.gz",
+      "placements": [
+        "src/third_party/catapult"
+      ],
+      "bytes": 161199067,
+      "sha256": "48b6dcd49b8a4d0bee5a8fdc96542d4b3e45d7f2755836fa5375686fc57564a8",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/dc8cbb3cb16f439f.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/compact_enc_det.git",
+      "revision": "d127078cedef9c6642cbe592dacdd2292b50bb19",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/compact_enc_det.git/+archive/d127078cedef9c6642cbe592dacdd2292b50bb19.tar.gz",
+      "placements": [
+        "src/third_party/ced/src"
+      ],
+      "bytes": 305096,
+      "sha256": "b8ee7a60796f881de68c5217881471a1778b9aea587955adfe3662fd8ef1d8e6",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/059b968a3dd767f8.tar.gz"
+    },
+    {
+      "archiveUrl": "https://storage.googleapis.com/chromium-nodejs/chromium-bidi/028c7baf9de02f6ae103b1911ab13d1aeb48f0ddd8fa702f9c150cdaf8cb5f5b?generation=1790318403990383",
+      "placements": [
+        "src/third_party/chromium-bidi/node_modules"
+      ],
+      "bytes": 20652261,
+      "sha256": "028c7baf9de02f6ae103b1911ab13d1aeb48f0ddd8fa702f9c150cdaf8cb5f5b",
+      "stripComponents": 0,
+      "kind": "gcs-source",
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/gcs-028c7baf9de02f6ae103b1911ab13d1aeb48f0ddd8fa702f9c150cdaf8cb5f5b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/clang/tools/clang-format.git",
+      "revision": "9f796802e5d633c96dbe97e0b6683d5e62594f9f",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/clang/tools/clang-format.git/+archive/9f796802e5d633c96dbe97e0b6683d5e62594f9f.tar.gz",
+      "placements": [
+        "src/third_party/clang-format/script",
+        "src/third_party/webpagereplay/third_party/clang-format/script"
+      ],
+      "bytes": 29718,
+      "sha256": "7710c9955b3d76b1864062ac55286963fa5d56d320e31c6e170082f5c63066f0",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/88f1740ce04beb72.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/cld_3.git",
+      "revision": "b48dc46512566f5a2d41118c8c1116c4f96dc661",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/cld_3.git/+archive/b48dc46512566f5a2d41118c8c1116c4f96dc661.tar.gz",
+      "placements": [
+        "src/third_party/cld_3/src"
+      ],
+      "bytes": 720329,
+      "sha256": "355e3347c13030ded0b890df4bce75cb3a82b8289b697299cf8761d6f18e5fe1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0d71b7a931627e87.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/colorama.git",
+      "revision": "3de9f013df4b470069d03d250224062e8cf15c49",
+      "archiveUrl": "https://chromium.googlesource.com/external/colorama.git/+archive/3de9f013df4b470069d03d250224062e8cf15c49.tar.gz",
+      "placements": [
+        "src/third_party/colorama/src"
+      ],
+      "bytes": 117631,
+      "sha256": "74160c43ea25be815ed65b509b366fe4c5b136194a78706688212a21a9b478c3",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/e49757d9ecd293f6.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/compiler-rt.git",
+      "revision": "627967b9c76e9a9d09a29e2c48a9283556f5a3a3",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/compiler-rt.git/+archive/627967b9c76e9a9d09a29e2c48a9283556f5a3a3.tar.gz",
+      "placements": [
+        "src/third_party/compiler-rt/src"
+      ],
+      "bytes": 4944937,
+      "sha256": "d291f351eac077fcc93b9a5d8ecefe3e834442c5b122d051ff09ae4aad06dbcf",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/53e1643feebe91af.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/chromium/content_analysis_sdk.git",
+      "revision": "0a0e7ea516249e786d5a8884552bbd6e163d89cb",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/chromium/content_analysis_sdk.git/+archive/0a0e7ea516249e786d5a8884552bbd6e163d89cb.tar.gz",
+      "placements": [
+        "src/third_party/content_analysis_sdk/src"
+      ],
+      "bytes": 49513,
+      "sha256": "11ec6f08db0d61c33b2755fa2811b9de400035a473be37903a5641defbfb1f3f",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/f66f33118f17c51e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/cpu_features.git",
+      "revision": "81d13c49649f0714dd41fb56bb246398b6584085",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/cpu_features.git/+archive/81d13c49649f0714dd41fb56bb246398b6584085.tar.gz",
+      "placements": [
+        "src/third_party/cpu_features/src"
+      ],
+      "bytes": 122106,
+      "sha256": "e7d0a78b3711ba225e81f50f8f7d8a29020c0f04d44122522406de8b87e7481e",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0ebe2c3a6c5af9ca.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/pytorch/cpuinfo.git",
+      "revision": "66ee79c038d70dad9f08705b2c9b3e58f6d8f512",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/pytorch/cpuinfo.git/+archive/66ee79c038d70dad9f08705b2c9b3e58f6d8f512.tar.gz",
+      "placements": [
+        "src/third_party/cpuinfo/src"
+      ],
+      "bytes": 3571885,
+      "sha256": "13f93766d04e7d38a3d25df5d7e809d63151cdd785110115998b5deceec50a2d",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/9a21c5b737ff551c.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/webmproject/CrabbyAvif.git",
+      "revision": "d25069779cc7258d5f8816d3ca175d463b0b6444",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/webmproject/CrabbyAvif.git/+archive/d25069779cc7258d5f8816d3ca175d463b0b6444.tar.gz",
+      "placements": [
+        "src/third_party/crabbyavif/src"
+      ],
+      "bytes": 28167234,
+      "sha256": "0dc6296c85d245189c02d2db628c1bd0312a577d553696a97678d3b9a1ed6c36",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a3b821e13e480bad.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/crc32c.git",
+      "revision": "2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/crc32c.git/+archive/2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07.tar.gz",
+      "placements": [
+        "src/third_party/crc32c/src"
+      ],
+      "bytes": 31767,
+      "sha256": "5ee0411964143fa825a5c3768446b8bb12962abee06bc09ea1271ea0c944f05a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0a46bcb8c279a3d3.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/google3/cros_components.git",
+      "revision": "0abb2efaa3d16db861c9710b193c39e657ac3bdf",
+      "archiveUrl": "https://chromium.googlesource.com/external/google3/cros_components.git/+archive/0abb2efaa3d16db861c9710b193c39e657ac3bdf.tar.gz",
+      "placements": [
+        "src/third_party/cros-components/src"
+      ],
+      "bytes": 223288,
+      "sha256": "78844dfc211428adde9f761d9ff181dc39f503649c65d99924e6bcbcb8c688cc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/8c64bab2bd42989b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/crossbench.git",
+      "revision": "043866e26bee4936f0a6a3cf87813fb928d7ea1f",
+      "archiveUrl": "https://chromium.googlesource.com/crossbench.git/+archive/043866e26bee4936f0a6a3cf87813fb928d7ea1f.tar.gz",
+      "placements": [
+        "src/third_party/crossbench"
+      ],
+      "bytes": 1783878,
+      "sha256": "cfd7cde069cb0eb58eff3e5adb3005002b645f6797ab7fa46b6d01f2aa6419d7",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/79363540b16111c9.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/web-tests.git",
+      "revision": "4483f71db32259409d9c5f7c4c95e2605b7a3b13",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/web-tests.git/+archive/4483f71db32259409d9c5f7c4c95e2605b7a3b13.tar.gz",
+      "placements": [
+        "src/third_party/crossbench-web-tests"
+      ],
+      "bytes": 76952192,
+      "sha256": "d793a02748685093713538d771b69596e8055eb4d15f9071c2a2c2fc6b0dc852",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/b2f0023038ab993e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/videolan/dav1d.git",
+      "revision": "bf5a8792744ee78c977dfb16503f9156dde6401d",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/videolan/dav1d.git/+archive/bf5a8792744ee78c977dfb16503f9156dde6401d.tar.gz",
+      "placements": [
+        "src/third_party/dav1d/libdav1d"
+      ],
+      "bytes": 1764533,
+      "sha256": "acebdb4b9f7d2c2d25b4890e879c6a82a9b5ea0df100106cbdf214827193afe3",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/91f2d043f01b6eb7.tar.gz"
+    },
+    {
+      "url": "https://dawn.googlesource.com/dawn.git",
+      "revision": "8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04",
+      "archiveUrl": "https://dawn.googlesource.com/dawn.git/+archive/8bc8ddaf2862f417b8b4e3ffc016adcc8f37ac04.tar.gz",
+      "placements": [
+        "src/third_party/dawn"
+      ],
+      "bytes": 32169863,
+      "sha256": "e4ce06717cc90d7bc190bc5e015f907b6da7294dab95db80dae27433b58cd407",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "member": "archives/94998f676dd8648b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/EGL-Registry",
+      "revision": "db3425b8246136faccb5e2782b5694960bd6edf1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/EGL-Registry/+archive/db3425b8246136faccb5e2782b5694960bd6edf1.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/EGL-Registry/src"
+      ],
+      "bytes": 3391481,
+      "sha256": "786ecd17631f3e5f9d3875832fe866649afa360aa371220a8bd7c1ad67fc1055",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/41a8c96d44a24b7d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/OpenGL-Registry",
+      "revision": "1cdd228e34966dd6b95bd203e9f84faba0f371a1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/OpenGL-Registry/+archive/1cdd228e34966dd6b95bd203e9f84faba0f371a1.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/OpenGL-Registry/src"
+      ],
+      "bytes": 114048070,
+      "sha256": "3264842be3045abf858d09dd235039fe519aca4b56351b010145b9a092209e78",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/5d140f290f423f10.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/microsoft/DirectX-Headers",
+      "revision": "980971e835876dc0cde415e8f9bc646e64667bf7",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/microsoft/DirectX-Headers/+archive/980971e835876dc0cde415e8f9bc646e64667bf7.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/directx-headers/src"
+      ],
+      "bytes": 328141,
+      "sha256": "65f28b9c9380777b9d1bdba5a07a2fb9ff49618e884c6f2879217984212e6542",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/721a0644311c57f9.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/microsoft/DirectXShaderCompiler",
+      "revision": "9757d44faa47de7e8d1bb731c30551ec608624f9",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/microsoft/DirectXShaderCompiler/+archive/9757d44faa47de7e8d1bb731c30551ec608624f9.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/directx-shader-compiler/src"
+      ],
+      "bytes": 25805349,
+      "sha256": "b8d13a16765978ce70e7add1a0750838fa3472b13f700f2a8d6298690bc56fc5",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4b93e8c3126df233.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/glfw/glfw",
+      "revision": "92dcf4ce74f2e2554a98fea09be7c705c17daa5a",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/glfw/glfw/+archive/92dcf4ce74f2e2554a98fea09be7c705c17daa5a.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/glfw3/src"
+      ],
+      "bytes": 921421,
+      "sha256": "eea80f7b8d61d985af11a40002a425dea5a99636fd2f8b6b162d6b916aee4b00",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/7b853ef8e4a9e2dc.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/gpuweb/cts",
+      "revision": "81aeeb49e5b15587ec6c1f59b2fdcb4074ffcf63",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/gpuweb/cts/+archive/81aeeb49e5b15587ec6c1f59b2fdcb4074ffcf63.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/webgpu-cts"
+      ],
+      "bytes": 6218999,
+      "sha256": "eb8dd57c62df6d9ba6b7dc7eebc68db180cd0b509889251a831e8f77f36d8d1b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/3203f58f149e54b7.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/webgpu-native/webgpu-headers",
+      "revision": "0caa056b5c804e9219d5f8c668a7c29d4dd9c95b",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/webgpu-native/webgpu-headers/+archive/0caa056b5c804e9219d5f8c668a7c29d4dd9c95b.tar.gz",
+      "placements": [
+        "src/third_party/dawn/third_party/webgpu-headers/src"
+      ],
+      "bytes": 122788,
+      "sha256": "3a9447bad853b50f5d30d0ddc4553b25c1bed8802aa3334f96dea4a87b6197d8",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/f55ded7be697768c.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+      "revision": "a07c06fe67a1a9d64ac4728df3a11c1ceb0cf73e",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/tools/depot_tools.git/+archive/a07c06fe67a1a9d64ac4728df3a11c1ceb0cf73e.tar.gz",
+      "placements": [
+        "src/third_party/depot_tools"
+      ],
+      "bytes": 1720752,
+      "sha256": "8db4a484de9bf2ccb0644e26639ee2511c10cb0e9f46a3782c3ad88a4daad431",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/770407af589114f5.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/devtools/devtools-frontend",
+      "revision": "904b77f9fcadfba90bc2d34e370ffeac1e9603d5",
+      "archiveUrl": "https://chromium.googlesource.com/devtools/devtools-frontend/+archive/904b77f9fcadfba90bc2d34e370ffeac1e9603d5.tar.gz",
+      "placements": [
+        "src/third_party/devtools-frontend/src"
+      ],
+      "bytes": 279509234,
+      "sha256": "b172686131fd4c5900d87da3aef7c7c424268b33431e62dc0461d7360545f834",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "member": "archives/fbf761d1aec75f93.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/aengelke/disarm.git",
+      "revision": "2d960dae4b4fb29dba05cfc48210fbed423f3d2c",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/aengelke/disarm.git/+archive/2d960dae4b4fb29dba05cfc48210fbed423f3d2c.tar.gz",
+      "placements": [
+        "src/third_party/disarm/src"
+      ],
+      "bytes": 351406,
+      "sha256": "fd66d5ab7e7fb86fa58a48908aaad44639e3dc998b613b2d8c6ac79007ac82ff",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0de8f05700292a3d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/dom-distiller/dist.git",
+      "revision": "015cda307cf81e293889c0887cffff4f0aa090ce",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/dom-distiller/dist.git/+archive/015cda307cf81e293889c0887cffff4f0aa090ce.tar.gz",
+      "placements": [
+        "src/third_party/dom_distiller_js/dist"
+      ],
+      "bytes": 602621,
+      "sha256": "2aaea97fb5f13622d733278dae43dca9e63e3d5a102345ae9502d9a1d8c1dc72",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/57fe5a4ee48829ab.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/googleprojectzero/domato.git",
+      "revision": "fadff396cc45d521cc594d3e2396e27e887b1963",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/googleprojectzero/domato.git/+archive/fadff396cc45d521cc594d3e2396e27e887b1963.tar.gz",
+      "placements": [
+        "src/third_party/domato/src"
+      ],
+      "bytes": 261653,
+      "sha256": "6c00c6b563a16a4603a0aef25d4f0d660bafaa0f8d636c70c31996f6c0cff131",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/18db096198bd973e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git",
+      "revision": "beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git/+archive/beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44.tar.gz",
+      "placements": [
+        "src/third_party/dragonbox/src"
+      ],
+      "bytes": 4235170,
+      "sha256": "5015715016dbd3631c934a4756214fb8292fcc9b112bad0e3741f52474f68a50",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/fcc28e859e5c2e56.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/dmgbuild/ds_store.git",
+      "revision": "6f971c764a511f609615c6c4f5ae2a9403ff32cb",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/dmgbuild/ds_store.git/+archive/6f971c764a511f609615c6c4f5ae2a9403ff32cb.tar.gz",
+      "placements": [
+        "src/third_party/ds_store/src"
+      ],
+      "bytes": 26702,
+      "sha256": "460c2bd6bc5dcf99ed044886c84d7fc76f6b1e3aa571352b22b6888ee37af601",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/837038f1f0f42c1b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/gitlab.com/libeigen/eigen.git",
+      "revision": "04bfe22876d3bab4260f39491cce7a8df17daa40",
+      "archiveUrl": "https://chromium.googlesource.com/external/gitlab.com/libeigen/eigen.git/+archive/04bfe22876d3bab4260f39491cce7a8df17daa40.tar.gz",
+      "placements": [
+        "src/third_party/eigen3/src"
+      ],
+      "bytes": 4299514,
+      "sha256": "f19b18079aa3953d957927fbcc8bafabab7c69747fd217fc9b1918a642322d29",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/11ea30025a704e32.tar.gz"
+    },
+    {
+      "url": "https://github.com/nodejs/node.git",
+      "revision": "f7f273a9bb6445f6f7fb6349105e7532972045fb",
+      "archiveUrl": "https://codeload.github.com/nodejs/node/tar.gz/f7f273a9bb6445f6f7fb6349105e7532972045fb",
+      "placements": [
+        "src/third_party/electron_node"
+      ],
+      "bytes": 130129915,
+      "sha256": "ca2716a7d730b345b1f625cb04b94d8cc6de87cd2adf2d0c15f5fea7cbd5e847",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/node-v24.22.2.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/emoji-segmenter.git",
+      "revision": "955936be8b391e00835257059607d7c5b72ce744",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/emoji-segmenter.git/+archive/955936be8b391e00835257059607d7c5b72ce744.tar.gz",
+      "placements": [
+        "src/third_party/emoji-segmenter/src"
+      ],
+      "bytes": 8622,
+      "sha256": "d3a78343c19472086b0ead0ae9d69ee32aa22fc1aa310f7ada66b81304e55bec",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d12b5d5fadec140d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/libexpat/libexpat.git",
+      "revision": "a851869e111c06fbcdc89edf639abf5fc2b6deba",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/libexpat/libexpat.git/+archive/a851869e111c06fbcdc89edf639abf5fc2b6deba.tar.gz",
+      "placements": [
+        "src/third_party/expat/src"
+      ],
+      "bytes": 8448297,
+      "sha256": "1170000c380d31bd707e84d865f1b399d8b62852703a36f9f11a7700ccd7e77a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/5121175780d0d30f.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/aengelke/fadec.git",
+      "revision": "c9f78f532b9004de278489019ab2c6c28ae9746e",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/aengelke/fadec.git/+archive/c9f78f532b9004de278489019ab2c6c28ae9746e.tar.gz",
+      "placements": [
+        "src/third_party/fadec/src"
+      ],
+      "bytes": 121729,
+      "sha256": "d9fe241dd62e1988e71dbc22f3fb5f8bc37204a05ede01756472a55848f37852",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a730cd0781ca4ff5.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/farmhash.git",
+      "revision": "9d99331eb762e9ee22fd97d15a594525ad98310a",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/farmhash.git/+archive/9d99331eb762e9ee22fd97d15a594525ad98310a.tar.gz",
+      "placements": [
+        "src/third_party/farmhash/src"
+      ],
+      "bytes": 470124,
+      "sha256": "f81548a8622ec3a3a1d0cad4bda86c1fc3b44c1def12ddf71f861aec4b32919e",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/24788ca837071af9.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git",
+      "revision": "b0ab987b3dfdde13fa1915f65ef2a5c068d9208c",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git/+archive/b0ab987b3dfdde13fa1915f65ef2a5c068d9208c.tar.gz",
+      "placements": [
+        "src/third_party/fast_float/src"
+      ],
+      "bytes": 147157,
+      "sha256": "dd06550a145597636278046630547128cf967bad5fe6688ea408a229ed982f3b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/ebc119a1404a74df.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google-parfait/federated-compute.git",
+      "revision": "f5241fb459426f88af484a909927044a71306209",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google-parfait/federated-compute.git/+archive/f5241fb459426f88af484a909927044a71306209.tar.gz",
+      "placements": [
+        "src/third_party/federated_compute/src"
+      ],
+      "bytes": 1052997,
+      "sha256": "8b572a873a07d1a0ff9692189f48fd5fe57b5d2e76028bb6921062b2e77658f1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/645a5d1494da4ee3.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/third_party/ffmpeg.git",
+      "revision": "9db86ce5b5b454dfc96c435f9f0723012980c37f",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/third_party/ffmpeg.git/+archive/9db86ce5b5b454dfc96c435f9f0723012980c37f.tar.gz",
+      "placements": [
+        "src/third_party/ffmpeg"
+      ],
+      "bytes": 18924628,
+      "sha256": "07f78d35222a3418b0b93dc8e9e4e424b7df8fafd6d324efc7a29c427b311775",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/ffmpeg-9db86ce5b5b454dfc96c435f9f0723012980c37f.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/flac.git",
+      "revision": "e7108e2ed031547c3759217819a032065c820d73",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/flac.git/+archive/e7108e2ed031547c3759217819a032065c820d73.tar.gz",
+      "placements": [
+        "src/third_party/flac"
+      ],
+      "bytes": 302096,
+      "sha256": "0d7c01677ee2b3a7d89ab8c304f807801c7e3d278a9d4c9ebad4be954c7951bd",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d9cb5e5fe68ff0b0.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/flatbuffers.git",
+      "revision": "a86afae9399bbe631d1ea0783f8816e780e236cc",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/flatbuffers.git/+archive/a86afae9399bbe631d1ea0783f8816e780e236cc.tar.gz",
+      "placements": [
+        "src/third_party/flatbuffers/src"
+      ],
+      "bytes": 2437374,
+      "sha256": "b9b186c1a9ce049d926fe1be015f691e8434e4d5f2dd5648f48ca55ee93074e0",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0c3ed94f3cb61334.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/Maratyszcza/FP16.git",
+      "revision": "782eea126dc5c755827be751a099eb01826175cf",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/Maratyszcza/FP16.git/+archive/782eea126dc5c755827be751a099eb01826175cf.tar.gz",
+      "placements": [
+        "src/third_party/fp16/src"
+      ],
+      "bytes": 65393,
+      "sha256": "408e0de597b4abbe4d1db13313106f7cd60dc96664fef0a894f30f1456c3eb7a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/1ff6ef5f94b35aac.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/src/third_party/freetype2.git",
+      "revision": "891f904e2e7b4289f615598cd4b69832f87d2f3a",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/src/third_party/freetype2.git/+archive/891f904e2e7b4289f615598cd4b69832f87d2f3a.tar.gz",
+      "placements": [
+        "src/third_party/freetype/src"
+      ],
+      "bytes": 2601217,
+      "sha256": "c074b0177bc0dece61807f9a63ccc441b33731d9592f238a5c6547d17d4fe946",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/3939ea55c93758db.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/fuzztest.git",
+      "revision": "7a8e9056de2a4f745082a4b3861a67ada47ced36",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/fuzztest.git/+archive/7a8e9056de2a4f745082a4b3861a67ada47ced36.tar.gz",
+      "placements": [
+        "src/third_party/fuzztest/src"
+      ],
+      "bytes": 1023097,
+      "sha256": "6f41bf7d892b6e06e2d544adf1c60a1d64c96d7ecaa005bd2a1f2f1165d81474",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d78276b64fd546c3.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/Maratyszcza/FXdiv.git",
+      "revision": "63058eff77e11aa15bf531df5dd34395ec3017c8",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/Maratyszcza/FXdiv.git/+archive/63058eff77e11aa15bf531df5dd34395ec3017c8.tar.gz",
+      "placements": [
+        "src/third_party/fxdiv/src"
+      ],
+      "bytes": 10324,
+      "sha256": "63cb6f1501fc23419a2d991f595f4d7b8682ee08c2bc361ff9a415963dcc84de",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "member": "archives/44f070d4e29f505a.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/gemmlowp.git",
+      "revision": "16e8662c34917be0065110bfcd9cc27d30f52fdf",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/gemmlowp.git/+archive/16e8662c34917be0065110bfcd9cc27d30f52fdf.tar.gz",
+      "placements": [
+        "src/third_party/gemmlowp/src"
+      ],
+      "bytes": 847654,
+      "sha256": "f02afaf8ddb84f4a1e13d6b31526a2333d2a312b8dda7d21282eea9ff81791fc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4153514348c5724c.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/glslang",
+      "revision": "2ff6f609379ce43c4291c732cf6a19dd2461a680",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/glslang/+archive/2ff6f609379ce43c4291c732cf6a19dd2461a680.tar.gz",
+      "placements": [
+        "src/third_party/glslang/src"
+      ],
+      "bytes": 4772605,
+      "sha256": "dc3284c7ef5e1618659f0b8da2a8a0070f83edaec628466d5cb5dc9d3fc2ce6b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/1460279173084386.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/benchmark.git",
+      "revision": "8abf1e701fbd88c8170f48fe0558247e2e5f8e7d",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/benchmark.git/+archive/8abf1e701fbd88c8170f48fe0558247e2e5f8e7d.tar.gz",
+      "placements": [
+        "src/third_party/google_benchmark/src"
+      ],
+      "bytes": 271292,
+      "sha256": "1da1c2512afd24e9015589f1afdc17098c75248c774f09bdcfe4907ea1a26d8b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/b40e6e51f806b2dc.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/googletest.git",
+      "revision": "4fe3307fb2d9f86d19777c7eb0e4809e9694dde7",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/googletest.git/+archive/4fe3307fb2d9f86d19777c7eb0e4809e9694dde7.tar.gz",
+      "placements": [
+        "src/third_party/googletest/src"
+      ],
+      "bytes": 901320,
+      "sha256": "72f08397f452ccc85195c23932f9919add59916fa7a01c4388aa16ba9b28b099",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/bbfc61bbee0a7d78.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz.git",
+      "revision": "f5efbbef3841bdcdc6427bde7c2971f62ac8c8f1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz.git/+archive/f5efbbef3841bdcdc6427bde7c2971f62ac8c8f1.tar.gz",
+      "placements": [
+        "src/third_party/harfbuzz/src"
+      ],
+      "bytes": 38822920,
+      "sha256": "3df5bd5ba144219f4355ad97497a335b70944d9ac59c96327f9c3a715414e5ad",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4e30c696ac7304f5.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/highway.git",
+      "revision": "2607d3b5b0113992fe84d3848859eae13b3b52c1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/highway.git/+archive/2607d3b5b0113992fe84d3848859eae13b3b52c1.tar.gz",
+      "placements": [
+        "src/third_party/highway/src"
+      ],
+      "bytes": 3704472,
+      "sha256": "efe61e574fbfb4d342e527c9676932242e15344679b1394f9a8689ffdc1bec09",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0f5b80823e8fed54.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries.git",
+      "revision": "cee14e319bb7603a1157bb4d1e216be64ee82b77",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries.git/+archive/cee14e319bb7603a1157bb4d1e216be64ee82b77.tar.gz",
+      "placements": [
+        "src/third_party/hunspell_dictionaries"
+      ],
+      "bytes": 69491640,
+      "sha256": "9fe4bdc2d6634eebf64ea91bd1e060fb767c5f56d5ef4cd35a56259dd71d2ff1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/52e0b131f036eaf8.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/icu.git",
+      "revision": "c670d124c9b6aa92c0b492cf543808300e0e6103",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/icu.git/+archive/c670d124c9b6aa92c0b492cf543808300e0e6103.tar.gz",
+      "placements": [
+        "src/third_party/icu"
+      ],
+      "bytes": 55739236,
+      "sha256": "1bf99d8d939d09dd7bd112ab612f6af332faffe714b75f1042b10be3d6c26188",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/04e9325bb1c396f6.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/ink.git",
+      "revision": "1d5a871aefe0a401685cd4388b9b92f9b1c5cadb",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/ink.git/+archive/1d5a871aefe0a401685cd4388b9b92f9b1c5cadb.tar.gz",
+      "placements": [
+        "src/third_party/ink/src"
+      ],
+      "bytes": 2545253,
+      "sha256": "ae94d1ee7dfc9a438fc7c1f98742f2bde45a5c0a1d46251497d1a5399de04bfb",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/b34dbf6ea3a224e1.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git",
+      "revision": "c603c04db8505477867974a69789309ded2cc948",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git/+archive/c603c04db8505477867974a69789309ded2cc948.tar.gz",
+      "placements": [
+        "src/third_party/jetstream/main"
+      ],
+      "bytes": 194436474,
+      "sha256": "c28a3555a07387d7b4567d5c895f38e004c570e4704e0eaa2905fdf0248c3a82",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/04a4206d6a4a671c.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git",
+      "revision": "2145cedef4ca2777b792cb0059d3400ee2a6153c",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git/+archive/2145cedef4ca2777b792cb0059d3400ee2a6153c.tar.gz",
+      "placements": [
+        "src/third_party/jetstream/v2.2"
+      ],
+      "bytes": 12340904,
+      "sha256": "708f4fb73c82ebf893c9d2a686606a609e75146dd0ba35422191f3f17405ecdd",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/9d95a8f43f9ed2ea.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git",
+      "revision": "06785cf861ac44855f168cbbe829278c2802e6de",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git/+archive/06785cf861ac44855f168cbbe829278c2802e6de.tar.gz",
+      "placements": [
+        "src/third_party/jetstream/v3.0"
+      ],
+      "bytes": 194431359,
+      "sha256": "0d10c04944ce3a63770f74a2c88e76cfbb550725165fb3b6ece7f9be4f3734a1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/42c8eb95f864a441.tar.gz"
+    },
+    {
+      "archiveUrl": "https://storage.googleapis.com/chromium-nodejs/js_code_coverage/e932c86d2d4f250416970dc270002a9cb6acecbec034998cdadf9a394d0f1abc?generation=1742338539536352",
+      "placements": [
+        "src/third_party/js_code_coverage/node_modules"
+      ],
+      "bytes": 1557200,
+      "sha256": "e932c86d2d4f250416970dc270002a9cb6acecbec034998cdadf9a394d0f1abc",
+      "stripComponents": 0,
+      "kind": "gcs-source",
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/gcs-e932c86d2d4f250416970dc270002a9cb6acecbec034998cdadf9a394d0f1abc.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/open-source-parsers/jsoncpp.git",
+      "revision": "3347a4b86bb914cb565f0cbda19c06e109513300",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/open-source-parsers/jsoncpp.git/+archive/3347a4b86bb914cb565f0cbda19c06e109513300.tar.gz",
+      "placements": [
+        "src/third_party/jsoncpp/source"
+      ],
+      "bytes": 195518,
+      "sha256": "8f2beb94f107e5cd500525821d0be8f1c349ee09a5c9efa450d518d2714091f5",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/1be403d8febe0a5e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/leveldb.git",
+      "revision": "7ee830d02b623e8ffe0b95d59a74db1e58da04c5",
+      "archiveUrl": "https://chromium.googlesource.com/external/leveldb.git/+archive/7ee830d02b623e8ffe0b95d59a74db1e58da04c5.tar.gz",
+      "placements": [
+        "src/third_party/leveldatabase/src"
+      ],
+      "bytes": 252355,
+      "sha256": "8d5af827d54b4278bee9dd43af20fc357de8a2ec61703b5a3375852b721a3fbc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/622507ffa6fddbd1.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/compiler-rt/lib/fuzzer.git",
+      "revision": "9951014982324338ea932dfdba259aeb1cca70f7",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/compiler-rt/lib/fuzzer.git/+archive/9951014982324338ea932dfdba259aeb1cca70f7.tar.gz",
+      "placements": [
+        "src/third_party/libFuzzer/src"
+      ],
+      "bytes": 118811,
+      "sha256": "a1b42a27b4c0dd59074111aeb65744a6f0e75ac1acb463fa7c05d5a9059569a4",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/9b5d6890eba3f160.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/libaddressinput.git",
+      "revision": "81eb9628382b07d371d8ea0b11badf7de3857fd5",
+      "archiveUrl": "https://chromium.googlesource.com/external/libaddressinput.git/+archive/81eb9628382b07d371d8ea0b11badf7de3857fd5.tar.gz",
+      "placements": [
+        "src/third_party/libaddressinput/src"
+      ],
+      "bytes": 865490,
+      "sha256": "a2c57594db358bafd65bbe3cc5171323cd8ca93961807dde530ef045914fc0bc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a7b46c98e96f48f7.tar.gz"
+    },
+    {
+      "url": "https://aomedia.googlesource.com/aom.git",
+      "revision": "016144ea8b8b84b9cfa1c3fba56227b2d3471229",
+      "archiveUrl": "https://aomedia.googlesource.com/aom.git/+archive/016144ea8b8b84b9cfa1c3fba56227b2d3471229.tar.gz",
+      "placements": [
+        "src/third_party/libaom/source/libaom"
+      ],
+      "bytes": 6705671,
+      "sha256": "5b3b751c7e480db90e9b495d9b5914736803da1a9e56e0674e9f65cf885a0eb2",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/b05227b4461033ec.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git",
+      "revision": "97b436da4c33663581d394f4ee0a5977fc38c2f4",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git/+archive/97b436da4c33663581d394f4ee0a5977fc38c2f4.tar.gz",
+      "placements": [
+        "src/third_party/libc++/src"
+      ],
+      "bytes": 9031107,
+      "sha256": "68d982a4218dce4520d9d7b427ff0e878e340bce703b9d2091e75e030929cf25",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/9cc28dc979cc9f6a.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git",
+      "revision": "127292c11d332549ba1e0aebcece6d4c91de9239",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git/+archive/127292c11d332549ba1e0aebcece6d4c91de9239.tar.gz",
+      "placements": [
+        "src/third_party/libc++abi/src"
+      ],
+      "bytes": 807292,
+      "sha256": "ad1e02c85f8c147a4d15ee38541731bf17d6f34fec072f35b0d6729fad3f4e5a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/17f7a7404a8727f3.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/codecs/libgav1.git",
+      "revision": "085032331f60c10055d32ab52932bd7bd77e6f53",
+      "archiveUrl": "https://chromium.googlesource.com/codecs/libgav1.git/+archive/085032331f60c10055d32ab52932bd7bd77e6f53.tar.gz",
+      "placements": [
+        "src/third_party/libgav1/src"
+      ],
+      "bytes": 1219009,
+      "sha256": "7d39fa6a99eb5622765c021717b7c56eb336807a571d07008de647e75c786226",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/368f5503201851f1.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git",
+      "revision": "640f254ad0fa03f6b1f29f89b7dd9366f2f6e533",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git/+archive/640f254ad0fa03f6b1f29f89b7dd9366f2f6e533.tar.gz",
+      "placements": [
+        "src/third_party/libjpeg_turbo"
+      ],
+      "bytes": 2624764,
+      "sha256": "16ce66baad7e3b82e12655c1a611ef467e10fce0794701e127db6ebe2648c8a2",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/bcceea62ed719b2f.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/git.code.sf.net/p/perfmon2/libpfm4.git",
+      "revision": "995ad37079531b7c3a98cbd164b7619f3b0adc0d",
+      "archiveUrl": "https://chromium.googlesource.com/external/git.code.sf.net/p/perfmon2/libpfm4.git/+archive/995ad37079531b7c3a98cbd164b7619f3b0adc0d.tar.gz",
+      "placements": [
+        "src/third_party/libpfm4/src"
+      ],
+      "bytes": 1289408,
+      "sha256": "97e4928e127dc8a75dcd0b0e5069f86a50e07420622e0cd24bb42aa940e9fc5d",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/ae572f7b78e7991f.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/libphonenumber.git",
+      "revision": "0ae309f1940227efe688f5eb1815ef45a6fbee8d",
+      "archiveUrl": "https://chromium.googlesource.com/external/libphonenumber.git/+archive/0ae309f1940227efe688f5eb1815ef45a6fbee8d.tar.gz",
+      "placements": [
+        "src/third_party/libphonenumber/src"
+      ],
+      "bytes": 13127416,
+      "sha256": "a5145160b2f767957e2b208ec238d879a46fd3dfdfe2f8a815511aaf2ea41025",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/cd6f1dd5c379cebc.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/libprotobuf-mutator.git",
+      "revision": "c1c950eae0440c3808f2b8bd7c57d0c6a42c1a90",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/libprotobuf-mutator.git/+archive/c1c950eae0440c3808f2b8bd7c57d0c6a42c1a90.tar.gz",
+      "placements": [
+        "src/third_party/libprotobuf-mutator/src"
+      ],
+      "bytes": 45934,
+      "sha256": "4130b4f90cfbfa9625aaa787228bee23f9451c65bef3b7a35034278eae137c80",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/bdbb8f22523f4b1b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/libsrtp.git",
+      "revision": "cd5d177bf1fde755ddb4c7f0d9ff7693f8b49e5e",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/libsrtp.git/+archive/cd5d177bf1fde755ddb4c7f0d9ff7693f8b49e5e.tar.gz",
+      "placements": [
+        "src/third_party/libsrtp"
+      ],
+      "bytes": 150597,
+      "sha256": "d5362a91110b6c1bf0dbb4a51a1f3f886f6b3ca821ff57dae421a4ae15efc681",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/ed94a5c9b468f347.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git",
+      "revision": "8d41badfccd4bc7dfd17817f65217f2868d69be8",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git/+archive/8d41badfccd4bc7dfd17817f65217f2868d69be8.tar.gz",
+      "placements": [
+        "src/third_party/libunwind/src"
+      ],
+      "bytes": 189951,
+      "sha256": "e791c7ced1260aa5edc509d8b5b701d58dbdd0f130384b57145dd9c8f874790a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/706580fe44f3e2b7.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromiumos/platform/libva-fake-driver.git",
+      "revision": "04f902b9ba9f8083b19d22e7b55591bbcaae31c0",
+      "archiveUrl": "https://chromium.googlesource.com/chromiumos/platform/libva-fake-driver.git/+archive/04f902b9ba9f8083b19d22e7b55591bbcaae31c0.tar.gz",
+      "placements": [
+        "src/third_party/libva-fake-driver/src"
+      ],
+      "bytes": 46972,
+      "sha256": "100695439bef58732c0b7fd7ff20dc87ef92dc317317e15e51a6348e117346aa",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4e2c3fd63ff0e922.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/webm/libvpx.git",
+      "revision": "de61454cf81594d5927899da122fc53dcc4a846e",
+      "archiveUrl": "https://chromium.googlesource.com/webm/libvpx.git/+archive/de61454cf81594d5927899da122fc53dcc4a846e.tar.gz",
+      "placements": [
+        "src/third_party/libvpx/source/libvpx"
+      ],
+      "bytes": 5724815,
+      "sha256": "2e39ee97fcee0aacfc720af943d22ea8d0a11772a0ecfb52a98554606c2f535b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/038f8c3f434ff8f6.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/webm/libwebm.git",
+      "revision": "6184f4484a826724b5293837134ab9492261b941",
+      "archiveUrl": "https://chromium.googlesource.com/webm/libwebm.git/+archive/6184f4484a826724b5293837134ab9492261b941.tar.gz",
+      "placements": [
+        "src/third_party/libwebm/source"
+      ],
+      "bytes": 527651,
+      "sha256": "c7e36fc6952f87483585e5255f4273a01e98d7ed6f8d5b568fc7acde487dd523",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a3f486b3972eb65e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/webm/libwebp.git",
+      "revision": "b43b2caa710c0c997c066cb32c7fea1391fad70a",
+      "archiveUrl": "https://chromium.googlesource.com/webm/libwebp.git/+archive/b43b2caa710c0c997c066cb32c7fea1391fad70a.tar.gz",
+      "placements": [
+        "src/third_party/libwebp/src"
+      ],
+      "bytes": 3871439,
+      "sha256": "c9a6018cf6eac07bbf3b06d095f209deb9e8e8c7d76dfb43cbfe9c31fad9a200",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/21b8610987affa38.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/libyuv/libyuv.git",
+      "revision": "f1c9b5898619f2ced836030c023249f5a8b189d1",
+      "archiveUrl": "https://chromium.googlesource.com/libyuv/libyuv.git/+archive/f1c9b5898619f2ced836030c023249f5a8b189d1.tar.gz",
+      "placements": [
+        "src/third_party/libyuv"
+      ],
+      "bytes": 657323,
+      "sha256": "a574042c422c57d06a4f35fd3bd38b94ffa1ad1240b5bd4ded473c7cf10ad75a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/670678bfe0013786.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google-ai-edge/LiteRT.git",
+      "revision": "4dac1538b76bc20bb7f2ba314bcc89dc57c0ee2b",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google-ai-edge/LiteRT.git/+archive/4dac1538b76bc20bb7f2ba314bcc89dc57c0ee2b.tar.gz",
+      "placements": [
+        "src/third_party/litert/src"
+      ],
+      "bytes": 197309769,
+      "sha256": "c2745c1cf3bab13c67f18055624179a2ebdce1495ff0a23b512da544de6790fc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/88d0e0b4be84cc85.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git",
+      "revision": "b8b28272d32b75f0ee71acd2fa1144c8b5b95460",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git/+archive/b8b28272d32b75f0ee71acd2fa1144c8b5b95460.tar.gz",
+      "placements": [
+        "src/third_party/llvm-libc/src"
+      ],
+      "bytes": 44127490,
+      "sha256": "d4d4b8c62ee80cb4325d34bfd161b330462326a0faa408fee54954ea030811b9",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/8dbbc2a3113f9774.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/dmgbuild/mac_alias.git",
+      "revision": "d0c076b4562541c1509d9874f42880378245d268",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/dmgbuild/mac_alias.git/+archive/d0c076b4562541c1509d9874f42880378245d268.tar.gz",
+      "placements": [
+        "src/third_party/mac_alias/src"
+      ],
+      "bytes": 33167,
+      "sha256": "235baee7f6d6f882e14cb815a5932e2365102912c2a2b6b289082709ab5c8888",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/31487c0f98d373d0.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/material-foundation/material-color-utilities.git",
+      "revision": "5b3618b16fdc3825e21d5679bafd144662088ea1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/material-foundation/material-color-utilities.git/+archive/5b3618b16fdc3825e21d5679bafd144662088ea1.tar.gz",
+      "placements": [
+        "src/third_party/material_color_utilities/src"
+      ],
+      "bytes": 3534180,
+      "sha256": "78c9094c6470e4483fca7cdf87a2722a48eae7513470d6c0a674ed83382be952",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/05474c397c3aa709.tar.gz"
+    },
+    {
+      "url": "https://github.com/nodejs/nan.git",
+      "revision": "675cefebca42410733da8a454c8d9391fcebfbc2",
+      "archiveUrl": "https://codeload.github.com/nodejs/nan/tar.gz/675cefebca42410733da8a454c8d9391fcebfbc2",
+      "placements": [
+        "src/third_party/nan"
+      ],
+      "bytes": 111323,
+      "sha256": "3983c68f19ed75dd37dc228eab385093ae2533132730f253f0c3d19ff10788e3",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d2948568aa2c9f36.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/nasm.git",
+      "revision": "525a09a813be0f75b646ee93fc2a31c27b87d722",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/nasm.git/+archive/525a09a813be0f75b646ee93fc2a31c27b87d722.tar.gz",
+      "placements": [
+        "src/third_party/nasm"
+      ],
+      "bytes": 2433448,
+      "sha256": "0b1b6cc9713aee26ed65250a9c6169cb9bf3b9023e56ceae5cbc39c1092ea5d2",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/523df47027d374cb.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/nearby-connections.git",
+      "revision": "0bad8b0c9877f92eeeb550654f1ea51a71a085e4",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/nearby-connections.git/+archive/0bad8b0c9877f92eeeb550654f1ea51a71a085e4.tar.gz",
+      "placements": [
+        "src/third_party/nearby/src"
+      ],
+      "bytes": 8637622,
+      "sha256": "056fcdeded78f84dc6c6a0dc6c8544fd850ad8d92f7487e6378d1d0ccef7996e",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/155707feb2195b34.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/intel/ARM_NEON_2_x86_SSE.git",
+      "revision": "183fc88bcb90dbfaefba33a292eae8a5ce94bd67",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/intel/ARM_NEON_2_x86_SSE.git/+archive/183fc88bcb90dbfaefba33a292eae8a5ce94bd67.tar.gz",
+      "placements": [
+        "src/third_party/neon_2_sse/src"
+      ],
+      "bytes": 109963,
+      "sha256": "e3a49f997e4f1e5fbf8ffc3a36a996788e48cd39e40e5484cc3d4300c0a4f8fb",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a08545e0150eb913.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/nlohmann/json.git",
+      "revision": "55f93686c01528224f448c19128836e7df245f72",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/nlohmann/json.git/+archive/55f93686c01528224f448c19128836e7df245f72.tar.gz",
+      "placements": [
+        "src/third_party/nlohmann_json/src"
+      ],
+      "bytes": 9731439,
+      "sha256": "4ec93a109e582f06591874ffdf3642ba25698ec6d923bec6e40300269a577cd6",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/34acf5ce9f2058e9.tar.gz"
+    },
+    {
+      "archiveUrl": "https://storage.googleapis.com/chromium-nodejs/44f845cd5bd9d805cb1c73a98d5726b38ed8662a?generation=1789349489677960",
+      "placements": [
+        "src/third_party/node/node_modules"
+      ],
+      "bytes": 11312049,
+      "sha256": "146cb2af600aa8cf80635592b65219fc94ff3deb384a46a41261405feb46c228",
+      "stripComponents": 0,
+      "kind": "gcs-source",
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/gcs-146cb2af600aa8cf80635592b65219fc94ff3deb384a46a41261405feb46c228.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/project-oak/oak.git",
+      "revision": "14031232cec7d3d454e89bbae36404d74abf18dc",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/project-oak/oak.git/+archive/14031232cec7d3d454e89bbae36404d74abf18dc.tar.gz",
+      "placements": [
+        "src/third_party/oak/src"
+      ],
+      "bytes": 22863888,
+      "sha256": "b09abe50d88c2c3bfca243948d0eb19f1f734bf99b68a1baedaff40b6318016f",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a7e78f49c4294d80.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/cisco/openh264",
+      "revision": "9547f96ea5c47f4d465d97b07264b997ecc4b4b6",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/cisco/openh264/+archive/9547f96ea5c47f4d465d97b07264b997ecc4b4b6.tar.gz",
+      "placements": [
+        "src/third_party/openh264/src"
+      ],
+      "bytes": 60334772,
+      "sha256": "19376d404c96d1cdfee07a4f2bbbb91e1d1d72e690a0f256f3bad185123928ed",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/71153381b1ffbf6d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/openscreen",
+      "revision": "a515d3a249e7411fa251a27125815a06a2d73862",
+      "archiveUrl": "https://chromium.googlesource.com/openscreen/+archive/a515d3a249e7411fa251a27125815a06a2d73862.tar.gz",
+      "placements": [
+        "src/third_party/openscreen/src"
+      ],
+      "bytes": 15044051,
+      "sha256": "1fcb4416b09107aeae3ed9e1d04c5fc765fd0a7e2534b129d23c6aad06169aff",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/dbf7b7cc580fca7e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/src/buildtools",
+      "revision": "4277578aa9c45906e51ad33cac1a5a7ad5288010",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/src/buildtools/+archive/4277578aa9c45906e51ad33cac1a5a7ad5288010.tar.gz",
+      "placements": [
+        "src/third_party/openscreen/src/buildtools"
+      ],
+      "bytes": 60727,
+      "sha256": "eff32afabc3ecfeb9d5d509c2278c780c2889e3fe64a00b5abb7f2d60fc8100b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/2c39acf9c95c82c1.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/intel/tinycbor.git",
+      "revision": "bac6648fed8c0ff3d34616e4fff7cdcca634a18e",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/intel/tinycbor.git/+archive/bac6648fed8c0ff3d34616e4fff7cdcca634a18e.tar.gz",
+      "placements": [
+        "src/third_party/openscreen/src/third_party/tinycbor/src"
+      ],
+      "bytes": 106830,
+      "sha256": "4bc61430184f932fe02f69a4ca020840aeff9b538d76bca6344c0cfc31a0dda6",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a20a559299d0be4d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/khaledhosny/ots.git",
+      "revision": "46bea9879127d0ff1c6601b078e2ce98e83fcd33",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/khaledhosny/ots.git/+archive/46bea9879127d0ff1c6601b078e2ce98e83fcd33.tar.gz",
+      "placements": [
+        "src/third_party/ots/src"
+      ],
+      "bytes": 28926901,
+      "sha256": "cd0ee139e75721c6dc8b8193599aea09ddb509b715c646f0bec425235c0d7465",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/230faa3810199f44.tar.gz"
+    },
+    {
+      "url": "https://pdfium.googlesource.com/pdfium.git",
+      "revision": "c97f02a3519c99d5969514970fd8186318cdb2b0",
+      "archiveUrl": "https://pdfium.googlesource.com/pdfium.git/+archive/c97f02a3519c99d5969514970fd8186318cdb2b0.tar.gz",
+      "placements": [
+        "src/third_party/pdfium"
+      ],
+      "bytes": 13046148,
+      "sha256": "e32ce28ac159867bff4286d5d3b2841fdee60371ac464cd8b194aff4a27d01fc",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/55b66d019d4a27cd.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/perfetto.git",
+      "revision": "403906f4adfbf287a02e5546f8430dcc9d56b649",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/perfetto.git/+archive/403906f4adfbf287a02e5546f8430dcc9d56b649.tar.gz",
+      "placements": [
+        "src/third_party/perfetto"
+      ],
+      "bytes": 64451410,
+      "sha256": "9c74c95be757523fb91ec6e8374fbf0ebe419ab4aa24b780207131641ab102d3",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/df144efe114f408d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/protocolbuffers/protobuf-javascript",
+      "revision": "e6d763860001ba1a76a63adcff5efb12b1c96024",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/protocolbuffers/protobuf-javascript/+archive/e6d763860001ba1a76a63adcff5efb12b1c96024.tar.gz",
+      "placements": [
+        "src/third_party/protobuf-javascript/src"
+      ],
+      "bytes": 410115,
+      "sha256": "5805dccaf2284b2b4eee9535f9e870c28ba155b896bc8fb7eeafead1f3de3937",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "member": "archives/49c0e5c92fac0398.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/pthreadpool.git",
+      "revision": "15a6644ba1c45f1acc16ac1e883efc3e56c6bed2",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/pthreadpool.git/+archive/15a6644ba1c45f1acc16ac1e883efc3e56c6bed2.tar.gz",
+      "placements": [
+        "src/third_party/pthreadpool/src"
+      ],
+      "bytes": 106303,
+      "sha256": "ff2b1bccccc1c4415b54ab710c5df60188057c47fb0e45f57a30197ad3b2f80b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a0b1083429bfd0d6.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/GoogleChromeLabs/pywebsocket3.git",
+      "revision": "139224e0d71db84fe1922601cb92ec8c8f3885ba",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/GoogleChromeLabs/pywebsocket3.git/+archive/139224e0d71db84fe1922601cb92ec8c8f3885ba.tar.gz",
+      "placements": [
+        "src/third_party/pywebsocket3/src"
+      ],
+      "bytes": 101149,
+      "sha256": "9d0107db96389e1a679c02d6bba0886370b06034aaec283cf9731918256414c8",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/502cf17dc01237ad.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/quic-trace.git",
+      "revision": "6ecf6aa8e604655f1dfa72c4a1ae733c4c7fc883",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/quic-trace.git/+archive/6ecf6aa8e604655f1dfa72c4a1ae733c4c7fc883.tar.gz",
+      "placements": [
+        "src/third_party/quic_trace/src"
+      ],
+      "bytes": 407243,
+      "sha256": "bce5cce8d3ae06da99c32c80aa0d39b67ce88f2155bca89a35e26a471d0734f2",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/acb8a8dc1cd55c4c.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/re2.git",
+      "revision": "972a15cedd008d846f1a39b2e88ce48d7f166cbd",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/re2.git/+archive/972a15cedd008d846f1a39b2e88ce48d7f166cbd.tar.gz",
+      "placements": [
+        "src/third_party/re2/src"
+      ],
+      "bytes": 401735,
+      "sha256": "7443cf9bb37d80f39b55e9fd9b5998f82784b033dad7c9d755c6d8844f3c8b65",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/fefd1da5bfc82618.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/mozilla/readability.git",
+      "revision": "d7949dc47dd9ed9ee1d3b34ffdcf3bce28cde435",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/mozilla/readability.git/+archive/d7949dc47dd9ed9ee1d3b34ffdcf3bce28cde435.tar.gz",
+      "placements": [
+        "src/third_party/readability/src"
+      ],
+      "bytes": 5093601,
+      "sha256": "681967ae3ea1f00c3f0437453118677cc34b9f8b797396cb17396b7012bd27fb",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-01.tar",
+      "member": "archives/0fccead9a2129470.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/ruy.git",
+      "revision": "2264753777198e4393fb83c44c693462d57a2be1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/ruy.git/+archive/2264753777198e4393fb83c44c693462d57a2be1.tar.gz",
+      "placements": [
+        "src/third_party/ruy/src"
+      ],
+      "bytes": 288431,
+      "sha256": "364bc056c5ad28c1efd05fc9ccb27a96ce56f2393052f29fda159e38779e39d3",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4f5f6303827fee5e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/search_engines_data.git",
+      "revision": "5dc9f1afd38a8ac2b26b1972eb4fc1bbd5754e8c",
+      "archiveUrl": "https://chromium.googlesource.com/external/search_engines_data.git/+archive/5dc9f1afd38a8ac2b26b1972eb4fc1bbd5754e8c.tar.gz",
+      "placements": [
+        "src/third_party/search_engines_data/resources"
+      ],
+      "bytes": 8359,
+      "sha256": "deabe7e7cd9f37a67026f98f67f55328967fbb728f9fc0349a7849436ee868a5",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/552a65113caba4b1.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/securemessage.git",
+      "revision": "fa07beb12babc3b25e0c5b1f38c16aa8cb6b8f84",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/securemessage.git/+archive/fa07beb12babc3b25e0c5b1f38c16aa8cb6b8f84.tar.gz",
+      "placements": [
+        "src/third_party/securemessage/src"
+      ],
+      "bytes": 50940,
+      "sha256": "663cf5fb6bec788bf9d73ff6cc19e984c811b7bb3025d38cd60366fc11fef09e",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a1c1c3df780b8b58.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/cisco/sframe",
+      "revision": "6a37f061f4eda0c6594c91ecf99b5ff498c8c124",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/cisco/sframe/+archive/6a37f061f4eda0c6594c91ecf99b5ff498c8c124.tar.gz",
+      "placements": [
+        "src/third_party/sframe/src"
+      ],
+      "bytes": 77439,
+      "sha256": "9862cd293e0d30f5e40fa096ba12c2aed793253f73dca45a28b1b8bbfecfff75",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0a5cca76b093f3ca.tar.gz"
+    },
+    {
+      "url": "https://skia.googlesource.com/skia.git",
+      "revision": "ea1e651d7a105f5ca327dfd65d28957957279e2e",
+      "archiveUrl": "https://skia.googlesource.com/skia.git/+archive/ea1e651d7a105f5ca327dfd65d28957957279e2e.tar.gz",
+      "placements": [
+        "src/third_party/skia"
+      ],
+      "bytes": 80269324,
+      "sha256": "1cc56f3b35e2cc1183fdf949a4e6cab4a752dbde20883c7a8d888d3496b42187",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/skia-ea1e651d7a105f5ca327dfd65d28957957279e2e.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/smhasher.git",
+      "revision": "07bb4de10a63e8cc2e1724865454eba635742383",
+      "archiveUrl": "https://chromium.googlesource.com/external/smhasher.git/+archive/07bb4de10a63e8cc2e1724865454eba635742383.tar.gz",
+      "placements": [
+        "src/third_party/smhasher/src"
+      ],
+      "bytes": 64601,
+      "sha256": "d4648f8b608e04cc2ee4f33ab93fb0fed620c6ca572f594f3e49f40c161a1a72",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/7a765db4ec427cfe.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/snappy.git",
+      "revision": "32ded457c0b1fe78ceb8397632c416568d6714a0",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/snappy.git/+archive/32ded457c0b1fe78ceb8397632c416568d6714a0.tar.gz",
+      "placements": [
+        "src/third_party/snappy/src"
+      ],
+      "bytes": 1108122,
+      "sha256": "aeba6ed5e0aa3fef35a6c23800ff82ca9c0632fd2a7934f05063802bde10c2b9",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/7f7ef8a6d968b42b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git",
+      "revision": "f866d2b077038bc85bea5edb7bff8e05cadef0b2",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git/+archive/f866d2b077038bc85bea5edb7bff8e05cadef0b2.tar.gz",
+      "placements": [
+        "src/third_party/speedometer/main"
+      ],
+      "bytes": 134835478,
+      "sha256": "37a5ad0ecba3e50b49837dce4432bbdde1ce0bf644233978a0dd7a01a0a68e27",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/c1ecfb375deaea26.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git",
+      "revision": "732af0dfe867f8815e662ac637357e55f285dbbb",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git/+archive/732af0dfe867f8815e662ac637357e55f285dbbb.tar.gz",
+      "placements": [
+        "src/third_party/speedometer/v2.0"
+      ],
+      "bytes": 4062206,
+      "sha256": "c26c8aa813b5fdb853d4af85fea45fd87e6406a504d674eceebcb6ceb5a7b19c",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/1d58c8bce4417b7b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git",
+      "revision": "8bf7946e39e47c875c00767177197aea5727e84a",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git/+archive/8bf7946e39e47c875c00767177197aea5727e84a.tar.gz",
+      "placements": [
+        "src/third_party/speedometer/v2.1"
+      ],
+      "bytes": 4062203,
+      "sha256": "58e65f8720249dc3d8570dbc4088ad6e18c8169e848abb96e324a2400d4dfade",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/f7764e26dfe27dc9.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git",
+      "revision": "8d67f28d0281ac4330f283495b7f48286654ad7d",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git/+archive/8d67f28d0281ac4330f283495b7f48286654ad7d.tar.gz",
+      "placements": [
+        "src/third_party/speedometer/v3.0"
+      ],
+      "bytes": 12382486,
+      "sha256": "6be6af18665d0289558dd777daea312c3cfd75bb8ef4f0822d0d6ee1b33926e1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/2aa3eeceb9a23235.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git",
+      "revision": "1386415be8fef2f6b6bbdbe1828872471c5d802a",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/WebKit/Speedometer.git/+archive/1386415be8fef2f6b6bbdbe1828872471c5d802a.tar.gz",
+      "placements": [
+        "src/third_party/speedometer/v3.1"
+      ],
+      "bytes": 12384780,
+      "sha256": "9e935e471ecd1c5c83808435ee8b51655c9ec43ea9233aeb6381884fd7c9ab3a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a15f1461cadc499d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Cross",
+      "revision": "b8fcf307f1f347089e3c46eb4451d27f32ebc8d3",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Cross/+archive/b8fcf307f1f347089e3c46eb4451d27f32ebc8d3.tar.gz",
+      "placements": [
+        "src/third_party/spirv-cross/src"
+      ],
+      "bytes": 1923437,
+      "sha256": "11ab4b4d30971e448c027999e126daec2cd2ff757b746bd59a410bac531c83e6",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/04b4b64ac996da88.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Headers",
+      "revision": "cb42dec3830d3ac67fa449ecdc0c0f73d5e74498",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Headers/+archive/cb42dec3830d3ac67fa449ecdc0c0f73d5e74498.tar.gz",
+      "placements": [
+        "src/third_party/spirv-headers/src"
+      ],
+      "bytes": 602238,
+      "sha256": "48395f630046fbe530f85ab8c753ed153e444ed5226bd017c08b42509bde3f6c",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/4d0c57e33e3846db.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Tools",
+      "revision": "1d0401cd2b68ae34cda9ff625bedd1be4ed6214a",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Tools/+archive/1d0401cd2b68ae34cda9ff625bedd1be4ed6214a.tar.gz",
+      "placements": [
+        "src/third_party/spirv-tools/src"
+      ],
+      "bytes": 3638932,
+      "sha256": "2fbc7c7cb4047dc1201804247a74aa63ea2ee250a6d776d765f097a25827071b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/f4b26c1cbdb3a15f.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/chromium/deps/sqlite.git",
+      "revision": "ba8c54c83337618a9f15dd368a267e46b672fc84",
+      "archiveUrl": "https://chromium.googlesource.com/chromium/deps/sqlite.git/+archive/ba8c54c83337618a9f15dd368a267e46b672fc84.tar.gz",
+      "placements": [
+        "src/third_party/sqlite/src"
+      ],
+      "bytes": 19185806,
+      "sha256": "b7434991f243fed920f900797cfe10dfa1142ef284fa60321edaa28c309a3f58",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/a90dc127f9924972.tar.gz"
+    },
+    {
+      "url": "https://github.com/Squirrel/Squirrel.Mac.git",
+      "revision": "fffea30e4a339a7f7d69a3391314b72548d209bd",
+      "archiveUrl": "https://codeload.github.com/Squirrel/Squirrel.Mac/tar.gz/fffea30e4a339a7f7d69a3391314b72548d209bd",
+      "placements": [
+        "src/third_party/squirrel.mac"
+      ],
+      "bytes": 2140370,
+      "sha256": "2ff12ef316f27fc73e24ed2ee80c1e9b4ec5065aba2dbb14a1a979335152e92e",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/e86efe660bc69de6.tar.gz"
+    },
+    {
+      "url": "https://github.com/Mantle/Mantle.git",
+      "revision": "2a8e2123a3931038179ee06105c9e6ec336b12ea",
+      "archiveUrl": "https://codeload.github.com/Mantle/Mantle/tar.gz/2a8e2123a3931038179ee06105c9e6ec336b12ea",
+      "placements": [
+        "src/third_party/squirrel.mac/vendor/Mantle"
+      ],
+      "bytes": 81605,
+      "sha256": "9a6d683612d72c3d15e26a46451866ac01989665c0e2b74c61d28a78b6820f19",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/c8af0eea0b1db840.tar.gz"
+    },
+    {
+      "url": "https://github.com/ReactiveCocoa/ReactiveObjC.git",
+      "revision": "74ab5baccc6f7202c8ac69a8d1e152c29dc1ea76",
+      "archiveUrl": "https://codeload.github.com/ReactiveCocoa/ReactiveObjC/tar.gz/74ab5baccc6f7202c8ac69a8d1e152c29dc1ea76",
+      "placements": [
+        "src/third_party/squirrel.mac/vendor/ReactiveObjC"
+      ],
+      "bytes": 1136238,
+      "sha256": "88e65f116c7a06fccedb43970fba63080a57a4e5dc29147d2cdfe1ee58dd0546",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/affd53e16612e8a9.tar.gz"
+    },
+    {
+      "url": "https://github.com/sparkle-project/Sparkle.git",
+      "revision": "79bc9e872948e47877e76f194cb0c8e0412b0b90",
+      "archiveUrl": "https://codeload.github.com/sparkle-project/Sparkle/tar.gz/79bc9e872948e47877e76f194cb0c8e0412b0b90",
+      "placements": [
+        "src/third_party/squirrel.mac/vendor/Sparkle"
+      ],
+      "bytes": 15364053,
+      "sha256": "e2d6ef050b9cf1d9ea2e5fbb6c26e91954619c79224787adbf483e758043eaa5",
+      "stripComponents": 1,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/671e099caca3a6a0.tar.gz"
+    },
+    {
+      "url": "https://swiftshader.googlesource.com/SwiftShader.git",
+      "revision": "1e80438d2b93ef36a7c05f8d2b81233bac0e3d16",
+      "archiveUrl": "https://swiftshader.googlesource.com/SwiftShader.git/+archive/1e80438d2b93ef36a7c05f8d2b81233bac0e3d16.tar.gz",
+      "placements": [
+        "src/third_party/swiftshader"
+      ],
+      "bytes": 99221542,
+      "sha256": "41680e104a44d8f8315478d12689e1c7f61312bc5e2316efde2d519259784394",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/9f439d892e4c7c93.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/GoogleChromeLabs/text-fragments-polyfill.git",
+      "revision": "abc6ed408b3f20e91d9cbda9977748459f5e3877",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/GoogleChromeLabs/text-fragments-polyfill.git/+archive/abc6ed408b3f20e91d9cbda9977748459f5e3877.tar.gz",
+      "placements": [
+        "src/third_party/text-fragments-polyfill/src"
+      ],
+      "bytes": 99751,
+      "sha256": "7b738d8026ab5acb47c628ca4125fd8fdd8731f4df6ddd05179995042f88f684",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/f6faa51102797ea5.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/tensorflow/tensorflow.git",
+      "revision": "9edd58f895c58c3db484a9e39ab2e953baca4bca",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/tensorflow/tensorflow.git/+archive/9edd58f895c58c3db484a9e39ab2e953baca4bca.tar.gz",
+      "placements": [
+        "src/third_party/tflite/src"
+      ],
+      "bytes": 114378718,
+      "sha256": "484fb47680098b802e082bfae235e8682f1a12d1543ffcbec7f48a8ca98b23d8",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-02.tar",
+      "member": "archives/969fb383db8ddf47.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/ukey2.git",
+      "revision": "0275885d8e6038c39b8a8ca55e75d1d4d1727f47",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/ukey2.git/+archive/0275885d8e6038c39b8a8ca55e75d1d4d1727f47.tar.gz",
+      "placements": [
+        "src/third_party/ukey2/src"
+      ],
+      "bytes": 112058,
+      "sha256": "417e5f576fb51a3d6c3f4fd99bfec015bdb4c319464cf6f70381cae74b7533b4",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/81be02db89460e99.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/vulkan-deps",
+      "revision": "f86e6c66b639c9a6b24640218931d30a9b0f1e3e",
+      "archiveUrl": "https://chromium.googlesource.com/vulkan-deps/+archive/f86e6c66b639c9a6b24640218931d30a9b0f1e3e.tar.gz",
+      "placements": [
+        "src/third_party/vulkan-deps"
+      ],
+      "bytes": 13382,
+      "sha256": "73132601be08275feee92f303096c29baaf0d29ef8e0fb7e6563d04e6822520b",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/bb5eeadd318e00d7.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Headers",
+      "revision": "3c65a01745e4a1134d32b9c2c456472212dba16d",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Headers/+archive/3c65a01745e4a1134d32b9c2c456472212dba16d.tar.gz",
+      "placements": [
+        "src/third_party/vulkan-headers/src"
+      ],
+      "bytes": 3423777,
+      "sha256": "0ac212251840b8761d882890de1b5107f149a035cc22257c42b289225fbf279c",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/6b6780b2f89bd5dd.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Loader",
+      "revision": "3270cf8a1349306f0ddee1b500ee2b0d552e1c82",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Loader/+archive/3270cf8a1349306f0ddee1b500ee2b0d552e1c82.tar.gz",
+      "placements": [
+        "src/third_party/vulkan-loader/src"
+      ],
+      "bytes": 1882705,
+      "sha256": "16e73b700df50a1a85a305bd351c16f02174b79f88b8f1b95b7c0f6f8dfb4262",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/d43e9c58982f2110.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Tools",
+      "revision": "69ca4d4b6590ab32e7a398725bfc90f81e6338e6",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Tools/+archive/69ca4d4b6590ab32e7a398725bfc90f81e6338e6.tar.gz",
+      "placements": [
+        "src/third_party/vulkan-tools/src"
+      ],
+      "bytes": 825193,
+      "sha256": "9375e36c3f26a746dc95b7fc540ea8d8fe397fa6ef6399467b90f7dd11ea247a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/7a7a16d6df50c615.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Utility-Libraries",
+      "revision": "666fdaa0f87b9d49ae576473227b4b4cf428ba7e",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Utility-Libraries/+archive/666fdaa0f87b9d49ae576473227b4b4cf428ba7e.tar.gz",
+      "placements": [
+        "src/third_party/vulkan-utility-libraries/src"
+      ],
+      "bytes": 1359193,
+      "sha256": "e938909fc4e13cb6c7ea9d8230531d2d80de883557243212aa3ddd88fbe3d5be",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/fffede903d69954b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-ValidationLayers",
+      "revision": "b0688753f1fc04a382ef0fd8c46ecb5a7c91486c",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-ValidationLayers/+archive/b0688753f1fc04a382ef0fd8c46ecb5a7c91486c.tar.gz",
+      "placements": [
+        "src/third_party/vulkan-validation-layers/src"
+      ],
+      "bytes": 8579520,
+      "sha256": "385062bf3cc95f5b1f25f2e121c17d55a252106f35fe124556a5042c7daa3d96",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/140bccadab4a1447.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git",
+      "revision": "82a9d47e4f9d91f0e32d2b6acd9714fcee1933a0",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git/+archive/82a9d47e4f9d91f0e32d2b6acd9714fcee1933a0.tar.gz",
+      "placements": [
+        "src/third_party/vulkan_memory_allocator"
+      ],
+      "bytes": 892205,
+      "sha256": "595772c79fc83df5e5290550944b4bc2aa8e9614652fdd9b6bd928112ed3e6a1",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/b42744bfc4360db8.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/SeleniumHQ/selenium/py.git",
+      "revision": "1e954903022e9386b9acf452c24f4458dd4c4fc1",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/SeleniumHQ/selenium/py.git/+archive/1e954903022e9386b9acf452c24f4458dd4c4fc1.tar.gz",
+      "placements": [
+        "src/third_party/webdriver/pylib"
+      ],
+      "bytes": 287920,
+      "sha256": "d44ba3d1b397e2f5b985e86e1acf4bb8508eb2edbe9d1b7e9e5c442d3e4f8ace",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/0a3a2d53265eaa49.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/khronosgroup/webgl.git",
+      "revision": "714857a28445e8f5d8d6ae1c78498578009534d8",
+      "archiveUrl": "https://chromium.googlesource.com/external/khronosgroup/webgl.git/+archive/714857a28445e8f5d8d6ae1c78498578009534d8.tar.gz",
+      "placements": [
+        "src/third_party/webgl/src"
+      ],
+      "bytes": 20824764,
+      "sha256": "fa42b36ed88307e861816732778be0f31c1b09f32ee7e0f715cbb808f72e444a",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/9ae7521c366cc74b.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/gpuweb/cts.git",
+      "revision": "a5e5d7440fa036b74ea13c3c5cb6b618a3c884e9",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/gpuweb/cts.git/+archive/a5e5d7440fa036b74ea13c3c5cb6b618a3c884e9.tar.gz",
+      "placements": [
+        "src/third_party/webgpu-cts/src"
+      ],
+      "bytes": 6227784,
+      "sha256": "fca3fb2178c216e8f2b300aa11097e4737e67eef9ac0e5fb4f2807f8cb2e7ac6",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/900fe4d7546fc7b5.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/webpagereplay.git",
+      "revision": "219ee9a2bb0d0d1440832a0e1d44716833da1ff3",
+      "archiveUrl": "https://chromium.googlesource.com/webpagereplay.git/+archive/219ee9a2bb0d0d1440832a0e1d44716833da1ff3.tar.gz",
+      "placements": [
+        "src/third_party/webpagereplay"
+      ],
+      "bytes": 65232,
+      "sha256": "42460459c92eb676b8b5d7ff30382dc277f8d93666212c6a3fb2bcb797e47158",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/de238d139a5513a3.tar.gz"
+    },
+    {
+      "url": "https://webrtc.googlesource.com/src.git",
+      "revision": "19576e37870bfe5a0a910a32f98ff411f722f43a",
+      "archiveUrl": "https://webrtc.googlesource.com/src.git/+archive/19576e37870bfe5a0a910a32f98ff411f722f43a.tar.gz",
+      "placements": [
+        "src/third_party/webrtc"
+      ],
+      "bytes": 40815400,
+      "sha256": "50b4589f1fe9e6e1d8980fa64589ce5f85e1549bd68f913d8dff42223c34e228",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/webrtc-19576e37870bfe5a0a910a32f98ff411f722f43a.tar.gz"
+    },
+    {
+      "url": "https://skia.googlesource.com/external/github.com/google/wuffs-mirror-release-c.git",
+      "revision": "7411f488fe2e2c205c3d3b3d28638b7356522930",
+      "archiveUrl": "https://skia.googlesource.com/external/github.com/google/wuffs-mirror-release-c.git/+archive/7411f488fe2e2c205c3d3b3d28638b7356522930.tar.gz",
+      "placements": [
+        "src/third_party/wuffs/src"
+      ],
+      "bytes": 778625,
+      "sha256": "c4bcf8c11dc52cdc6740591138d93a3cbbed02f9843b35c35bb36c9972800d7d",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/685ae95cca263ddf.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/google/XNNPACK.git",
+      "revision": "b6d54fe94520ee6e1181ca1b402f71dbb5d50efa",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/google/XNNPACK.git/+archive/b6d54fe94520ee6e1181ca1b402f71dbb5d50efa.tar.gz",
+      "placements": [
+        "src/third_party/xnnpack/src"
+      ],
+      "bytes": 10986160,
+      "sha256": "fa552cafa33a954397fd3f44db1e9a578fa9a8394bb135ebee99807b2effa8ff",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/7cf10672e18db77d.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/external/github.com/facebook/zstd.git",
+      "revision": "10da6ba6de05e29169261fa4b68eb99239f770dd",
+      "archiveUrl": "https://chromium.googlesource.com/external/github.com/facebook/zstd.git/+archive/10da6ba6de05e29169261fa4b68eb99239f770dd.tar.gz",
+      "placements": [
+        "src/third_party/zstd/src"
+      ],
+      "bytes": 2516649,
+      "sha256": "a49cc6bed4614a33eeb7ff867d3e1900c676653ecdc6dac0af823506d7fcace6",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/c0d7e715d0c393e4.tar.gz"
+    },
+    {
+      "url": "https://chromium.googlesource.com/v8/v8.git",
+      "revision": "6500240d220d9eaba51ea0012f60e926fe4b6472",
+      "archiveUrl": "https://chromium.googlesource.com/v8/v8.git/+archive/6500240d220d9eaba51ea0012f60e926fe4b6472.tar.gz",
+      "placements": [
+        "src/v8"
+      ],
+      "bytes": 31963033,
+      "sha256": "afd9a1943e80a5ae88b7b07bfec57cb7b81105c2b1b0e67518656ba7e0da0c7e",
+      "stripComponents": 0,
+      "asset": "Alpi-0.1.0-alpha.2-electron-sources-03.tar",
+      "member": "archives/v8-6500240d220d9eaba51ea0012f60e926fe4b6472.tar.gz"
+    }
+  ]
+}

@@ -90,7 +90,7 @@ The stock deletion CLIs lack atomic ownership-conditional deletion. Alpi seriali
 
 The official AMD64 desktop runs through Rosetta on Apple Silicon. Its guest Chrome uses `--no-sandbox` in the verified setup; this weakens containment *inside* the already untrusted guest. Electron's host renderer remains sandboxed. The optional adapted ARM64 image has a distinct provenance and is not represented as an unmodified upstream release.
 
-The runtime installer verifies pinned bytes and refuses mismatches; hashes establish identity, not that those bytes are benign. Distribution, source provenance and license compliance are separate concerns. Local client builds are ad-hoc signed and not notarized; neither application binaries nor VM runtime payloads are distributed in this source prerelease.
+The runtime installer verifies pinned bytes and refuses mismatches; hashes establish identity, not that those bytes are benign. Distribution, source provenance and license compliance are separate concerns. The macOS client DMG and local client builds are ad-hoc signed and not notarized. VM runtime payloads are not distributed in this prerelease. The DMG does not establish fresh-machine runtime readiness or complete end-to-end acceptance.
 
 ## Research context
 

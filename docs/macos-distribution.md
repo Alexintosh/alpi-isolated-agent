@@ -31,8 +31,10 @@ The builder creates a new Alpi.app, signs it ad hoc, includes the icon and third
 
 No Intel or Linux binary support is claimed. Existing internal storage and Keychain identities remain unchanged. See [existing installations](setup.md#existing-installations-and-data).
 
-## Publication gate
+## Component sources and validation
 
-A locally verified DMG is a build artifact, not automatically a public release. Before attaching one to GitHub, preserve the bundled Electron/Chromium notices and provide the required matching component sources, upstream patches, licenses and rebuilding/replacement instructions alongside it. The initial source release does not satisfy those binary-distribution obligations on its own.
+The client release co-publishes the matching Electron component source set in three optional archive parts. Users installing Alpi need only the DMG; recipients rebuilding or modifying the components need all three source parts and their manifest. See [source provenance and licenses](../licenses/electron/README.md) and [rebuilding/replacement instructions](../licenses/electron/REBUILD.md).
 
-Signing validation checks bundle integrity, not Developer ID identity, notarization, fresh-machine runtime readiness or end-to-end VM acceptance. M7 acceptance is separate from the packaging checks.
+Source and disk-image checksums are included with the release. The source set preserves the pinned upstream archives and ordered Electron patches. External developer toolchains and Apple SDKs are prerequisites; this is not a hermetic toolchain distribution or a bit-for-bit rebuild claim.
+
+Signing validation checks bundle integrity, not Developer ID identity, notarization, fresh-machine runtime readiness or end-to-end VM acceptance. Complete Electron recompilation and execution with modified libraries have not been performed. Full product acceptance remains separate from the packaging checks.

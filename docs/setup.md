@@ -2,16 +2,16 @@
 
 ## Release scope
 
-`v0.1.0-alpha.1` is a **source prerelease**. It includes the native client, guest integration, tests, asset manifests, documentation and branding. It does not distribute an application binary, VM disk, desktop image or combined runtime payload.
+`v0.1.0-alpha.2` adds a **client-only macOS Apple Silicon DMG** to the source prerelease. [Download it from the release](https://github.com/Alexintosh/alpi-isolated-agent/releases/tag/v0.1.0-alpha.2) and follow the [installation guide](macos-distribution.md). Source, guest integration, tests, manifests, documentation and branding remain available. The release does not include VM disks, desktop images or the combined VM runtime payload. Matching Electron component source archives are separate optional downloads for rebuilding those components.
 
-You can build the client locally and run synthetic tests. A fresh checkout alone cannot start a protected guest: the installer requires the exact runtime artifacts in `src/runtime/artifact-manifest.cjs`. The current local build pipeline does not reproduce those historical bytes automatically. Do not remove digest checks to get past this limitation.
+You can install the DMG, build the client locally or run synthetic tests. Neither the DMG nor a fresh checkout alone can start a protected guest: the installer requires the exact runtime artifacts in `src/runtime/artifact-manifest.cjs`. The current local build pipeline does not reproduce those historical bytes automatically. Do not remove digest checks to get past this limitation.
 
 ## macOS client
 
 Prerequisites:
 
 - Apple Silicon Mac. Historical live runtime checks used macOS 27.2.1; other releases are not certified by this prerelease.
-- Node.js 22 or 24 and npm (Node 24 recommended), Git, and Apple Command Line Tools for packaging/signing.
+- For source development only: Node.js 22 or 24 and npm (Node 24 recommended), Git, and Apple Command Line Tools for packaging/signing. The DMG includes Electron; it does not require a separate host Node installation for the client.
 - Enough storage for Electron and build output. A complete runtime adds several gigabytes, then guest disks grow separately.
 - A graphical session to inspect the app. Building and tests do not require opening it.
 
@@ -124,6 +124,7 @@ Do not emulate Linux support by disabling the sandbox, the proxy, TLS verificati
 - `npm test`: full local suite; some tests require separately acquired pinned artifacts.
 - `npm run notices`: reproduce production dependency notices from the lockfile and installed packages.
 - `npm run package:mac`: local Apple Silicon client bundle; no guest runtime included.
+- `npm run package:dmg`: build and verify a client-only DMG without launching the app; see [disk-image packaging](macos-distribution.md).
 
 No inference key is needed for unit tests. See [AGENTS.md](../AGENTS.md) for agent-facing instructions and [SECURITY.md](../SECURITY.md) for security assumptions. A passing mock test is never a substitute for live acceptance of a new platform or engine.
 

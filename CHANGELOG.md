@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-alpha.2 — macOS client DMG
+
+- Added a verified, client-only Apple Silicon DMG with Alpi branding and an Applications shortcut.
+- Included Electron/Chromium notices, matching component source archives, checksums and rebuilding/replacement instructions.
+- Added a repeatable DMG packaging command and installation/update guidance.
+
+The client is ad-hoc signed, not notarized. VM runtime payloads remain separate and undistributed; installing this DMG alone does not make a fresh Mac ready to start guests. No Linux host runtime, full Electron rebuild, modified-library ABI test or full end-to-end release acceptance is claimed.
+
 ## 0.1.0-alpha.1
 
 First public source prerelease of **Alpi — isolated workspaces for AI agents**.
