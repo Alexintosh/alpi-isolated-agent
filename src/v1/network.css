@@ -1,0 +1,21 @@
+/* Compact network ledger; shared row style also serves models, Git and files. */
+.network-mode-section { display: grid; grid-template-columns: minmax(0, 1fr) 245px; gap: 4px 16px; align-items: center; padding: 0 0 14px; border-bottom: 1px solid var(--border); }
+.network-mode-section h2 { margin: 0; }
+.network-mode-section select { margin-top: 0; }
+#network-mode-help { grid-column: 1 / -1; }
+.network-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.network-item .identity { min-width: 0; overflow-wrap: anywhere; }
+.network-item .identity strong { color: var(--text); font-size: 13px; font-weight: 600; }
+.network-item .identity p { font-size: 12px; margin: 3px 0; }
+.network-item .identity code { display: block; color: var(--text-secondary); font-size: 12px; margin: 2px 0; }
+.network-item .identity small { display: block; margin-top: 4px; font-size: 11px; color: var(--text-muted); }
+.network-item .identity .inference-context { color: var(--amber); }
+.network-item .actions { display: flex; flex-shrink: 0; flex-wrap: wrap; gap: 6px; align-items: center; }
+.network-item .actions button { min-height: 30px; padding: 3px 8px; font-size: 12px; }
+#network-pending .network-item { display: block; padding: 12px 0 14px 12px; border-left: 2px solid var(--accent); }
+#network-pending .actions { margin-top: 10px; }
+#network-history .network-item { padding: 9px 0; }
+.rule-decision { text-transform: uppercase; letter-spacing: .05em; font-size: 10px !important; font-weight: 600; }
+.rule-decision.allow { color: var(--green) !important; }
+.rule-decision.deny { color: var(--red) !important; }
+@media (max-width: 800px) { .network-item { align-items: flex-start; flex-direction: column; gap: 8px; } .network-mode-section { grid-template-columns: 1fr; } .network-mode-section label { max-width: 320px; } }

@@ -1,0 +1,38 @@
+:root { color-scheme: dark; font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #f9fafb; background: transparent; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+[hidden] { display: none !important; }
+#notice { display: flex; flex-direction: column; gap: 6px; margin: 4px; padding: 12px; height: 216px; border: 1px solid rgb(255 255 255 / .16); border-radius: 10px; background: #2c2c2e; box-shadow: 0 3px 12px rgb(0 0 0 / .3); }
+header { display: flex; align-items: center; gap: 7px; flex: none; }
+h1 { font-size: 12px; font-weight: 600; margin: 0; flex: 1; }
+.notice-icon { display: flex; color: #7aaaff; }
+svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.4; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+p { margin: 0; }
+#notice-destination { font: 12px/1.4 "SFMono-Regular", Menlo, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
+#notice-count { font-size: 11px; color: #adb2b8; flex: none; }
+#notice-context { color: #cfd3d6; font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+#notice-context.inference { color: #f0b45b; }
+#notice-result { font-size: 11px; color: #f5a6a0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button { font: inherit; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 3px 10px; border-radius: 5px; border: 1px solid rgb(255 255 255 / .16); background: #353638; color: #f9fafb; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { background: #43454a; }
+button:active:not(:disabled) { background: #52555a; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible { outline: 2px solid #7aaaff; outline-offset: 2px; }
+#notice-close { padding: 2px; min-height: 22px; width: 22px; height: 22px; border: 0; background: transparent; color: #adb2b8; }
+#notice-close:hover { background: #43454a; color: #f9fafb; }
+.notice-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: auto; padding-top: 2px; flex: none; }
+#notice-deny { margin-right: auto; background: transparent; color: #cfd3d6; }
+button.primary { background: #5686fe; border-color: transparent; color: #090f1d; font-weight: 600; }
+button.primary:hover:not(:disabled) { background: #7aaaff; }
+/* Both menus occupy the space above the actions, within the 384 × 224 view. */
+.split-action { position: relative; display: inline-flex; flex: none; }
+#deny-split { margin-right: auto; }
+.split-action > button:first-child { border-radius: 5px 0 0 5px; }
+.split-action > .split-chevron { width: 27px; padding: 3px 5px; border-left: 1px solid rgb(255 255 255 / .18); border-radius: 0 5px 5px 0; }
+.decision-menu { position: absolute; bottom: calc(100% + 6px); right: 0; width: 144px; padding: 4px; border: 1px solid rgb(255 255 255 / .2); border-radius: 6px; background: #353638; box-shadow: 0 4px 12px rgb(0 0 0 / .35); z-index: 2; }
+#deny-menu { left: 0; right: auto; }
+.decision-menu button { display: flex; width: 100%; justify-content: flex-start; min-height: 30px; border-color: transparent; background: transparent; }
+.decision-menu button:focus-visible { outline-offset: -2px; background: #43454a; }
+#notice-review { border-color: transparent; background: transparent; color: #adb2b8; font-size: 11px; }
+#notice-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#notice-context { flex-shrink: 1; min-height: 0; }

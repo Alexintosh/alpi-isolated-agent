@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alpi</title>
+  <link rel="stylesheet" href="control.css">
+  <link rel="stylesheet" href="network.css">
+</head>
+<body>
+  <div id="content">
+    <main id="welcome" aria-labelledby="welcome-heading">
+      <p class="welcome-mark"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3v10M13 3v10M3 8h10"/></svg>Alpi</p>
+      <h1 id="welcome-heading">Your workspace, isolated.</h1>
+      <p class="welcome-subtitle">Connect to Harness in your own Linux environment.</p>
+      <div class="welcome-environment">
+        <strong id="welcome-environment">No environment selected</strong>
+        <p id="welcome-capabilities"></p>
+      </div>
+      <ul class="welcome-readiness" aria-label="Selected environment status">
+        <li><span id="welcome-runtime-dot" class="welcome-dot" aria-hidden="true"></span><span class="welcome-status-name">Runtime</span><span id="welcome-runtime-value" class="welcome-status-value">Unknown</span></li>
+        <li><span id="welcome-vm-dot" class="welcome-dot" aria-hidden="true"></span><span class="welcome-status-name">VM</span><span id="welcome-vm-value" class="welcome-status-value">Unknown</span></li>
+        <li><span id="welcome-network-dot" class="welcome-dot" aria-hidden="true"></span><span class="welcome-status-name">Network</span><span id="welcome-network-value" class="welcome-status-value">Unknown</span></li>
+        <li><span id="welcome-harness-dot" class="welcome-dot" aria-hidden="true"></span><span class="welcome-status-name">Harness</span><span id="welcome-harness-value" class="welcome-status-value">Disconnected</span></li>
+      </ul>
+      <button id="welcome-action" type="button" class="primary" aria-describedby="welcome-runtime welcome-guidance" disabled>Connect</button>
+      <p id="welcome-runtime" class="warn" hidden role="status"></p>
+      <p id="welcome-state" class="welcome-state" role="status"></p>
+      <p id="slow-start" class="note" hidden>Startup can take longer while the environment is prepared. Connection startup can be cancelled from the button above.</p>
+      <p id="welcome-guidance" class="welcome-guidance">Files stay in this VM. Import a project when you need it.</p>
+      <nav class="welcome-shortcuts" aria-label="Workspace shortcuts">
+        <button id="welcome-files" type="button">Files</button>
+        <button id="welcome-network" type="button">Network</button>
+        <button id="welcome-settings" type="button">Settings</button>
+      </nav>
+      <p class="welcome-explanation">Disconnect keeps jobs running. Stop VM stops jobs.<br>Window close keeps the app in the background. Quit stops managed environments.</p>
+    </main>
+
+    <section id="resources-panel" class="page" hidden aria-label="Resources & Settings">
+      <div class="panel-head">
+        <button id="resources-back" class="panel-back" type="button">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>
+          <span>Back to Harness</span>
+        </button>
+        <div>
+          <h1>Settings</h1>
+          <p id="resource-environment" class="subtitle"></p>
+        </div>
+      </div>
+      <div class="page-body">
+        <p class="note">Saving stops this environment and its jobs. Connect again to apply the limits. Sessions and workspace files are preserved.</p>
+        <h2>Resources</h2>
+        <form id="resource-form" class="settings-form">
+          <label for="resource-cpus">CPU limit
+            <input id="resource-cpus" type="number" min="1" step="1" required>
+          </label>
+          <label for="resource-memory">Memory limit (MiB)
+            <input id="resource-memory" type="number" min="2048" step="512" required>
+          </label>
+          <label for="resource-disk-gib">Disk capacity (GiB)
+            <input id="resource-disk-gib" type="number" min="20" step="1" required>
+          </label>
+          <label for="resource-overlay-gib" id="resource-overlay-row" hidden>WrapVM system overlay (GiB)
+            <input id="resource-overlay-gib" type="number" min="10" step="1">
+          </label>
+          <p id="resource-disk" class="note" role="status"></p>
+          <p id="resource-budget" class="note" role="status"></p>
+          <button id="resource-save" type="submit" class="primary">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+            <span>Save and stop environment</span>
+          </button>
+        </form>
+
+        <section id="environment-management" aria-labelledby="environment-management-heading">
+          <h2 id="environment-management-heading">Environment management</h2>
+          <div class="environment-identity">
+            <strong id="management-environment">No environment selected</strong>
+            <p id="management-image" class="note" hidden></p>
+          </div>
+          <p id="management-recovery" class="alert" role="alert" hidden>Recreation incomplete. Connect and Restart VM are blocked. Retry Recreate environment below and confirm recovery in the native dialog.</p>
+          <p id="management-availability" class="note" role="status"></p>
+          <div class="environment-operation">
+            <div>
+              <h3>Restart VM</h3>
+              <p id="management-restart-help" class="note">Stops running jobs. Keeps workspace files, Harness sessions, browser data and saved folder shares. The VM restarts and Harness stays disconnected; select Connect afterward.</p>
+            </div>
+            <button id="environment-restart" type="button" aria-describedby="management-restart-help management-availability" disabled>Restart VM</button>
+          </div>
+          <div class="environment-operation">
+            <div>
+              <h3>Recreate environment</h3>
+              <p id="management-recreate-warning" class="note warn-note">Cannot be undone. Stops jobs and deletes this VM’s workspace, Harness sessions, browser profile and system changes. Revokes folder-share grants; files on your Mac are never deleted.</p>
+              <p id="management-recreate-help" class="note">Keeps the selected image, resource limits, model/Git settings, host vault, saved network rules and network mode. Other environments are unchanged. A fresh VM is built on the next Connect; nothing starts automatically.</p>
+              <button id="environment-export" type="button">Export files first</button>
+            </div>
+            <button id="environment-recreate" type="button" class="danger" aria-describedby="management-recreate-warning management-recreate-help management-recovery management-availability" disabled>Recreate environment…</button>
+          </div>
+        </section>
+
+        <section id="desktop-image-section" aria-labelledby="desktop-image-heading" hidden>
+          <h2 id="desktop-image-heading">WrapVM image</h2>
+          <fieldset id="desktop-image-choices" aria-describedby="desktop-image-help">
+            <legend class="visually-hidden">Desktop image</legend>
+            <label class="image-choice" for="desktop-image-local">
+              <input id="desktop-image-local" type="radio" name="desktop-image" value="local-arm64" aria-describedby="desktop-image-local-details">
+              <span><strong>Local ARM64 · Chromium</strong><small id="desktop-image-local-details"></small></span>
+            </label>
+            <label class="image-choice" for="desktop-image-official">
+              <input id="desktop-image-official" type="radio" name="desktop-image" value="stock-amd64" aria-describedby="desktop-image-official-details">
+              <span><strong>Official AMD64 · Google Chrome · Rosetta</strong><small id="desktop-image-official-details"></small></span>
+            </label>
+          </fieldset>
+          <p id="desktop-image-help" class="note">Switching stops the current WrapVM and its running jobs. Sessions and files stay separate for each image, with no automatic migration or folder sharing. The imported host model catalog remains available.</p>
+          <p id="desktop-image-summary" class="note" role="status"></p>
+          <p id="desktop-image-error" class="alert" role="alert" hidden></p>
+          <div id="desktop-image-progress-wrap" hidden>
+            <progress id="desktop-image-progress" aria-label="Desktop image import progress"></progress>
+            <p id="desktop-image-progress-text" class="note" role="status"></p>
+          </div>
+          <div class="row">
+            <button id="desktop-image-switch" type="button" class="danger" disabled>Switch image and stop WrapVM</button>
+            <button id="desktop-image-import" type="button" hidden>Import local ARM64 image…</button>
+            <button id="desktop-image-cancel" type="button" hidden>Cancel image import</button>
+          </div>
+          <p id="desktop-image-import-help" class="note" hidden>Choose the pinned local image archive on your Mac. The app copies and verifies it before it becomes available; importing does not switch images.</p>
+        </section>
+
+        <section id="runtime-section" aria-label="Runtime setup" hidden>
+          <h2>Runtime</h2>
+          <p class="note">Managed environments stop before any runtime change. Sessions and workspace files are preserved.</p>
+          <p id="runtime-fault" class="alert" role="alert" hidden></p>
+          <p id="runtime-summary" role="status" class="note"></p>
+          <div id="runtime-progress-wrap" hidden>
+            <progress id="runtime-progress" aria-label="Runtime package progress" max="1" value="0"></progress>
+            <p id="runtime-progress-text" class="note" role="status"></p>
+          </div>
+          <div class="row">
+            <button id="runtime-install" type="button" class="primary">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v7M5 6.6l3 3 3-3M2.5 13h11"/></svg>
+              <span>Install runtime package…</span>
+            </button>
+            <button id="runtime-rollback" type="button" hidden>
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 3.2v3.4h3.4M3.6 6.6A5 5 0 1 1 8.2 12"/></svg>
+              <span>Restore previous runtime</span>
+            </button>
+            <button id="runtime-restore" type="button" hidden>
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 3.2v3.4h3.4M3.6 6.6A5 5 0 1 1 8.2 12"/></svg>
+              <span>Recover runtime selection</span>
+            </button>
+            <button id="runtime-cancel" type="button" class="danger" hidden>
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <p class="note">Installing requires choosing the verified runtime package from your Mac. Only the selected package is read; no arbitrary install paths are accepted.</p>
+        </section>
+
+        <section aria-label="Diagnostics">
+          <h2>Diagnostics</h2>
+          <p class="note">Export a report of versions and status counts. The report excludes credentials, URLs and workspace paths.</p>
+          <button id="diagnostics-export" type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 1.8h4.5L12.5 5v9.2h-8z"/><path d="M9 2v3.5h3.5"/></svg>
+            <span>Export diagnostics…</span>
+          </button>
+        </section>
+      </div>
+    </section>
+
+    <section id="network-panel" class="page" hidden aria-label="Network">
+      <div class="panel-head">
+        <button id="back-harness" class="panel-back" type="button">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>
+          <span>Back to Harness</span>
+        </button>
+        <div>
+          <h1>Network</h1>
+          <p class="subtitle">Control traffic for the selected environment. Every connection stays through Iron.</p>
+        </div>
+      </div>
+      <div class="page-body">
+        <p id="network-fault" class="alert" role="alert" hidden>Network rules are unavailable. The network stays offline.</p>
+        <section class="network-mode-section" aria-labelledby="network-mode-heading">
+          <div><h2 id="network-mode-heading">Network access</h2><p id="network-environment" class="note"></p></div>
+          <label for="network-mode"><span class="visually-hidden">Network mode for selected environment</span>
+            <select id="network-mode">
+              <option value="ask">Ask for approval (default)</option>
+              <option value="allow-all">Allow all destinations</option>
+              <option value="block-all">Block all traffic</option>
+            </select>
+          </label>
+          <p id="network-mode-help" class="note">All traffic stays through Iron. Saved destination rules are retained and active in Ask for approval.</p>
+        </section>
+        <h2>Pending requests</h2>
+        <p class="note">Requests from all environments are grouped by destination and method. Once decisions apply only to the requests currently in that group, never future arrivals. Pending requests expire after 55 seconds.</p>
+        <p class="note">CONNECT tunnels are only the initial link — the HTTP operation inside them requires its own rule or decision.</p>
+        <div id="network-pending" class="list" aria-live="polite"></div>
+        <h2>Rules for this environment</h2>
+        <p class="note">Revoking a rule or letting a temporary permission expire interrupts active network requests and applies the updated rules. Harness and the VM stay open. Interrupted requests are not retried automatically. Saved rules apply in Ask for approval mode.</p>
+        <div id="network-rules" class="list" aria-live="polite"></div>
+        <details class="rule-form-wrap">
+          <summary>Add a precise rule</summary>
+          <form id="network-rule-form">
+            <label for="rule-environment">Environment
+              <select id="rule-environment" required></select>
+            </label>
+            <label for="rule-action">Decision
+              <select id="rule-action"><option value="allow">Allow</option><option value="deny">Deny</option></select>
+            </label>
+            <label for="rule-origin">Exact origin
+              <input id="rule-origin" type="url" placeholder="https://example.com:443" autocomplete="off" required>
+            </label>
+            <label for="rule-method">Method (empty = any)
+              <input id="rule-method" placeholder="GET" maxlength="20" pattern="[A-Z]{1,20}" autocomplete="off">
+            </label>
+            <label for="rule-path">Exact path (empty = any)
+              <input id="rule-path" placeholder="/api/models" maxlength="2048" autocomplete="off">
+            </label>
+            <p class="note">The rule does not limit query parameters. Avoid secrets in the path — this field is saved on your Mac.</p>
+            <button type="submit" class="primary">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+              <span>Save rule</span>
+            </button>
+          </form>
+        </details>
+        <div class="row-between">
+          <h2>Recent activity</h2>
+          <button id="network-clear" type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.2 4.5l.6-1h2.4l.6 1M5.4 4.5V12.5h5.2V4.5"/><path d="M7 6.8v3.8M9 6.8v3.8"/></svg>
+            <span>Clear finished history</span>
+          </button>
+        </div>
+        <p class="note">The last 500 events. Paths, query strings, headers, cookies and request bodies are not recorded. Expired or interrupted operations are not retried automatically.</p>
+        <div id="network-history" class="list" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="models-panel" class="page" hidden aria-label="Local models">
+      <div class="panel-head">
+        <button id="models-back" class="panel-back" type="button">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>
+          <span>Back to Harness</span>
+        </button>
+        <div>
+          <h1>Local models</h1>
+          <p class="subtitle">A shared catalog for Lima and WrapVM. Saved credentials stay protected by Keychain on your Mac.</p>
+        </div>
+      </div>
+      <div class="page-body">
+        <p class="note">Import the providers explicitly listed in your host model-authorizations.json file. Verification checks the currently served model without running inference.</p>
+        <p class="note">Guest-side availability is not verified yet.</p>
+        <div class="row">
+          <button id="models-import" class="primary" type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v7M5 6.6l3 3 3-3M2.5 13h11"/></svg>
+            <span>Import from DSH on Mac</span>
+          </button>
+          <button id="models-probe" type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="3.6"/><path d="M10.4 10.4 13 13"/></svg>
+            <span>Verify availability</span>
+          </button>
+        </div>
+        <div id="model-list" class="list" aria-live="polite"></div>
+        <h2>Private GitHub over HTTPS</h2>
+        <p class="note">Authorize one specific repository for clone, fetch and push. The credential already available on your Mac is kept by the app; the guest receives a substitute token. No personal login in the guest browser.</p>
+        <p class="note">Importing, updating or removing access stops environments and running jobs, closing old substitute credentials. Then press Connect. Redirect and Git LFS are not supported.</p>
+        <form id="git-form" class="settings-form">
+          <label for="git-repository">GitHub repository
+            <input id="git-repository" placeholder="owner/repository" maxlength="140" autocomplete="off" required>
+          </label>
+          <button id="git-import" type="submit">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v7M5 6.6l3 3 3-3M2.5 13h11"/></svg>
+            <span>Import credential from Mac and stop environments</span>
+          </button>
+        </form>
+        <div id="git-list" class="list" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="files-panel" class="page" hidden aria-label="Transfer files">
+      <div class="panel-head">
+        <button id="files-back" class="panel-back" type="button">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>
+          <span>Back to Harness</span>
+        </button>
+        <div>
+          <h1>Files</h1>
+          <p id="files-environment" class="subtitle"></p>
+        </div>
+      </div>
+      <div class="page-body">
+        <p class="note">The workspace stays in the VM. Every transfer creates a new folder: no existing file is overwritten. Review the preview before confirming.</p>
+        <p class="note">Files and folders up to 1 GiB and 20,000 entries. Symbolic links, hardlinks and special files are not supported. Archives are copied as files, without automatic extraction.</p>
+        <div class="section-tabs" role="tablist" aria-label="File operations">
+          <button id="files-tab-import" role="tab" aria-selected="true" aria-controls="files-import" tabindex="0" type="button">Import</button>
+          <button id="files-tab-export" role="tab" aria-selected="false" aria-controls="files-export" tabindex="-1" type="button">Export</button>
+          <button id="files-tab-shared" role="tab" aria-selected="false" aria-controls="files-shared" tabindex="-1" type="button">Shared folders</button>
+        </div>
+        <div class="file-forms">
+          <section id="files-import" class="transfer-column" role="tabpanel" aria-labelledby="files-tab-import">
+            <h2>Import from your Mac</h2>
+            <p class="note">Choose a file or folder using the native Mac picker, then review the transfer.</p>
+            <label for="import-destination">Existing guest folder
+              <input id="import-destination" value="/home/user/workspace" maxlength="4096" autocomplete="off">
+            </label>
+            <label for="import-name">Name of the new folder
+              <input id="import-name" value="import" maxlength="255" autocomplete="off">
+            </label>
+            <div class="row">
+              <button id="import-file" type="button">
+                <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 1.8h4.5L12.5 5v9.2h-8z"/><path d="M9 2v3.5h3.5"/></svg>
+                <span>Choose file or archive…</span>
+              </button>
+              <button id="import-folder" type="button">
+                <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 4.6A1.6 1.6 0 0 1 3.8 3H6l2 2h4.2a1.6 1.6 0 0 1 1.6 1.6v4.8a1.6 1.6 0 0 1-1.6 1.6H3.8A1.6 1.6 0 0 1 2.2 11z"/><path d="M8 7v4M6 9h4"/></svg>
+                <span>Choose folder…</span>
+              </button>
+            </div>
+            <p class="note warn-note">The selection may contain project credentials, such as .env files: copying them makes them readable to the guest. App-managed private data and DSH profiles are excluded.</p>
+          </section>
+          <section id="files-export" class="transfer-column" role="tabpanel" aria-labelledby="files-tab-export" hidden>
+            <h2>Export to your Mac</h2>
+            <p class="note">Enter a path in the guest workspace, then choose a destination using the native Mac picker.</p>
+            <label for="export-source">File or folder in the guest workspace
+              <input id="export-source" value="/home/user/workspace" maxlength="4096" autocomplete="off">
+            </label>
+            <label for="export-name">Name of the new folder on the Mac
+              <input id="export-name" value="harness-export" maxlength="255" autocomplete="off">
+            </label>
+            <div class="row">
+              <button id="export-files" type="button">
+                <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V4M5 6.2 8 3.2l3 3M2.5 13h11"/></svg>
+                <span>Choose destination on Mac…</span>
+              </button>
+            </div>
+            <p class="note">The exported folder contains the selected item. Changes are not applied automatically to the original project.</p>
+          </section>
+        </div>
+        <div id="transfer-review">
+        <div id="file-preview" aria-live="polite"></div>
+        <progress id="file-progress" aria-label="File transfer progress" max="1" value="0" hidden></progress>
+        <div class="row">
+          <button id="file-confirm" class="primary" disabled type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+            <span>Confirm transfer</span>
+          </button>
+          <button id="file-cancel" disabled type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+            <span>Cancel</span>
+          </button>
+        </div>
+        <p id="file-result" class="note" role="status"></p>
+        </div>
+        <div id="file-recovery" aria-live="polite"></div>
+
+        <section id="files-shared" role="tabpanel" aria-labelledby="files-tab-shared" hidden>
+        <h2>Share a Mac folder</h2>
+        <p id="share-fault" class="alert" role="alert" hidden>Saved sharing settings could not be verified and were preserved. Preparing or confirming new shares is disabled. Stop remains available from the toolbar.</p>
+        <p class="note">The guest accesses the chosen folder directly, including .env, .git and other project secrets. Read/write can modify or delete files on your Mac. App-managed private data is excluded.</p>
+        <p class="note">Adding and removing shares stops the VM and its jobs. Press Connect to restart it. The choice is kept for this environment; removing it also revokes access to files already open.</p>
+        <label for="share-mode">Access
+          <select id="share-mode">
+            <option value="ro">Read only</option>
+            <option value="rw">Read and write</option>
+          </select>
+        </label>
+        <div class="row">
+          <button id="share-choose" type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 4.6A1.6 1.6 0 0 1 3.8 3H6l2 2h4.2a1.6 1.6 0 0 1 1.6 1.6v4.8a1.6 1.6 0 0 1-1.6 1.6H3.8A1.6 1.6 0 0 1 2.2 11z"/><path d="M8 7v4M6 9h4"/></svg>
+            <span>Choose folder to share…</span>
+          </button>
+        </div>
+        <div id="share-preview" class="preview-box" aria-live="polite"></div>
+        <div class="row">
+          <button id="share-confirm" class="primary" disabled type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+            <span>Confirm and stop the VM</span>
+          </button>
+          <button id="share-cancel" disabled type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+            <span>Cancel share</span>
+          </button>
+        </div>
+        <div id="share-list" class="list" aria-live="polite"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <div id="toolbar" role="toolbar" aria-label="Environment and local controls">
+    <div class="toolbar-environment">
+      <span id="status" class="status-dot" tabindex="0" role="img" aria-label="Loading environment status" title="Loading environment status"></span>
+      <label class="env-label" for="environment">
+        <span class="visually-hidden">Environment</span>
+        <select id="environment" disabled></select>
+      </label>
+      <span id="operation-status" role="status" aria-live="off" hidden><span class="spinner" aria-hidden="true"></span><span id="operation-text"></span></span>
+    </div>
+    <div class="viewer-dock" role="group" aria-label="Workspace view">
+      <button id="harness" class="action" type="button" title="Show Harness" aria-label="Harness" aria-pressed="true">
+        <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3v10M13 3v10M3 8h10"/></svg>
+      </button>
+      <button id="desktop" class="action" type="button" title="Show the full VM desktop" aria-label="Desktop" aria-pressed="false" disabled>
+        <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="2.5" width="12.4" height="8.4" rx="1"/><path d="M8 11v2.5M5 13.5h6"/></svg>
+      </button>
+      <button id="browser" class="action" type="button" title="Focus an existing Chrome window in the full VM desktop; does not open a new browser or tab" aria-label="Browser — focus existing Chrome in the VM desktop" aria-pressed="false" disabled>
+        <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1"/><path d="M2 6h12M4.5 4.2h.1M6.5 4.2h.1"/></svg>
+      </button>
+    </div>
+    <div class="toolbar-actions">
+      <div class="utility-actions" role="group" aria-label="Local utilities">
+        <button id="network" class="action reveal-label" type="button" aria-label="Network" aria-pressed="false">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><ellipse cx="8" cy="8" rx="2.8" ry="6.2"/><path d="M1.8 8h12.4"/></svg>
+          <span id="pending-count" class="badge" hidden>0</span>
+          <span class="action-label" aria-hidden="true">Network</span>
+        </button>
+        <button id="files" class="action reveal-label" type="button" aria-label="Files" aria-pressed="false">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3H6l2 2h4.5A1.5 1.5 0 0 1 14 6.5v5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
+          <span class="action-label" aria-hidden="true">Files</span>
+        </button>
+        <button id="models" class="action reveal-label" type="button" aria-label="Models" aria-pressed="false">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6 1.8V4M10 1.8V4M6 12v2.2M10 12v2.2M1.8 6H4M1.8 10H4M12 6h2.2M12 10h2.2"/></svg>
+          <span class="action-label" aria-hidden="true">Models</span>
+        </button>
+        <button id="resources" class="action reveal-label" type="button" aria-label="Settings" aria-pressed="false">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h3M9 5h5M2 11h6M12 11h2"/><circle cx="7" cy="5" r="2"/><circle cx="10" cy="11" r="2"/></svg>
+          <span class="action-label" aria-hidden="true">Settings</span>
+        </button>
+      </div>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button id="connect" class="action primary" type="button" disabled title="Connect to the selected environment">
+        <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.4 5.7a6 6 0 1 1-8.8 0M8 1.8v6"/></svg><span id="connect-label">Connect</span>
+      </button>
+      <button id="stop" class="action danger" type="button" disabled title="Stop the selected VM and its jobs. Files are preserved." aria-label="Stop VM and its jobs; preserve files">
+        <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.4 5.7a6 6 0 1 1-8.8 0M8 1.8v6"/></svg><span>Stop VM</span>
+      </button>
+    </div>
+  </div>
+  <div id="local-message" role="status" hidden><span id="detail"></span><button id="message-dismiss" type="button" aria-label="Dismiss status message">×</button></div>
+  <span id="capabilities" class="visually-hidden"></span>
+  <span id="status-announcement" class="visually-hidden" role="status"></span>
+  <script src="control.js"></script>
+</body>
+</html>

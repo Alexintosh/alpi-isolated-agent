@@ -1,0 +1,130 @@
+# Alpi setup and development
+
+## Release scope
+
+`v0.1.0-alpha.1` is a **source prerelease**. It includes the native client, guest integration, tests, asset manifests, documentation and branding. It does not distribute an application binary, VM disk, desktop image or combined runtime payload.
+
+You can build the client locally and run synthetic tests. A fresh checkout alone cannot start a protected guest: the installer requires the exact runtime artifacts in `src/runtime/artifact-manifest.cjs`. The current local build pipeline does not reproduce those historical bytes automatically. Do not remove digest checks to get past this limitation.
+
+## macOS client
+
+Prerequisites:
+
+- Apple Silicon Mac. Historical live runtime checks used macOS 27.2.1; other releases are not certified by this prerelease.
+- Node.js 22 or 24 and npm (Node 24 recommended), Git, and Apple Command Line Tools for packaging/signing.
+- Enough storage for Electron and build output. A complete runtime adds several gigabytes, then guest disks grow separately.
+- A graphical session to inspect the app. Building and tests do not require opening it.
+
+```sh
+git clone https://github.com/Alexintosh/alpi-isolated-agent.git
+cd alpi-isolated-agent
+npm ci
+npm run test:portable
+npm run notices
+npm run package:mac
+open dist/Alpi.app
+```
+
+`package:mac` copies the installed Electron runtime, production dependencies, Alpi code, notices and icon into a new bundle. It signs that copy ad hoc and verifies the signature. It never replaces an existing destination. To make another build:
+
+```sh
+node scripts/package-personal-app.cjs --output="$PWD/dist/Alpi-next.app"
+```
+
+No VM starts during packaging. Do not use `--check-startup` casually: although it does not request a guest start, app initialization reconciles managed environments, and its normal exit stops them. Open the app manually when you are ready to control your environments.
+
+Gatekeeper may require an explicit local trust decision because the app is not Developer ID signed/notarized. Alpi does not modify system-wide Gatekeeper policy or install a privileged helper.
+
+### Runtime preparation
+
+The embedded manifest fixes versions, byte lengths and SHA-256 digests. It currently expects:
+
+- Lima 1.0.7 and its ARM64 guest agent; a pinned Ubuntu 24.04 ARM64 disk.
+- smolvm 1.34.1 for macOS ARM64; the official AMD64 WrapVM image.
+- Iron Proxy 0.56.0; guest Node 24.13.0 and DSH 0.2.2-rc.2 bundles for ARM64 and x64.
+- agent-browser 0.41.2 and a private CPython 3.13.18 host runtime.
+
+For an already prepared compatible payload, choose **Settings → Install runtime package** and select its folder. Installation verifies all required files, including both engine payloads. A Lima-only folder is not accepted by the current all-files manifest.
+
+The stock AMD64 desktop needs Linux Rosetta support already installed on the host. Alpi does not install Rosetta or accept its terms for you. The optional local ARM64/Chromium image is separately pinned and not available from this repository; selecting it requires the exact locally prepared archive. There is no architecture or image fallback.
+
+Maintainer build helpers include `build-guest-bundle.cjs`, `acquire-wrapvm-stock.cjs`, `acquire-browser-tool.cjs`, `acquire-host-python.cjs` and `package-lima-runtime.cjs`. These are ingredients, **not a complete fresh-machine installer**. The guest builder records timestamps; its new archive will differ from the historical manifest. Lima packaging expects an exact preinstalled version. A new runtime release must deliberately inventory, license-review, test and pin its resulting bytes in application code.
+
+Runtime redistribution remains blocked on permissions and complete license/source obligations described in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do not attach the local Runtime Package to a public release.
+
+### Authorize and import model configuration
+
+This alpha supports explicit `openai-completions` providers configured in an existing DSH desktop profile. It does not automatically authorize every provider in that profile or import browser logins.
+
+While Alpi is closed, create `model-authorizations.json` inside the app's host state directory. For a packaged build, that is:
+
+```text
+~/Library/Application Support/Harness Isolated/personal-v1/model-authorizations.json
+```
+
+The legacy directory name is intentional. Example (replace the provider/model with your own; this is not an operational endpoint):
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "local-model": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "your-model-id"
+    }
+  }
+}
+```
+
+Set the file to mode `0600`. It contains authorization metadata, **not a key**. Up to 32 providers are supported, with one explicitly selected model per provider. Provider IDs must start with a lowercase letter or digit and contain only lowercase letters, digits and hyphens (maximum 64 characters). Endpoints must use HTTP(S), end in `/v1`, and contain no URL credentials, query or fragment. The authorized provider IDs, endpoints and models must match the DSH desktop configuration; its default model must be included.
+
+Open Alpi and use **Models → Import**. The importer reads `~/.dsh/profiles/desktop/cordis.patch.yml` and the referenced entries in `~/.dsh/.credentials.yaml`, stores managed credentials in the encrypted host vault, and leaves the source profile unchanged. Restart the app after editing authorization metadata. An invalid authorization file fails without fallback. With no file, only providers in an already-saved host catalog remain authorized; a clean installation cannot import until configured.
+
+Inference endpoints are reached from the host bridge. A host-local server can therefore use `127.0.0.1`; that is not the guest's loopback. Requests still require applicable policy approval. Host-side availability probes are separate explicit host actions.
+
+Git HTTPS support imports credentials for an explicitly named GitHub repository through the host credential helper. Use only repositories you are authorized to access. A private GitHub push has not yet completed live acceptance.
+
+### Existing installations and data
+
+Alpi retains the original internal application identifier, safeStorage name and directories to avoid silently migrating VM disks or changing Keychain identity:
+
+- Packaged state: `~/Library/Application Support/Harness Isolated/personal-v1`.
+- Packaged runtime: `~/.harness-isolated/v1`.
+- Development state uses a different profile under `Harness Isolated`; development runtime defaults differ as well.
+
+The visible app name and icon are Alpi. Do not rename those internal directories or run two differently branded copies against the same storage. Use normal **Quit** before replacing a running build. Closing the window merely hides it and leaves jobs running.
+
+VM recreation, stop behavior and recovery are explained in [environment management](environment-management.md). Export needed files first; do not delete broad Lima, Docker, smolvm or home-directory trees as a cleanup shortcut.
+
+## Linux development
+
+There is no supported Linux-host launcher or packaged AppImage in this release. Linux is currently the VM guest OS.
+
+You can run the portable synthetic test subset with Node 22/24:
+
+```sh
+npm ci --ignore-scripts
+npm run test:portable
+```
+
+Skipping install scripts avoids downloading Electron for these tests. The subset uses temporary fixtures and mocked services, not personal credentials or live VMs. `npm test` is broader and includes fixtures requiring pinned host tools; it is not the Linux compatibility command.
+
+A proper Linux port still needs:
+
+1. A stock Linux engine backend with host-enforced egress restrictions that guest root cannot disable.
+2. A supported encrypted secret store with no plaintext fallback; the current vault explicitly requires macOS Keychain.
+3. Linux artifact manifests, runtime acquisition, packaging and host-native path/dialog validation.
+4. Real tests for proxy failure, DNS/IPv6/UDP bypass attempts, filesystem grants, reconnection and guest lifecycle.
+
+Do not emulate Linux support by disabling the sandbox, the proxy, TLS verification or the vault platform check.
+
+## Tests and release discipline
+
+- `npm run test:portable`: dependency-installed, synthetic subset suitable for contributing and CI.
+- `npm test`: full local suite; some tests require separately acquired pinned artifacts.
+- `npm run notices`: reproduce production dependency notices from the lockfile and installed packages.
+- `npm run package:mac`: local Apple Silicon client bundle; no guest runtime included.
+
+No inference key is needed for unit tests. See [AGENTS.md](../AGENTS.md) for agent-facing instructions and [SECURITY.md](../SECURITY.md) for security assumptions. A passing mock test is never a substitute for live acceptance of a new platform or engine.
+
+A [GitHub Actions template](portable-tests.workflow.yml) is provided for portable checks on Ubuntu and macOS. It is not installed as an active workflow: publishing credentials used for this prerelease did not have GitHub's `workflow` scope. A maintainer with that permission can copy it to `.github/workflows/portable-tests.yml`. No Linux CI result is claimed for this prerelease.

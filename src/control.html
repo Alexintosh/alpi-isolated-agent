@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'"
+    />
+    <title>Harness · VM PoC</title>
+    <link rel="stylesheet" href="control.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <strong>Harness <span>VM PoC</span></strong>
+        <p id="status" role="status">Disconnesso</p>
+      </div>
+      <div>
+        <label for="environment">Ambiente</label>
+        <select id="environment" aria-label="Ambiente" disabled></select>
+      </div>
+      <div>
+        <button id="connect">Connetti / Riprova</button
+        ><button id="disconnect" disabled>Disconnetti</button>
+        <button id="stop" disabled>Arresta ambiente</button>
+      </div>
+    </header>
+    <div id="environment-info"><span id="capabilities"></span><span id="detail" role="status"></span></div>
+    <main>
+      <h1>Scegli l’ambiente di lavoro.</h1>
+      <p>
+        Ogni ambiente conserva sessioni e workspace propri. Cambiare selezione
+        scollega la UI; non trasferisce dati e non arresta la VM precedente.
+      </p>
+    </main>
+    <script src="control.js"></script>
+  </body>
+</html>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <title>Network approval</title>
+  <link rel="stylesheet" href="notification.css">
+</head>
+<body>
+  <section id="notice" aria-labelledby="notice-title" hidden>
+    <header>
+      <span class="notice-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c3 3 3 9 0 12M8 2c-3 3-3 9 0 12"/></svg></span>
+      <h1 id="notice-title">Network approval</h1>
+      <button id="notice-close" type="button" aria-label="Dismiss notification without deciding" title="Dismiss notification only; request stays pending"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+    </header>
+    <p id="notice-destination"></p>
+    <p id="notice-count"></p>
+    <p id="notice-context"></p>
+    <p id="notice-result" role="status" hidden></p>
+    <div class="notice-actions">
+      <div class="split-action" id="deny-split">
+        <button id="notice-deny" type="button" aria-label="Deny once">Deny</button>
+        <button id="deny-options" class="split-chevron" type="button" aria-label="Deny options" aria-haspopup="menu" aria-expanded="false" aria-controls="deny-menu"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 9 3-3 3 3"/></svg></button>
+        <div id="deny-menu" class="decision-menu" role="menu" aria-label="Deny request" hidden>
+          <button id="deny-once" type="button" role="menuitem" tabindex="-1">Deny once</button>
+          <button id="deny-always" type="button" role="menuitem" tabindex="-1">Always deny</button>
+        </div>
+      </div>
+      <button id="notice-review" type="button">Review</button>
+      <div class="split-action" id="allow-split">
+        <button id="notice-allow" class="primary" type="button" aria-label="Allow once">Allow</button>
+        <button id="allow-options" class="split-chevron primary" type="button" aria-label="Allow options" aria-haspopup="menu" aria-expanded="false" aria-controls="allow-menu"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 9 3-3 3 3"/></svg></button>
+        <div id="allow-menu" class="decision-menu" role="menu" aria-label="Allow request" hidden>
+          <button id="allow-once" type="button" role="menuitem" tabindex="-1">Allow once</button>
+          <button id="allow-always" type="button" role="menuitem" tabindex="-1">Always allow</button>
+        </div>
+      </div>
+    </div>
+  </section>
+  <script src="notification.js"></script>
+</body>
+</html>
