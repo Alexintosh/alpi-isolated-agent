@@ -1608,8 +1608,8 @@
         "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/package.json",
         "https://raw.githubusercontent.com/electron/electron/3025e0491e87674c112f7a7d2646292c0efa4599/yarn.lock"
       ],
-      "status": "package tarball closure not expanded",
-      "note": "Selected hook runs vendored Yarn 4.18.0 install --immutable. Preserve yarn.lock checksums. No git-backed resolutions were found in this root yarn.lock; NPM package payloads/install-time artifacts remain separate."
+      "status": "736 locked package archives acquired and verified; cache included in release source materials",
+      "note": "Acquired using vendored Yarn 4.18.0 install --immutable --mode=skip-build with enableScripts=false and a private HOME. The original yarn.lock remained unchanged. All 736 cached ZIP packages passed integrity checks; the cache includes native build-tool packages. No lifecycle scripts or complete Electron build were executed. See source-manifest.json for the locked-yarn-cache archive, placement and checksum."
     }
   ],
   "patchApplication": {
