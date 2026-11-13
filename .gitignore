@@ -36,3 +36,6 @@ dist/
 !/guest/v1/
 !/guest/package-lock.json
 !/docs/portable-tests.workflow.yml
+
+!/scripts/package-dmg.cjs
+!/docs/macos-distribution.md
