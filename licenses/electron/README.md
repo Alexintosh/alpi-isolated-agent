@@ -18,6 +18,12 @@ Electron's [`DEPS`](https://github.com/electron/electron/blob/v45.3.1/DEPS) and 
 
 The FFmpeg patch sequence is `link_with_loader_path.patch`, `cherry-pick-f4bee18dadeb.patch`, `cherry-pick-5eed87f44b0a.patch`, `cherry-pick-fb424c4f78d1.patch`, from Electron's `patches/ffmpeg/`. The ARM64 Chrome configuration disables GPL, GPLv3 and nonfree code. The binary's `git-2026-08-25-e5441fe421` string is its generated FFmpeg version, not the source checkout revision.
 
+## Mozilla-covered components
+
+`base/third_party/nspr` and Symphonia are covered by **MPL 2.0**. The Mozilla-derived `url/third_party/mozilla/url_parse.cc` is covered by **MPL 1.1**, with alternative GPL/LGPL grants preserved in its source header. Its Original Code is mozilla.org code; the Initial Developer is Netscape Communications Corporation, Copyright 1998, with Darin Fisher credited as the original author. Alpi does not modify these component sources. Their upstream modification and provenance notices remain in the corresponding source archives.
+
+The MPL 1.1 and MPL 2.0 texts are included separately. Release maintainers must retain electronic availability of the MPL 1.1 covered sources for the period required by section 3.2; do not delete their source attachments when superseding a release. This differs from an LGPL written source offer.
+
 ## Rebuilding and replacing
 
 Use Electron's [versioned build instructions](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-gn.md) and [macOS prerequisites](https://github.com/electron/electron/blob/v45.3.1/docs/development/build-instructions-macos.md). Synchronize the exact Electron commit above and its DEPS; apply Electron's patch set through its normal synchronization hooks. In the synchronized `src` directory:
