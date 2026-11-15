@@ -104,6 +104,11 @@ rm runtime.tar.gz`, options);
     const gitConfig = options.network.bridge?.guestGitConfig?.(`http://${credentialHost}:${options.network.bridge.port}`) ?? '';
     fs.writeFileSync(path.join(directory, 'gitconfig'), gitConfig, { mode: 0o600 });
     await driver.putFile(path.join(directory, 'gitconfig'), `${guestRoot}/gitconfig`, options);
+    // Always replace the manifest, including after the last credential is
+    // revoked. It contains only per-launch substitutes and scoped relay URLs.
+    const secrets = options.network.bridge?.guestSecrets?.(`http://${credentialHost}:${options.network.bridge.port}`) ?? { version: 1, entries: [] };
+    writeJson(path.join(directory, 'secrets.json'), secrets);
+    await driver.putFile(path.join(directory, 'secrets.json'), `${guestRoot}/secrets.json`, options);
     if (options.network.bridge) {
       const entries = options.network.bridge.guestProviders(`http://${credentialHost}:${options.network.bridge.port}`);
       const providers = {}, credentials = {};

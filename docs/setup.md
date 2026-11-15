@@ -84,6 +84,20 @@ Inference endpoints are reached from the host bridge. A host-local server can th
 
 Git HTTPS support imports credentials for an explicitly named GitHub repository through the host credential helper. Use only repositories you are authorized to access. A private GitHub push has not yet completed live acceptance.
 
+### Scoped API credentials
+
+Open **Secrets → Add secret** to save a Bearer token, an API key in an `x-` header, or a Basic-auth password. Enter a name, select one environment, and set the exact HTTPS origin, an allowed path prefix and explicit HTTP methods. API keys also require their header name; Basic auth requires a username. Names, usernames and scopes are metadata; put the secret only in the password field.
+
+Prefixes must start and end with `/`: `/v1/` permits paths below that prefix, while `/` permits all paths on the selected origin. Encoded path segments, dot segments, wildcard origins and reserved internal headers are rejected. Query parameters are not restricted by the prefix. Saving a credential does not create a network allow rule; normal Iron approvals still apply.
+
+**Save and stop environment** stores the value in the existing encrypted host vault and stops that credential's environment before changing access. Removing access also stops that environment. Files and sessions survive; choose **Connect** to resume. The environment of a saved entry is fixed: create a separate entry to grant another environment access. **Replace** rotates the saved value; it never reveals the old value. Changing the authentication type or Basic username requires a fresh value.
+
+On connection, Alpi writes `~/.harness-isolated/secrets.json` inside the guest. This manifest contains names, scopes, a relay `baseURL` and a per-launch substitute `authorization`, never the real values. Guest tools append the original API path and query to `baseURL`, then send the substitute in the `Authorization` header. The host validates the environment, path, method and substitute, and uses a single-use ticket to inject the real header through Iron after network approval. The guest environment's existing proxy exclusions cover this local relay.
+
+This supports scoped HTTP API calls and text/JSON/event-stream responses. It does not inject plaintext environment variables, SSH keys, browser cookies or arbitrary files into the guest. Only a small set of request headers is forwarded (Accept, Content-Type, Anthropic-Version, OpenAI-Beta, X-GitHub-API-Version and Idempotency-Key). Redirects and compressed responses are rejected; arbitrary upstream response headers are discarded. Literal and JSON-escaped reflected secrets are filtered from response bodies; arbitrary encodings or covert channels are outside that guarantee.
+
+Synthetic catalog, renderer, lifecycle and relay tests do not establish live acceptance against every API or a running VM. Revalidate the actual provider workflow before relying on it.
+
 ### Existing installations and data
 
 Alpi retains the original internal application identifier, safeStorage name and directories to avoid silently migrating VM disks or changing Keychain identity:

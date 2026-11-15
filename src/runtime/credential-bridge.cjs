@@ -6,6 +6,7 @@ const { ProxyAgent, request: proxyRequest } = require('undici');
 const { SecretRedactor } = require('./secret-redactor.cjs');
 const { normalizeRequest } = require('./network-policy.cjs');
 const { gitEntries, gitRoute, gitCredential, guestGitConfig } = require('./git-bridge.cjs');
+const { secretEntries, secretRoute, secretCredential, secretRequestHeaders, guestSecrets } = require('./secret-bridge.cjs');
 const clone = value => JSON.parse(JSON.stringify(value));
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 function header(headers, name) {
@@ -14,11 +15,12 @@ function header(headers, name) {
 }
 const reject = code => ({ action: 2, response: { statusCode: code } });
 
-async function createCredentialBridge({ environmentId, providers = [], selected, gitRepositories = [], allowGitFixtureHttp = false,
-  vault, proxyPort, caFile, port = 0, decide = async () => false,
+async function createCredentialBridge({ environmentId, providers = [], selected, gitRepositories = [], secrets = [], allowGitFixtureHttp = false,
+  vault, proxyPort, caFile, port = 0, decide = async () => false, requestUpstream = proxyRequest,
   maxRequests = 16, maxRequestBytes = 8 * 1024 * 1024, maxResponseBytes = 64 * 1024 * 1024,
   maxGitRequestBytes = 256 * 1024 * 1024, maxGitResponseBytes = 512 * 1024 * 1024 }) {
   const repositories = gitEntries(gitRepositories, { allowFixtureHttp: allowGitFixtureHttp });
+  const scopedSecrets = secretEntries(secrets, environmentId);
   const entries = new Map();
   for (const provider of providers) {
     if (!/^[a-z0-9-]+$/.test(provider.id) || entries.has(provider.id) || provider.api !== 'openai-completions') throw new Error('Invalid bridge provider');
@@ -46,12 +48,13 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
     const fail = code => { req.resume(); res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end('{"error":"Request rejected by credential boundary"}'); };
     if (closed || paused || active.size >= maxRequests) return fail(503);
     const git = gitRoute(req, repositories);
+    const scoped = secretRoute(req, scopedSecrets);
     const model = typeof req.url === 'string' && req.url.match(/^\/models\/([a-z0-9-]+)\/v1\/(models|chat\/completions)$/);
-    if (!git && !model) return fail(404);
-    const entry = git?.entry ?? entries.get(model[1]), operation = model?.[2];
-    const fakeAuthorization = git ? entry.authorization : entry && `Bearer ${entry.token}`;
+    if (!git && !model && !scoped) return fail(404);
+    const entry = git?.entry ?? scoped?.entry ?? entries.get(model[1]), operation = model?.[2];
+    const fakeAuthorization = git || scoped ? entry.authorization : entry && `Bearer ${entry.token}`;
     if (!entry || !equal(req.headers.authorization, fakeAuthorization)) return fail(401);
-    if (!git && ((operation === 'models' && req.method !== 'GET') || (operation === 'chat/completions' && req.method !== 'POST') || req.headers['content-encoding'])) return fail(405);
+    if (!git && !scoped && ((operation === 'models' && req.method !== 'GET') || (operation === 'chat/completions' && req.method !== 'POST') || req.headers['content-encoding'])) return fail(405);
     const controller = new AbortController(); active.add(controller);
     const disconnect = () => { if (!res.writableFinished) controller.abort(); };
     res.once('close', disconnect); req.once('aborted', () => controller.abort());
@@ -59,14 +62,15 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
     let ticket;
     try {
       let body;
-      if (req.method === 'POST' && git) {
-        if (Number(req.headers['content-length'] || 0) > maxGitRequestBytes) return fail(413);
-        // Git pack streams stay bounded without buffering the entire push.
+      if ((req.method === 'POST' && git) || (scoped && !['GET', 'HEAD'].includes(req.method))) {
+        const limit = git ? maxGitRequestBytes : maxRequestBytes;
+        if (Number(req.headers['content-length'] || 0) > limit) return fail(413);
+        // Bound uploads without buffering arbitrary API bodies or Git packs.
         body = (async function* () {
           let size = 0;
           for await (const chunk of req) {
             size += chunk.length;
-            if (size > maxGitRequestBytes) { controller.abort(); throw new Error('Git request size limit'); }
+            if (size > limit) { controller.abort(); throw new Error('Request size limit'); }
             yield chunk;
           }
         })();
@@ -80,19 +84,19 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
             (parsed.stream !== undefined && typeof parsed.stream !== 'boolean')) return fail(400);
       } else if (req.headers['transfer-encoding'] || Number(req.headers['content-length'] || 0) !== 0) return fail(400);
       controller.signal.throwIfAborted();
-      const secret = await vault.get((git ? entry.repository : entry.provider).credentialRef);
+      const secret = await vault.get((git ? entry.repository : scoped ? entry.secret : entry.provider).credentialRef);
       if (typeof secret !== 'string' || !secret.length || /[\r\n\x00]/.test(secret)) return fail(503);
-      const credential = git ? gitCredential(secret) : { authorization: `Bearer ${secret}`, redact: [secret] };
-      const upstream = git?.upstream ?? new URL(entry.base.href.replace(/\/$/, '') + '/' + operation);
-      const applicationHeaders = { Accept: { values: [git ? '*/*' : 'application/json, text/event-stream'] },
+      const credential = git ? gitCredential(secret) : scoped ? secretCredential(entry, secret) : { authorization: `Bearer ${secret}`, redact: [secret] };
+      const upstream = git?.upstream ?? scoped?.upstream ?? new URL(entry.base.href.replace(/\/$/, '') + '/' + operation);
+      const applicationHeaders = scoped ? secretRequestHeaders(req) : { Accept: { values: [git ? '*/*' : 'application/json, text/event-stream'] },
         'Accept-Encoding': { values: ['identity'] } };
-      if (req.method === 'POST') applicationHeaders['Content-Type'] = { values: [git ? git.contentType : 'application/json'] };
+      if (!scoped && req.method === 'POST') applicationHeaders['Content-Type'] = { values: [git ? git.contentType : 'application/json'] };
       if (git?.protocol) applicationHeaders['Git-Protocol'] = { values: [git.protocol] };
       ticket = randomBytes(32).toString('hex');
-      const permit = { fakeAuthorization, authorization: credential.authorization, applicationHeaders,
+      const permit = { fakeAuthorization, credentialHeaders: credential.headers ?? { Authorization: { values: [credential.authorization] } }, applicationHeaders,
         method: req.method, upstream, signal: controller.signal, policyDenied: false };
       tickets.set(ticket, permit);
-      const result = await proxyRequest(upstream, { dispatcher, method: req.method, body, maxRedirections: 0, signal: controller.signal,
+      const result = await requestUpstream(upstream, { dispatcher, method: req.method, body, maxRedirections: 0, signal: controller.signal,
         headers: { ...Object.fromEntries(Object.entries(applicationHeaders).map(([name, value]) => [name, value.values[0]])),
           authorization: fakeAuthorization, 'x-isolated-request': ticket } });
       result.body.on('error', () => {});
@@ -112,7 +116,8 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
       // Copy no arbitrary upstream headers (including Location/Set-Cookie).
       if (git && result.statusCode === 200 && type !== git.responseType) { result.body.destroy(); return fail(502); }
       const contentType = git ? (result.statusCode === 200 ? git.responseType : 'text/plain') :
-        typeof type === 'string' && /^text\/event-stream(?:;|$)/i.test(type) ? 'text/event-stream' : 'application/json';
+        typeof type === 'string' && /^text\/event-stream(?:;|$)/i.test(type) ? 'text/event-stream' :
+        scoped && typeof type === 'string' && /^text\/plain(?:;|$)/i.test(type) ? 'text/plain' : 'application/json';
       res.writeHead(result.statusCode, { 'content-type': contentType, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       res.flushHeaders();
       await pipeline(result.body, new SecretRedactor(credential.redact, { maxBytes: git ? maxGitResponseBytes : maxResponseBytes }), res, { signal: controller.signal });
@@ -129,7 +134,7 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
     const transport = header(input.request?.headers, 'x-isolated-transport');
     if (input.request?.method === 'CONNECT' && equal(transport, transportCapability)) {
       let destination; try { destination = normalizeRequest(input.request, input.context); } catch { return reject(403); }
-      const allowed = [...entries.values(), ...repositories.values()].some(entry => entry.base.hostname === destination.host && Number(entry.base.port || (entry.base.protocol === 'https:' ? 443 : 80)) === destination.port);
+      const allowed = [...entries.values(), ...repositories.values(), ...scopedSecrets.values()].some(entry => entry.base.hostname === destination.host && Number(entry.base.port || (entry.base.protocol === 'https:' ? 443 : 80)) === destination.port);
       return allowed ? { action: 1 } : reject(403);
     }
     const ticket = header(input.request?.headers, 'x-isolated-request');
@@ -152,7 +157,7 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
     if (permit.signal.aborted || input.signal.aborted || closed || paused) return reject(403);
     // Keep only bridge-owned application headers. Strip both private capabilities
     // and the guest's substitute before the real upstream sees the request.
-    const headers = { ...permit.applicationHeaders, Authorization: { values: [permit.authorization] } };
+    const headers = { ...permit.applicationHeaders, ...permit.credentialHeaders };
     return { action: 1, modifiedRequest: { headers } };
   }
   function close() {
@@ -171,6 +176,7 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
     },
     resume() { if (closed) throw new Error('Credential listener is closed.'); paused = false; },
     guestGitConfig: endpoint => guestGitConfig(repositories, endpoint),
+    guestSecrets: endpoint => guestSecrets(scopedSecrets, endpoint),
     guestProviders(endpoint) {
       const base = new URL(endpoint);
       if (base.protocol !== 'http:' || base.username || base.password || base.pathname !== '/' || base.search || base.hash) throw new Error('Invalid guest bridge endpoint');

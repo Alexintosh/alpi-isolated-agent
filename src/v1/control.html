@@ -276,6 +276,107 @@
       </div>
     </section>
 
+    <section id="secrets-panel" class="page" hidden aria-label="Secrets">
+      <div class="panel-head">
+        <button id="secrets-back" class="panel-back" type="button">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>
+          <span>Back to Harness</span>
+        </button>
+        <div>
+          <h1>Secrets</h1>
+          <p class="subtitle">Keep credentials on your Mac. Grant scoped access through Iron.</p>
+        </div>
+        <p class="vault-badge"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1"/><path d="M5.4 7V5.2a2.6 2.6 0 0 1 5.2 0V7"/></svg><span>Keychain protected</span></p>
+      </div>
+      <div class="page-body secrets-layout">
+        <aside class="secrets-side" aria-label="Saved credentials">
+          <div class="row-between secrets-list-head">
+            <h2>Credentials</h2>
+            <button id="secret-add" type="button" class="primary">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+              <span>Add secret</span>
+            </button>
+          </div>
+          <label for="secret-search"><span class="visually-hidden">Search credentials</span>
+            <input id="secret-search" placeholder="Search credentials" maxlength="120" autocomplete="off">
+          </label>
+          <p id="secrets-fault" class="alert" role="alert" hidden>Saved credentials are unavailable. Existing entries were preserved. Saving and removing access are disabled.</p>
+          <div id="secret-list" class="list" aria-live="polite"></div>
+          <section class="secrets-explainer" aria-labelledby="secrets-how-heading">
+            <h2 id="secrets-how-heading">How sharing works</h2>
+            <ol class="secret-steps">
+              <li>Encrypt on your Mac</li>
+              <li>Choose where it can be used</li>
+              <li>Iron injects it upstream</li>
+            </ol>
+            <p class="note">The VM receives a substitute, not the saved secret.</p>
+            <p class="note">After connecting, guest tools can find scoped substitutes in ~/.harness-isolated/secrets.json.</p>
+            <p class="preview-box secrets-approval-note"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 13 4v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4z"/></svg><span>Network approvals still apply.</span></p>
+          </section>
+        </aside>
+        <form id="secret-form" class="secrets-editor" aria-label="Credential editor">
+          <h2><span id="secret-editor-title">New credential</span></h2>
+          <p class="note">Credential settings</p>
+          <label for="secret-name">Name
+            <input id="secret-name" maxlength="80" autocomplete="off" required>
+          </label>
+          <label for="secret-auth">Authentication
+            <select id="secret-auth">
+              <option value="bearer">Bearer token</option>
+              <option value="api-key">API key</option>
+              <option value="basic">Basic auth</option>
+            </select>
+          </label>
+          <label id="secret-header-row" for="secret-header" hidden>Header name
+            <input id="secret-header" placeholder="x-api-key" maxlength="64" autocomplete="off">
+          </label>
+          <label id="secret-username-row" for="secret-username" hidden>Username
+            <input id="secret-username" maxlength="256" autocomplete="off">
+          </label>
+          <div class="secret-value-row">
+            <label for="secret-value"><span id="secret-value-label">Secret value</span>
+              <input id="secret-value" type="password" maxlength="8192" autocomplete="new-password" placeholder="Enter the secret value">
+            </label>
+            <button id="secret-replace" type="button" hidden>Replace</button>
+          </div>
+          <p class="note">Saved values are never shown again.</p>
+          <h2>Access scope</h2>
+          <label for="secret-environment">Environment
+            <select id="secret-environment" required></select>
+          </label>
+          <p id="secret-environment-help" class="note" role="status"></p>
+          <label for="secret-origin">Allowed origin
+            <input id="secret-origin" type="url" placeholder="https://api.github.com" maxlength="2048" autocomplete="off" required>
+          </label>
+          <label for="secret-path">Path prefix
+            <input id="secret-path" placeholder="/repos/acme/project/" maxlength="1024" autocomplete="off" required>
+          </label>
+          <fieldset id="secret-methods" aria-describedby="secret-methods-help">
+            <legend>Allowed methods</legend>
+            <div class="secret-method-options">
+              <label for="secret-method-GET"><input id="secret-method-GET" type="checkbox">GET</label>
+              <label for="secret-method-HEAD"><input id="secret-method-HEAD" type="checkbox">HEAD</label>
+              <label for="secret-method-POST"><input id="secret-method-POST" type="checkbox">POST</label>
+              <label for="secret-method-PUT"><input id="secret-method-PUT" type="checkbox">PUT</label>
+              <label for="secret-method-PATCH"><input id="secret-method-PATCH" type="checkbox">PATCH</label>
+              <label for="secret-method-DELETE"><input id="secret-method-DELETE" type="checkbox">DELETE</label>
+            </div>
+          </fieldset>
+          <p id="secret-methods-help" class="note">Only matching HTTPS requests can use this credential.</p>
+          <div id="secret-preview" class="preview-box" aria-live="polite"></div>
+          <p class="note warn-note">Saving or removing stops this credential's environment and its running jobs. Connect again to apply.</p>
+          <div class="row secrets-editor-actions">
+            <button id="secret-remove" type="button" class="danger" hidden>Remove access</button>
+            <button id="secret-cancel" type="button">Cancel</button>
+            <button id="secret-save" type="submit" class="primary">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+              <span>Save and stop environment</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+
     <section id="files-panel" class="page" hidden aria-label="Transfer files">
       <div class="panel-head">
         <button id="files-back" class="panel-back" type="button">
@@ -420,6 +521,10 @@
         <button id="models" class="action reveal-label" type="button" aria-label="Models" aria-pressed="false">
           <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6 1.8V4M10 1.8V4M6 12v2.2M10 12v2.2M1.8 6H4M1.8 10H4M12 6h2.2M12 10h2.2"/></svg>
           <span class="action-label" aria-hidden="true">Models</span>
+        </button>
+        <button id="secrets" class="action reveal-label" type="button" aria-label="Secrets" aria-pressed="false">
+          <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.4" cy="8" r="3.2"/><path d="M8.6 8H14M11.4 8v2.4M13.6 8v1.8"/></svg>
+          <span class="action-label" aria-hidden="true">Secrets</span>
         </button>
         <button id="resources" class="action reveal-label" type="button" aria-label="Settings" aria-pressed="false">
           <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h3M9 5h5M2 11h6M12 11h2"/><circle cx="7" cy="5" r="2"/><circle cx="10" cy="11" r="2"/></svg>

@@ -47,11 +47,15 @@ The default policy asks before a new destination is permitted. Saved deny rules 
 
 Host operations such as approved model availability probes, artifact downloads, or Git credential-helper access are separate trusted host actions. The guest-egress policy is not a firewall for the whole host.
 
-### Model and Git credentials
+### Model, Git and scoped API credentials
 
 The current vault uses Electron safeStorage backed by macOS Keychain; stored values are encrypted, with no plaintext fallback. This is one reason the Linux host port is not yet supported.
 
 The guest receives substitutes and scoped access to a host credential bridge. The bridge binds requests to the environment and permitted route, method and destination; host-issued tickets are short-lived and single-use. The host applies network policy and injects the real credential on the authorized upstream request. Closing a bridge revokes outstanding tickets and active connections.
+
+The Secrets panel extends this boundary to user-entered Bearer, API-key and Basic-auth credentials. Each grant belongs to one environment, one HTTPS origin, a conservative path prefix and explicit methods. Credentials are never returned by renderer IPC or written into guest configuration. The guest manifest contains per-launch substitutes and relay URLs. Rotation and removal wait for an owned environment to stop before changing access; a failed stop retains the previous grant. Ambiguous catalog persistence failures retain encrypted records and prevent new credential leases until disk state is revalidated.
+
+The relay rejects redirects and compressed responses, forwards only selected request headers, and strips arbitrary upstream response headers. Streaming redaction covers literal and JSON-escaped secret values (including the Basic encoding). It cannot prevent a permitted upstream service from encoding a secret differently or communicating it through a covert channel. The approved destination remains part of the credential trust assumption.
 
 Keeping a key out of the guest **does not prevent abuse of the capability that key authorizes**. A guest permitted to call a model can spend its quota or submit data. A guest permitted to push to a Git repository can push malicious content. Use limited-scope credentials, repository permissions and provider-side limits. Private GitHub push acceptance is still pending a designated test repository; local Git fixtures are not proof of every GitHub workflow.
 

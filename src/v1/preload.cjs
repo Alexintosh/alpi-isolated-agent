@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld("isolated", Object.freeze({
   confirmShare: id => ipcRenderer.invoke('isolated:share-confirm', id),
   removeShare: id => ipcRenderer.invoke('isolated:share-remove', id),
   cancelShare: () => ipcRenderer.invoke('isolated:share-cancel'),
+  saveSecret: input => ipcRenderer.invoke('isolated:secret-save', input),
+  removeSecret: id => ipcRenderer.invoke('isolated:secret-remove', id),
   onStatus: callback => {
     const listener = (_event, value) => callback(value);
     ipcRenderer.on("isolated:status", listener);

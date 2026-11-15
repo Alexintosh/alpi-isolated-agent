@@ -4,6 +4,17 @@ const {SmolDriver,WRAP_IMAGE}=require('../src/runtime/smol-driver.cjs');
 const {environment}=require('../src/runtime/environments.cjs');
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 function fixture(t){const root=fs.mkdtempSync('/tmp/guest-artifact-');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
+test('each guest start replaces the scoped substitute manifest, including after the last grant is removed',async t=>{
+ const root=fixture(t),manifests=[];
+ const provisioner=new Provisioner({stateRoot:root,serviceFile:'/fixture/service.cjs'});
+ const driver={definition:{id:'fixture',kind:'lima'},exec:async()=>'http://127.0.0.1:3080/?token=synthetic',
+  putFile:async(source,target)=>{if(target.endsWith('/secrets.json'))manifests.push(JSON.parse(fs.readFileSync(source,'utf8')))}};
+ const bridge={port:12345,defaultModel:null,guestProviders:()=>[],guestSecrets:endpoint=>{
+  assert.equal(endpoint,'http://192.168.5.2:12345');return {version:1,entries:[{id:'fixture',authorization:'substitute-only'}]}}};
+ await provisioner.start(driver,{network:{proxyPort:12346,bridge}});
+ await provisioner.start(driver,{network:{proxyPort:12346}});
+ assert.deepEqual(manifests,[{version:1,entries:[{id:'fixture',authorization:'substitute-only'}]},{version:1,entries:[]}]);
+});
 test('provisioner refuses the wrong architecture or modified bundle before guest writes',async t=>{
  const root=fixture(t),lockFile=path.join(root,'lock.json');fs.writeFileSync(lockFile,'lock');fs.writeFileSync(path.join(root,'guest-runtime.tar.gz'),'bundle');
  const manifest={version:1,platform:'linux-x64-glibc',node:'24.13.0',harness:'0.2.2-rc.2',npmLifecycleScripts:false,lockSha256:sha('lock'),bundleSha256:sha('bundle')};

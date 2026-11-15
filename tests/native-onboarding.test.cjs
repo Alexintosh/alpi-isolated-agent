@@ -3,7 +3,7 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=r
 const {createRequire}=require('node:module'),{EventEmitter}=require('node:events');
 const main=path.resolve(__dirname,'../src/v1-main.cjs');
 function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,saveDestination,deferSave=false,viewerNavigation,harnessNavigation,storedSelection,imageAvailable=true,manualHealth=false,healthFetch}={}){
- const calls={quit:0,shutdown:0,prepare:0,policy:0,models:0,git:0,savePickers:0,starts:0,networkRestores:0,viewerClose:0,viewerFocus:0,stops:[],selections:[],imageImports:[],imageCancelled:0};let resolvePicker,resolveSave,resolveMessage;
+ const calls={quit:0,shutdown:0,prepare:0,policy:0,models:0,git:0,savePickers:0,starts:0,networkRestores:0,viewerClose:0,viewerFocus:0,stops:[],selections:[],imageImports:[],imageCancelled:0,secrets:[]};let resolvePicker,resolveSave,resolveMessage;
  const messages=[],messagePicker=new Promise(resolve=>resolveMessage=resolve);
  let networkState, healthCheck;
  const handlers=new Map(),savePicker=new Promise(resolve=>resolveSave=resolve);
@@ -35,6 +35,20 @@ function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,save
  class Policy extends EventEmitter {constructor(){super();calls.policy++}snapshot(){return {events:[]}}close(){}}
  class Models {constructor(){calls.models++}snapshot(){return {}}}
  class Git {constructor(){calls.git++}snapshot(){return {}}}
+ class Secrets {
+  constructor(){this.entries=[]}
+  snapshot(){return {entries:this.entries.map(({value,...entry})=>({...entry,credentialAvailable:true}))}}
+  entriesFor(id){return this.entries.filter(entry=>entry.environmentId===id)}
+  prepareSave(input){
+   const metadata=realRequire('./runtime/secret-scope.cjs').validateSecretMetadata(input,['lima-v1','wrapvm-v1','wrapvm-arm64-v1']);
+   if(input.id&&!this.entries.some(entry=>entry.id===input.id&&entry.environmentId===input.environmentId))throw Error('Unknown credential');
+   return {...metadata,...(input.id?{id:input.id}:{}),value:input.value};
+  }
+  prepareRemove(id){const entry=this.entries.find(entry=>entry.id===id);if(!entry)throw Error('Unknown credential');return {id,environmentId:entry.environmentId}}
+  async save(input,{signal}={}){signal?.throwIfAborted();calls.secrets.push(['save',input.environmentId]);const entry={...input,id:input.id??'fixture-secret'};this.entries=[...this.entries.filter(x=>x.id!==entry.id),entry]}
+  async remove(id){calls.secrets.push(['remove',id]);this.entries=this.entries.filter(entry=>entry.id!==id)}
+ }
+
  class Images extends EventEmitter {
   constructor(){super();this.localArchive='/fixture/desktop-images/local.tar';this.state={busy:false}}
   available(){return imageAvailable}
@@ -49,11 +63,52 @@ function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,save
   './runtime/renderer-boundary.cjs':{createRendererBoundary:async()=>({setOrigin:async()=>{},revoke(){},close:async()=>{}})},
   'node:fs':{openSync:fs.openSync,writeFileSync:fs.writeFileSync,fsyncSync:fs.fsyncSync,closeSync:fs.closeSync,mkdirSync(){}},'./runtime/index.cjs':{createRuntime:()=>runtime},'./runtime/atomic-json.cjs':{readJson:(file,fallback)=>file.endsWith('selection.json')&&storedSelection?storedSelection:fallback,writeJson(file,value){if(file.endsWith('selection.json'))calls.selections.push(value)}},
   './runtime/desktop-image-store.cjs':{DesktopImageStore:Images},
-  './runtime/artifact-installer.cjs':{ArtifactInstaller:Installer},'./runtime/network-policy.cjs':{NetworkPolicy:Policy},'./runtime/model-catalog.cjs':{ModelCatalog:Models},'./runtime/git-catalog.cjs':{GitCatalog:Git},'./runtime/secret-vault.cjs':{SecretVault:class{}}};
+  './runtime/artifact-installer.cjs':{ArtifactInstaller:Installer},'./runtime/network-policy.cjs':{NetworkPolicy:Policy},'./runtime/model-catalog.cjs':{ModelCatalog:Models},'./runtime/git-catalog.cjs':{GitCatalog:Git},'./runtime/secret-catalog.cjs':{SecretCatalog:Secrets},'./runtime/secret-vault.cjs':{SecretVault:class{}}};
  const context={require:n=>mocks[n]??realRequire(n),module:{exports:{}},__dirname:path.dirname(main),Buffer,clearInterval,setInterval:manualHealth?(fn=>{healthCheck=fn;return 1}):setInterval,process,AbortController,AbortSignal,URL};
  vm.runInNewContext(fs.readFileSync(main,'utf8'),context,{filename:main});
  return {messages,resolveMessage,checkHealth:()=>healthCheck(),ui:context.module.exports,calls,resolvePicker,coordinator,handlers,resolveSave,network,setNetwork:value=>networkState=value};
 }
+const secretInput = () => ({name:'Test API',environmentId:'wrapvm-v1',authType:'bearer',origin:'https://api.example.com',
+ pathPrefix:'/v1/',methods:['GET'],headerName:'',username:'',value:'synthetic-canary'});
+function localEvent(ui){const sender=ui.getControls();return {sender,senderFrame:sender.mainFrame}}
+test('secret IPC rejects guest, notification and child frames before any stop or vault mutation',async()=>{
+ const {ui,calls,handlers}=harness();await ui.ready;
+ const controls=ui.getControls(),notice=ui.getNotice();
+ for(const channel of ['secret-save','secret-remove'])for(const event of [
+  {sender:notice,senderFrame:notice.mainFrame},{sender:controls,senderFrame:{url:controls.mainFrame.url}},
+  {sender:{},senderFrame:controls.mainFrame}])
+  assert.throws(()=>handlers.get('isolated:'+channel)(event,secretInput()),/IPC denied/);
+ assert.equal(calls.stops.length,0);assert.equal(calls.secrets.length,0);await ui.quit();
+});
+test('secret save stops only its environment and rejects failed stops without mutation',async()=>{
+ const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+ const save=input=>handlers.get('isolated:secret-save')(localEvent(ui),input);
+ await assert.rejects(save({...secretInput(),origin:'https://api.example.com/?canary'}));
+ assert.equal(calls.stops.length,0);
+ const stop=coordinator.stop;coordinator.stop=async()=>{throw Error('unowned')};
+ await assert.rejects(save(secretInput()),/did not complete/);assert.equal(calls.secrets.length,0);
+ coordinator.stop=stop;await save(secretInput());
+ assert.deepEqual(calls.stops,['wrapvm-v1']);assert.deepEqual(calls.secrets,[['save','wrapvm-v1']]);
+ assert(!JSON.stringify(ui.snapshot().secrets).includes('synthetic-canary'));
+ await handlers.get('isolated:secret-remove')(localEvent(ui),'fixture-secret');
+ assert.deepEqual(calls.stops,['wrapvm-v1','wrapvm-v1']);assert.equal(ui.snapshot().secrets.entries.length,0);
+ await ui.quit();
+});
+test('quit during credential stop prevents late publication',async()=>{
+ const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+ let release;coordinator.stop=()=>new Promise(resolve=>release=resolve);
+ const saving=handlers.get('isolated:secret-save')(localEvent(ui),secretInput());
+ const rejected=assert.rejects(saving,/did not complete/);
+ await new Promise(resolve=>setImmediate(resolve));const quitting=ui.quit();
+ release();await rejected;await quitting;assert.equal(calls.secrets.length,0);
+});
+test('secret mutations serialize locally and duplicate clicks cannot publish twice',async()=>{
+ const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+ let release;coordinator.stop=()=>new Promise(resolve=>release=resolve);
+ const save=()=>handlers.get('isolated:secret-save')(localEvent(ui),secretInput());
+ const first=save();await assert.rejects(save(),/operation is in progress/);
+ release();await first;assert.equal(calls.secrets.length,1);await ui.quit();
+});
 test('image switch persists only after owned WrapVM stops; failed stop retains selection',async()=>{
  const {ui,calls,coordinator}=harness();await ui.ready;
  const stop=coordinator.stop;coordinator.stop=async()=>{throw Error('still running')};
