@@ -32,4 +32,6 @@ Use Node.js 22 or 24 and npm (24 recommended). Run `npm ci --ignore-scripts` fol
 
 Prefer focused regression tests for the affected boundary, then appropriate broader checks. Use temporary fixtures with synthetic credentials; do not inspect personal Keychain or DSH profiles for ordinary tests. Explain what was actually executed and what remains unverified. Commit cohesive changes. Publishing, tagging or pushing is separate from local edits and must be requested.
 
+Record every code review on its PR, tied to the exact reviewed head SHA. Include findings, executed checks, limits, resolution commits and regression evidence there. Reviewers start from the PR and leave a durable report; an earlier approval does not cover a later push. Same-account model reviews are comments, not independent GitHub approvals.
+
 This alpha preserves legacy storage and application identities for existing installations. Branding is not authorization to migrate/delete those locations or to change Keychain identity. See docs/setup.md.

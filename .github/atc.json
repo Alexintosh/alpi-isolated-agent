@@ -1,0 +1,18 @@
+{
+  "areas": {
+    "runtime": ["src/runtime/", "src/v1-main.cjs"],
+    "controls": ["src/v1/"],
+    "guest": ["guest/"],
+    "tests": ["tests/"],
+    "factory": ["factory/", ".github/"],
+    "build": ["scripts/", "package.json", "package-lock.json"]
+  },
+  "areaIds": {
+    "runtime": 1,
+    "controls": 2,
+    "guest": 3,
+    "tests": 4,
+    "factory": 5,
+    "build": 6
+  }
+}

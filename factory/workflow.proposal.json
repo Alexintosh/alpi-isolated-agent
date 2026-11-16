@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "status": "proposal-not-enforced",
+  "policySource": "trusted-target-branch",
+  "positivePassingOutcome": "pass",
+  "nonPassingOutcomes": ["fail", "blocked", "missing", "skipped", "cancelled", "inconclusive", "stale"],
+  "states": ["specify", "reserve", "implement", "fast-checks", "integration", "build", "acceptance", "assurance", "review", "integrate", "observe", "complete", "repair", "blocked"],
+  "transitions": [
+    {"from": "specify", "to": "reserve", "requires": ["acceptance-contract", "risk-classification", "boundary-map"]},
+    {"from": "reserve", "to": "implement", "requires": ["current-base", "isolated-checkout", "exclusive-scope", "model-resolution", "fixture-preflight"]},
+    {"from": "implement", "to": "fast-checks", "requires": ["candidate-head", "diff-in-scope", "worker-handoff"]},
+    {"from": "fast-checks", "to": "integration", "requires": ["static", "unit", "test-inventory"]},
+    {"from": "integration", "to": "build", "requires": ["required-integration"]},
+    {"from": "build", "to": "acceptance", "requires": ["candidate-artifact", "provenance"]},
+    {"from": "acceptance", "to": "assurance", "requires": ["required-acceptance", "exploration-coverage"]},
+    {"from": "assurance", "to": "review", "requires": ["required-security", "required-property-tests", "required-performance", "maintainability"]},
+    {"from": "review", "to": "integrate", "requires": ["current-reviews", "no-unresolved-blockers", "current-evidence", "landing-authorized"]},
+    {"from": "integrate", "to": "observe", "requires": ["tested-integration-tree", "unchanged-head-and-base", "github-required-checks", "merged-tree-verified"]},
+    {"from": "observe", "to": "complete", "requires": ["post-merge-smoke", "durable-handoff"]},
+    {"from": "repair", "to": "fast-checks", "requires": ["new-candidate-head", "regression-for-finding", "old-evidence-invalidated"]}
+  ],
+  "transitionSemantics": {
+    "requirements": "Every applicable required gate must be positively satisfied by the trusted collector.",
+    "inapplicableGate": "Only trusted risk classification may omit a gate; record the rationale. A skipped required test is not inapplicable.",
+    "productFailure": "Any validation or review state goes to repair, subject to the repair budget.",
+    "infrastructureFailure": "Go to blocked with a typed reason; a bounded safe retry resumes the failed stage.",
+    "specificationChange": "Return to specify and invalidate affected evidence.",
+    "repairBudgetExhausted": "Go to blocked for coordinator diagnosis or a revised task, not another blind retry.",
+    "completion": "Product integration complete is distinct from release authorization."
+  },
+  "requiredEvidenceIdentity": ["repository", "pullRequest", "baseSha", "headSha", "testedTreeSha", "policyDigest", "evaluatorDigest", "fixtureDigest", "environmentId"],
+  "artifactEvidenceAlsoRequires": ["artifactSha256", "buildManifest"],
+  "atcAdmission": {"complete": true, "outcome": "ready", "ready": true, "ticketRequired": true},
+  "ownership": {"separateCheckoutPerWorker": true, "initialJobsPerInferenceBackend": 1, "verifyCancellationBeforeReassignment": true},
+  "repairPolicy": {"sameFailureRepairAttempts": 2, "safeInfrastructureRetries": 1, "retryUncertainMutationBlindly": false},
+  "modelPolicy": {"freshDiscoveryBeforeDispatch": true, "silentModelFallback": false, "unknownThinkingRecordedAs": "unknown", "benchmarkNeedsConfirmedSetting": true},
+  "reviewPolicy": {"currentFeatureOrder": ["deepseek", "sol-high"], "freshReviewerContext": true, "sameAccountIsIndependentApproval": false},
+  "landing": {"initialMode": "manual-coordinator", "futureMode": "serialized-guarded", "bypassRepositoryRules": false, "automaticRelease": false},
+  "implementationPending": ["schema-validator", "risk-classifier", "trusted-evidence-collector", "atc-adapter", "worker-adapter", "gate-runners", "landing-controller"]
+}

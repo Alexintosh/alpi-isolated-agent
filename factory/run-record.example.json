@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "exampleOnly": true,
+  "status": "not-run",
+  "taskId": null,
+  "attemptId": null,
+  "repository": "Alexintosh/alpi-isolated-agent",
+  "pullRequest": null,
+  "baseSha": null,
+  "headSha": null,
+  "testedTreeSha": null,
+  "policyDigest": null,
+  "evaluatorDigest": null,
+  "fixtureDigest": null,
+  "environmentId": null,
+  "artifactSha256": null,
+  "buildManifest": null,
+  "model": {"requested": null, "reported": null, "weightsDigest": null, "requestedThinking": null, "confirmedThinking": null, "confirmationMethod": null, "harnessVersion": null, "quantization": null},
+  "execution": {"startedAt": null, "finishedAt": null, "exitCode": null, "commands": [], "hardware": null, "contention": null},
+  "tests": {"discovered": null, "passed": null, "failed": null, "skipped": null, "scenarios": [], "traces": [], "replay": null},
+  "evaluation": {"firstPassAccepted": null, "repairRounds": null, "coordinatorMinutes": null, "accepted": null, "defectsFound": [], "missedSeededDefects": [], "infrastructureFailure": null},
+  "handoff": {"ownedFiles": [], "completed": [], "remaining": [], "blockers": [], "nextAction": null}
+}
