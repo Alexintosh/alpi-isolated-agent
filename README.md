@@ -74,7 +74,7 @@ The security goal treats **root inside the guest as untrusted**. Enforcement bel
 1. Read the [prerelease notes](https://github.com/Alexintosh/alpi-isolated-agent/releases).
 2. [Download the DMG](https://github.com/Alexintosh/alpi-isolated-agent/releases/download/v0.1.0-alpha.2/Alpi-0.1.0-alpha.2-macOS-arm64.dmg), open it and drag **Alpi.app** to **Applications**. A verified runtime package is required to start guests; this prerelease does not distribute that package. See [installation instructions](docs/macos-distribution.md), including first launch and safe updates.
 3. With a compatible runtime package available, open **Settings → Install runtime package**, select it, then choose an environment and **Connect**.
-4. Configure your explicitly authorized model providers, import their configuration in **Models**, and review network requests as they arrive.
+4. Configure model access in **Models**, then review network requests as they arrive. Source builds support manual OpenAI-compatible providers or optional DSH import, with GitHub repository credentials managed in **Secrets**.
 
 For development, build the client from source:
 

@@ -11,9 +11,10 @@ async function response(url,options={}){const result=await fetch(url,options);re
 
 test('real Iron injects only bridge-owned requests; reflected keys filtered without buffering the whole SSE', {skip:!available}, async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'credential-bridge-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
- const secret='canary-key-only-on-host-61f7aa';let hits=0,mode='json',received;
+ const secret='canary-key-only-on-host-61f7aa';let hits=0,mode='json',received,reads=0;
  const upstream=http.createServer((req,res)=>{
   hits++;received={authorization:req.headers.authorization,privateHeaders:Object.keys(req.headers).filter(x=>x.startsWith('x-isolated-'))};req.resume();
+  if(req.url==='/gateway/models'){res.writeHead(200,{'content-type':'application/json'});res.end('{"noAuth":true}');return}
   if(mode==='compressed'){res.writeHead(200,{'content-type':'application/json','content-encoding':'gzip'});res.end(secret);return}
   if(mode==='redirect'){res.writeHead(307,{location:'http://example.invalid/'+secret});res.end(secret);return}
   if(mode==='stream'){
@@ -28,14 +29,19 @@ test('real Iron injects only bridge-owned requests; reflected keys filtered with
  upstream.listen(0,address);await once(upstream,'listening');t.after(async()=>{upstream.closeAllConnections();await new Promise(r=>upstream.close(r))});
  const proxyPort=await freePort();
  const provider={id:'fixture',api:'openai-completions',baseURL:`http://${address}:${upstream.address().port}/v1`,models:[{id:'fixture-model'}],credentialRef:'fixture/key'};
+ const unauthenticated={...provider,id:'no-auth',authMode:'none',baseURL:`http://${address}:${upstream.address().port}/gateway`};delete unauthenticated.credentialRef;
  let bridge;
- const network=new Network({stateRoot:root,ironBinary:binary,decide:async()=>true,credentialBridge:async({caFile})=>bridge=await createCredentialBridge({environmentId:'fixture-v1',providers:[provider],vault:{get:async()=>secret},proxyPort,caFile,decide:async()=>true})});
+ const network=new Network({stateRoot:root,ironBinary:binary,decide:async()=>true,credentialBridge:async({caFile})=>bridge=await createCredentialBridge({environmentId:'fixture-v1',providers:[provider,unauthenticated],vault:{get:async()=>{reads++;return secret}},proxyPort,caFile,decide:async()=>true})});
  const guard=await network.open({id:'fixture-v1',kind:'smolvm',proxyPort});t.after(()=>guard.close());
  const guest=bridge.guestProviders(`http://127.0.0.1:${bridge.port}`)[0];
  const base=guest.provider.baseURL,options={headers:{Authorization:`Bearer ${guest.token}`}};
  let result=await response(base+'/models',options);
  assert.equal(result.status,200,JSON.stringify(result));assert.equal(received.authorization,'Bearer '+secret);assert.deepEqual(received.privateHeaders,[]);
  assert(!JSON.stringify(result).includes(secret));assert(result.body.includes('[redacted]'));assert(!result.headers['set-cookie']);
+ const noAuth=bridge.guestProviders(`http://127.0.0.1:${bridge.port}`)[1],beforeNoAuth=reads;
+ const noAuthResult=await response(noAuth.provider.baseURL+'/models',{headers:{Authorization:`Bearer ${noAuth.token}`}});
+ assert.equal(noAuthResult.status,200);assert.deepEqual(JSON.parse(noAuthResult.body),{noAuth:true});
+ assert.equal(reads,beforeNoAuth);assert.equal(received.authorization,undefined);assert.deepEqual(received.privateHeaders,[]);
  const before=hits;
  assert.equal((await response(base+'/models',{headers:{Authorization:'Bearer another-environment-token'}})).status,401);
  assert.equal((await response(base+'/../../arbitrary',options)).status,404);assert.equal(hits,before);

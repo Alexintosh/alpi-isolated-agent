@@ -17,6 +17,10 @@ Guest egress passes through the host's Iron Proxy. In approval mode, a new desti
 
 Real model and Git credentials are held by the host application. Guest configuration contains scoped substitutes. Missing real keys in the guest is intentional. Do not request copying host keys into this workspace or attempt to bypass the proxy.
 
+For additional API credentials granted in Alpi's Secrets panel, read `~/.harness-isolated/secrets.json`. An entry has a name, upstream origin, allowed path prefix and methods, a relay `baseURL`, and a substitute `authorization`. Append the API's original path and query to that base URL; send the substitute as the `Authorization` header even when the upstream uses an API-key header or Basic auth. The host injects the real credential only after scope checks and Iron approval. Do not print the substitute or copy it to unrelated tools or hosts. Read the manifest again after reconnecting; substitutes expire with their environment's bridge.
+
+Use only the listed methods and paths. This relay supports text/JSON/event-stream API responses, not redirects, compressed responses or arbitrary HTTP headers. A missing entry needs a user grant in the Mac app; it is not permission to search host credentials. Do not retry denied requests automatically.
+
 ## Browser and desktop (WrapVM only)
 
 If the browser/desktop tools are installed, they operate the guest desktop and its shared Chrome session. Start by reading their actual stock guides:

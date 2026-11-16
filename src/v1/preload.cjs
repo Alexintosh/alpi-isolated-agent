@@ -21,7 +21,11 @@ contextBridge.exposeInMainWorld("isolated", Object.freeze({
   clearNetworkHistory: () => ipcRenderer.invoke("isolated:network-clear"),
   importModels: () => ipcRenderer.invoke("isolated:model-import"),
   probeModels: () => ipcRenderer.invoke("isolated:model-probe"),
+  saveModelProvider: input => ipcRenderer.invoke('isolated:model-save', input),
+  removeModelProvider: id => ipcRenderer.invoke('isolated:model-remove', id),
+  selectModel: selection => ipcRenderer.invoke('isolated:model-select', selection),
   importGit: repository => ipcRenderer.invoke('isolated:git-import', repository),
+  saveGit: input => ipcRenderer.invoke('isolated:git-save', input),
   removeGit: id => ipcRenderer.invoke('isolated:git-remove', id),
   importFiles: input => ipcRenderer.invoke("isolated:file-import", input),
   exportFiles: input => ipcRenderer.invoke("isolated:file-export", input),
@@ -38,6 +42,8 @@ contextBridge.exposeInMainWorld("isolated", Object.freeze({
   confirmShare: id => ipcRenderer.invoke('isolated:share-confirm', id),
   removeShare: id => ipcRenderer.invoke('isolated:share-remove', id),
   cancelShare: () => ipcRenderer.invoke('isolated:share-cancel'),
+  saveSecret: input => ipcRenderer.invoke('isolated:secret-save', input),
+  removeSecret: id => ipcRenderer.invoke('isolated:secret-remove', id),
   onStatus: callback => {
     const listener = (_event, value) => callback(value);
     ipcRenderer.on("isolated:status", listener);

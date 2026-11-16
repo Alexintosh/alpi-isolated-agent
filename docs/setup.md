@@ -52,37 +52,74 @@ Maintainer build helpers include `build-guest-bundle.cjs`, `acquire-wrapvm-stock
 
 Runtime redistribution remains blocked on permissions and complete license/source obligations described in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Do not attach the local Runtime Package to a public release.
 
-### Authorize and import model configuration
+### Manage model providers
 
-This alpha supports explicit `openai-completions` providers configured in an existing DSH desktop profile. It does not automatically authorize every provider in that profile or import browser logins.
+Source builds support an editable **Models** catalog for OpenAI Chat Completions
+compatible endpoints, local or remote. Add a provider with a stable ID, display
+name, explicit HTTP(S) API base URL and one or more model definitions. Supply
+context and output token limits for each model; these are configuration, not
+capabilities discovered by Alpi. Select a saved model as the default.
 
-While Alpi is closed, create `model-authorizations.json` inside the app's host state directory. For a packaged build, that is:
+Choose **API key** or **No authentication** explicitly. Keys are encrypted in the
+existing host vault and are never returned to the renderer. An unchanged endpoint
+can retain its saved key; changing the endpoint requires a new key. Unauthenticated
+providers need no dummy key and do not read the vault. Their guest requests still
+require a substitute and pass through the same host network policy; no
+Authorization header reaches the upstream endpoint.
 
-```text
-~/Library/Application Support/Harness Isolated/personal-v1/model-authorizations.json
-```
+**Import from DSH** is optional. It reads all configured providers and models from
+`~/.dsh/profiles/desktop/cordis.patch.yml`, plus referenced credentials from
+`~/.dsh/.credentials.yaml` when needed. Import merges matching provider IDs and
+preserves unrelated Alpi providers. It retains the current default when still
+valid; select another default before an import or edit that would remove it.
+Unsupported protocols, invalid defaults and unavailable referenced credentials
+fail explicitly without a partial import. Source files remain unchanged.
 
-The legacy directory name is intentional. Example (replace the provider/model with your own; this is not an operational endpoint):
+Existing version-1 catalogs and their authorization metadata remain readable.
+An explicit successful catalog change writes version 2; new UI grants no longer
+need the former one-model-per-provider `model-authorizations.json` workflow. The
+old authorization file is not rewritten or removed.
 
-```json
-{
-  "version": 1,
-  "providers": {
-    "local-model": {
-      "endpoint": "http://127.0.0.1:8000/v1",
-      "model": "your-model-id"
-    }
-  }
-}
-```
+Models and Git repository grants are currently **shared across all managed
+environments**. Saving, importing, selecting a default or removing access stops
+all environments and their running jobs before updating the catalog. A failed
+stop prevents the update. Connect again to use the new catalog. If catalog
+publication is uncertain, Alpi preserves encrypted values and blocks new leases
+until restart revalidates the stored state. A cleanup warning means the access
+change succeeded but an unused encrypted record remains.
 
-Set the file to mode `0600`. It contains authorization metadata, **not a key**. Up to 32 providers are supported, with one explicitly selected model per provider. Provider IDs must start with a lowercase letter or digit and contain only lowercase letters, digits and hyphens (maximum 64 characters). Endpoints must use HTTP(S), end in `/v1`, and contain no URL credentials, query or fragment. The authorized provider IDs, endpoints and models must match the DSH desktop configuration; its default model must be included.
+Inference endpoints are reached from the host bridge. A host-local server can
+therefore use `127.0.0.1`; that is not the guest's loopback. Host-side availability
+checks are separate explicit host actions that request `/models` without running
+inference. They do not establish guest-side or full inference acceptance.
 
-Open Alpi and use **Models → Import**. The importer reads `~/.dsh/profiles/desktop/cordis.patch.yml` and the referenced entries in `~/.dsh/.credentials.yaml`, stores managed credentials in the encrypted host vault, and leaves the source profile unchanged. Restart the app after editing authorization metadata. An invalid authorization file fails without fallback. With no file, only providers in an already-saved host catalog remain authorized; a clean installation cannot import until configured.
+### GitHub repository credentials
 
-Inference endpoints are reached from the host bridge. A host-local server can therefore use `127.0.0.1`; that is not the guest's loopback. Requests still require applicable policy approval. Host-side availability probes are separate explicit host actions.
+In **Secrets**, authorize one exact `owner/repository` for HTTPS clone, fetch and
+push. Enter a GitHub username and a limited-scope token, or explicitly import the
+credential available for that repository through the Mac credential helper.
+Replacing a token requires a fresh username and token; saved values are never
+shown. The helper does not scan other repositories or start a browser login.
 
-Git HTTPS support imports credentials for an explicitly named GitHub repository through the host credential helper. Use only repositories you are authorized to access. A private GitHub push has not yet completed live acceptance.
+These grants use the host vault and the existing smart-Git bridge. They are
+shared across environments and stop all environments on mutation, as described
+above. The guest receives a per-launch substitute. GitHub REST API access belongs
+in a separate scoped API credential. Redirects and Git LFS are not supported.
+Local synthetic Git/Iron tests do not establish live private-GitHub acceptance.
+
+### Scoped API credentials
+
+Open **Secrets → Add secret** to save a Bearer token, an API key in an `x-` header, or a Basic-auth password. Enter a name, select one environment, and set the exact HTTPS origin, an allowed path prefix and explicit HTTP methods. API keys also require their header name; Basic auth requires a username. Names, usernames and scopes are metadata; put the secret only in the password field.
+
+Prefixes must start and end with `/`: `/v1/` permits paths below that prefix, while `/` permits all paths on the selected origin. Encoded path segments, dot segments, wildcard origins and reserved internal headers are rejected. Query parameters are not restricted by the prefix. Saving a credential does not create a network allow rule; normal Iron approvals still apply.
+
+**Save and stop environment** stores the value in the existing encrypted host vault and stops that credential's environment before changing access. Removing access also stops that environment. Files and sessions survive; choose **Connect** to resume. The environment of a saved entry is fixed: create a separate entry to grant another environment access. **Replace** rotates the saved value; it never reveals the old value. Changing the authentication type or Basic username requires a fresh value.
+
+On connection, Alpi writes `~/.harness-isolated/secrets.json` inside the guest. This manifest contains names, scopes, a relay `baseURL` and a per-launch substitute `authorization`, never the real values. Guest tools append the original API path and query to `baseURL`, then send the substitute in the `Authorization` header. The host validates the environment, path, method and substitute, and uses a single-use ticket to inject the real header through Iron after network approval. The guest environment's existing proxy exclusions cover this local relay.
+
+This supports scoped HTTP API calls and text/JSON/event-stream responses. It does not inject plaintext environment variables, SSH keys, browser cookies or arbitrary files into the guest. Only a small set of request headers is forwarded (Accept, Content-Type, Anthropic-Version, OpenAI-Beta, X-GitHub-API-Version and Idempotency-Key). Redirects and compressed responses are rejected; arbitrary upstream response headers are discarded. Literal and JSON-escaped reflected secrets are filtered from response bodies; arbitrary encodings or covert channels are outside that guarantee.
+
+Synthetic catalog, renderer, lifecycle and relay tests do not establish live acceptance against every API or a running VM. Revalidate the actual provider workflow before relying on it.
 
 ### Existing installations and data
 
@@ -129,3 +166,13 @@ Do not emulate Linux support by disabling the sandbox, the proxy, TLS verificati
 No inference key is needed for unit tests. See [AGENTS.md](../AGENTS.md) for agent-facing instructions and [SECURITY.md](../SECURITY.md) for security assumptions. A passing mock test is never a substitute for live acceptance of a new platform or engine.
 
 A [GitHub Actions template](portable-tests.workflow.yml) is provided for portable checks on Ubuntu and macOS. It is not installed as an active workflow: publishing credentials used for this prerelease did not have GitHub's `workflow` scope. A maintainer with that permission can copy it to `.github/workflows/portable-tests.yml`. No Linux CI result is claimed for this prerelease.
+
+### Synthetic Models/Git form acceptance
+
+Run `npm run test:ui-dom` on a graphical Electron host. It loads the shipped
+HTML, renderer and preload in a hidden BrowserWindow with a temporary profile
+and synthetic IPC handlers; external network requests are blocked. It checks
+real form validation, password clearing, deferred/rejected requests, optional
+Git helper import and provider editor edge cases. It never loads the application
+main process, accesses Keychain, reads DSH profiles or starts a VM. This is real
+DOM acceptance, not proof of live provider, GitHub or VM operation.

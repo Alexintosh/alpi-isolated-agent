@@ -19,6 +19,7 @@ function environment(id) {
 const { SecretVault } = require("./runtime/secret-vault.cjs");
 const { ModelCatalog } = require("./runtime/model-catalog.cjs");
 const { GitCatalog } = require('./runtime/git-catalog.cjs');
+const { SecretCatalog } = require('./runtime/secret-catalog.cjs');
 const { createCredentialBridge } = require("./runtime/credential-bridge.cjs");
 const {ArtifactInstaller}=require('./runtime/artifact-installer.cjs');
 const {diagnosticSnapshot}=require('./runtime/diagnostics.cjs');
@@ -38,7 +39,7 @@ const noticeFile = path.join(__dirname, "v1/notification.html"), noticeURL = pat
 const selectionFile = path.join(stateRoot, "selection.json");
 let window, controls, view, notice, tray, runtime, policy, monitor, controller, task;
 let panel = "harness";
-let catalog, gitCatalog, modelBusy = false, filesBusy = false;
+let catalog, gitCatalog, secretCatalog, modelBusy = false, filesBusy = false;
 const revocations = new Map();
 let ready;
 let installer,installationReady=!installedMode,installationBusy=false,artifactTask,artifactPicker,diagnosticExportBusy=false;
@@ -56,7 +57,7 @@ let viewerView, viewerLease, viewerBoundary, viewerController, viewerTask, viewe
 let viewerGeneration=0, viewerClosing=Promise.resolve();
 
 function networkPresentation() {
-  const groups = pendingGroups(policy?.snapshot(), catalog?.providers);
+  const groups = pendingGroups(policy?.snapshot(), catalog?.snapshot().providers);
   const now = Date.now();
   for (const [key, until] of dismissedNotices) if (until <= now) dismissedNotices.delete(key);
   return { groups, notification: !quitting && panel !== 'network' ? groups.find(group => !dismissedNotices.has(group.key)) ?? null : null };
@@ -64,7 +65,7 @@ function networkPresentation() {
 function snapshot() {
   const environments = runtime?.coordinator.snapshot() ?? [];
   const phase = diagnostic.step === 'start' ? environments.find(item => item.id === selectedId)?.phase ?? 'starting' : diagnostic.step ?? 'working';
-  return { environmentVerification, connection:{issue:harnessIssue}, images:{...imageStore.snapshot(selectedImage),busy:Boolean(imageTask)||imageStore.state.busy}, viewer: {available: Boolean(activeId && activeId === selectedId && environment(activeId).desktop), opening: viewerOpening, kind: viewerKind, error: viewerError}, progress: busy && operationStartedAt ? { startedAt: operationStartedAt, phase } : null, networkPresentation: networkPresentation(), selectedId, activeId, busy, quitting, label, detail, panel, modelBusy, filesBusy, installation:installer?{...installer.snapshot(),ready:installationReady}:undefined, resources:runtime?.resources.snapshot(), transfers: runtime?.transfers.snapshot(), shares: runtime?.shares.snapshot(), models: catalog?.snapshot(), git: gitCatalog?.snapshot(), networkPolicy: policy?.snapshot(), environments: runtime?.coordinator.snapshot() ?? [] };
+  return { environmentVerification, connection:{issue:harnessIssue}, images:{...imageStore.snapshot(selectedImage),busy:Boolean(imageTask)||imageStore.state.busy}, viewer: {available: Boolean(activeId && activeId === selectedId && environment(activeId).desktop), opening: viewerOpening, kind: viewerKind, error: viewerError}, progress: busy && operationStartedAt ? { startedAt: operationStartedAt, phase } : null, networkPresentation: networkPresentation(), selectedId, activeId, busy, quitting, label, detail, panel, modelBusy, filesBusy, installation:installer?{...installer.snapshot(),ready:installationReady}:undefined, resources:runtime?.resources.snapshot(), transfers: runtime?.transfers.snapshot(), shares: runtime?.shares.snapshot(), models: catalog?.snapshot(), git: gitCatalog?.snapshot(), secrets: secretCatalog?.snapshot(), networkPolicy: policy?.snapshot(), environments: runtime?.coordinator.snapshot() ?? [] };
 }
 function publish(nextLabel, nextDetail = "") {
   if (nextLabel) { label = nextLabel; detail = nextDetail; }
@@ -422,7 +423,7 @@ async function quit(exitCode = 0) {
   }
 }
 function setPanel(next) {
-  if (!["harness", "network", "models", "files", "resources"].includes(next)) throw new Error("Invalid panel.");
+  if (!["harness", "network", "models", "files", "resources", "secrets"].includes(next)) throw new Error("Invalid panel.");
   if(viewerOpening)void clearViewer();
   panel = next; view?.setVisible(panel === "harness"); viewerView?.setVisible(false); return publish();
 }
@@ -492,25 +493,94 @@ async function showViewer(kind) {
   })();
   await viewerTask;return snapshot();
 }
-async function modelAction(operation) {
-  if (quitting || busy || modelBusy || !catalog) return snapshot();
-  modelBusy = true; publish();
-  try { if (operation === "import") await catalog.importDesktop(); else await catalog.probe(); }
-  catch { throw new Error("Model operation failed. Check the configuration and Keychain availability."); }
-  finally { modelBusy = false; publish(); }
+function sharedCatalogReady(target) {
+  if (busy || filesBusy || modelBusy || installationBusy || imageTask || quitting ||
+      !runtime || runtime.coordinator.closing || !target)
+    throw new Error('Catalog changes are unavailable while another operation is in progress.');
+}
+function catalogError(error) {
+  return new Error(['MODEL_CATALOG', 'GIT_CATALOG'].includes(error?.code) ? error.message :
+    'The catalog change did not complete. Check environment ownership, saved state and Keychain availability.');
+}
+async function sharedCatalogChange(target, prepare, mutate, title) {
+  sharedCatalogReady(target);
+  let prepared;
+  try { prepared = prepare(); } catch (error) { throw catalogError(error); }
+  let failure;
+  await action(async ({ signal }) => {
+    try {
+      await releaseView();
+      // All environments share these grants. No new catalog may be published
+      // until every old lease has closed successfully.
+      for (const definition of ENVIRONMENTS) {
+        signal.throwIfAborted();
+        await runtime.coordinator.stop(definition.id, { signal });
+      }
+      signal.throwIfAborted();
+      await mutate(prepared, signal);
+      publish(title, target.snapshot().cleanupPending
+        ? 'Access was updated. An unused encrypted record could not be removed. Environments are stopped; select Connect to continue.'
+        : 'Environments are stopped. Select Connect to apply the updated catalog.');
+    } catch (error) { failure = catalogError(error); throw failure; }
+  });
+  if (failure) throw failure;
   return snapshot();
 }
-function gitAction(operation, value) {
-  return action(async ({ signal }) => {
-    if (!gitCatalog) throw new Error('Git catalog unavailable');
-    await releaseView();
-    // Close every old credential lease before a rotation/revocation. This is
-    // serialized with connection/start actions and made explicit in the UI.
-    for (const definition of ENVIRONMENTS) await runtime.coordinator.stop(definition.id, { signal });
-    signal.throwIfAborted();
-    if (operation === 'import') await gitCatalog.importRepository(value); else await gitCatalog.remove(value);
-    publish('Git access updated', 'Environments are stopped. Select Connect to apply the updated catalog.');
+async function modelAction(operation, input) {
+  if (operation === 'probe') {
+    sharedCatalogReady(catalog);
+    modelBusy = true; publish();
+    try { await catalog.probe(); }
+    catch { throw new Error('Model check failed. Check the endpoint and Keychain availability.'); }
+    finally { modelBusy = false; publish(); }
+    return snapshot();
+  }
+  const operations = {
+    import: [() => catalog.prepareImport(), (prepared, signal) => catalog.importDesktop({ prepared, signal })],
+    save: [() => catalog.prepareSave(input), (prepared, signal) => catalog.save(prepared, { signal })],
+    remove: [() => catalog.prepareRemove(input), (prepared, signal) => catalog.remove(prepared.id, { signal })],
+    select: [() => catalog.prepareSelect(input), (prepared, signal) => catalog.select(prepared, { signal })],
+  };
+  if (!Object.hasOwn(operations, operation)) throw new Error('Unknown model operation.');
+  return sharedCatalogChange(catalog, ...operations[operation], 'Models updated');
+}
+function gitAction(operation, input) {
+  const operations = {
+    import: [() => gitCatalog.prepareImport(input), (prepared, signal) => gitCatalog.importRepository(prepared.repository, { signal })],
+    save: [() => gitCatalog.prepareSave(input), (prepared, signal) => gitCatalog.save(prepared, { signal })],
+    remove: [() => gitCatalog.prepareRemove(input), (prepared, signal) => gitCatalog.remove(prepared.id, { signal })],
+  };
+  if (!Object.hasOwn(operations, operation)) throw new Error('Unknown Git operation.');
+  return sharedCatalogChange(gitCatalog, ...operations[operation], 'Git access updated');
+}
+async function secretAction(operation, input) {
+  if (busy || filesBusy || modelBusy || installationBusy || imageTask || quitting ||
+      !runtime || runtime.coordinator.closing || !secretCatalog)
+    throw new Error('Credentials are unavailable while another operation is in progress.');
+  // Capture and validate before stopping anything. Saved credentials cannot be
+  // moved to another environment by changing a renderer-provided identifier.
+  const prepared = operation === 'save' ? secretCatalog.prepareSave(input) : secretCatalog.prepareRemove(input);
+  environment(prepared.environmentId);
+  let failed = false;
+  await action(async ({ signal }) => {
+    try {
+      if (activeId === prepared.environmentId) await releaseView();
+      await runtime.coordinator.stop(prepared.environmentId, { signal });
+      signal.throwIfAborted();
+      if (operation === 'save') await secretCatalog.save(prepared, { signal });
+      else await secretCatalog.remove(prepared.id);
+      publish('Credential access updated', secretCatalog.snapshot().cleanupPending
+        ? 'Access was updated. An unused encrypted record could not be removed. The environment is stopped; select Connect to continue.'
+        : 'The affected environment is stopped. Select Connect to apply the updated credentials.');
+    } catch {
+      failed = true;
+      throw new Error('Credential operation failed.');
+    }
   });
+  // Ordinary lifecycle actions return their error state. Credential forms need
+  // an explicit rejection so they never present a failed write as a saved secret.
+  if (failed) throw new Error('The credential change did not complete. Check environment ownership, saved state and Keychain availability.');
+  return snapshot();
 }
 async function fileAction(operation, input = {}) {
   if (busy || filesBusy || quitting || !runtime) return snapshot();
@@ -646,9 +716,14 @@ function initializeRuntime(options={}) {
  const next=createRuntime({stateRoot,...options,definitions:ENVIRONMENTS,localImageArchive:imageStore.localArchive,
   ...(installedMode?{runtimeRoot:path.join(os.homedir(),'.harness-isolated/v1')}:{}),
   decide:input=>policy?.decide(input)??false,
-  credentialBridge:settings=>(catalog?.providers.length||gitCatalog?.repositories.length)?createCredentialBridge({environmentId:settings.definition.id,
-   providers:catalog.providers,selected:catalog.selected,gitRepositories:gitCatalog?.repositories??[],vault:catalog.vault,proxyPort:settings.proxyPort,caFile:settings.caFile,
-   port:settings.definition.credentialPort,decide:settings.decide}):undefined,
+  credentialBridge: settings => {
+   const secrets = secretCatalog?.entriesFor(settings.definition.id) ?? [];
+   if (!catalog?.providers?.length && !gitCatalog?.repositories?.length && !secrets.length) return undefined;
+   return createCredentialBridge({ environmentId: settings.definition.id, secrets,
+    providers: catalog.providers, selected: catalog.selected, gitRepositories: gitCatalog?.repositories ?? [],
+    vault: catalog.vault, proxyPort: settings.proxyPort, caFile: settings.caFile,
+    port: settings.definition.credentialPort, decide: settings.decide });
+  },
   onFault:(id)=>{ if (!busy && !quitting && activeId === id) publishConnected(id); }});
  for(const service of [runtime?.coordinator,runtime?.transfers,runtime?.shares,runtime?.resources])service?.removeAllListeners('change');
  runtime=next;
@@ -702,6 +777,7 @@ function initializeServices() {
   }
   if (!catalog) catalog = new ModelCatalog({ stateRoot, vault: new SecretVault({ stateRoot, safeStorage }) });
   if (!gitCatalog) gitCatalog = new GitCatalog({ stateRoot, vault: catalog.vault });
+  if (!secretCatalog) secretCatalog = new SecretCatalog({ stateRoot, vault: catalog.vault, environmentIds: ENVIRONMENTS.map(item => item.id) });
 }
 async function stopForArtifacts(){
  if(quitting)throw Error('Application shutdown is in progress.');
@@ -777,7 +853,11 @@ else {
       "network-notice-state": () => networkPresentation().notification,
       "network-notice-review": () => { setPanel('network'); showWindow(); return snapshot(); },
       "model-import": () => modelAction("import"), "model-probe": () => modelAction("probe"),
+      'model-save': input => modelAction('save', input), 'model-remove': id => modelAction('remove', id),
+      'model-select': selection => modelAction('select', selection),
       'git-import': repository => gitAction('import', repository), 'git-remove': id => gitAction('remove', id),
+      'git-save': input => gitAction('save', input),
+      'secret-save': input => secretAction('save', input), 'secret-remove': id => secretAction('remove', id),
       "file-import": input => fileAction("import", input), "file-export": input => fileAction("export", input),
       "file-execute": id => fileAction("execute", { id }), "file-cancel": () => { runtime?.transfers.cancel(); return publish(); },
       "file-recover": recoverTransfer,

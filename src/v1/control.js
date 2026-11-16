@@ -10,7 +10,7 @@ function render(state) {
   lastState = state;
   $("diagnostics-export").disabled = Boolean(state.quitting);
   renderInstallation(state); renderNetwork(state); renderModels(state); renderFiles(state);
-  renderShares(state); renderGit(state); renderResources(state); renderDesktopImages(state); renderEnvironmentManagement(state);
+  renderShares(state); renderResources(state); renderDesktopImages(state); renderEnvironmentManagement(state); renderSecrets(state);
   const guestVisible = ["desktop", "browser"].includes(state.panel) || (state.panel === "harness" && Boolean(state.activeId));
   $("content").hidden = guestVisible;
   const environments = state.environments ?? [];
@@ -35,7 +35,7 @@ function render(state) {
     `${selected.kind === "smolvm" ? "Browser and desktop" : "Shell and terminal"} · Files in the VM · ${selected.network === "ready" ? "Network controlled by Iron" : "Network offline"}` : "";
   renderLifecycle(state, selected);
   $("stop").disabled = state.busy || state.filesBusy || state.quitting || !selected || ["new", "stopped"].includes(selected.phase);
-  for (const [id, panel] of [["harness", "harness"], ["network", "network"], ["files", "files"], ["models", "models"], ["resources", "resources"]])
+  for (const [id, panel] of [["harness", "harness"], ["network", "network"], ["files", "files"], ["models", "models"], ["secrets", "secrets"], ["resources", "resources"]])
     $(id).setAttribute("aria-pressed", String(state.panel === panel));
   const viewerBlocked = !state.viewer?.available || state.viewer?.opening || state.busy || state.filesBusy || state.quitting;
   for (const kind of ["desktop", "browser"]) {
@@ -95,7 +95,7 @@ function renderFeedback() {
   const state = lastState, message = feedbackText();
   $("detail").textContent = message;
   // Guest surfaces are separate trusted views. Their persistent status lives in the bottom bar.
-  const messagePanel = { resources: "resources-panel", network: "network-panel", models: "models-panel", files: "files-panel" }[state.panel];
+  const messagePanel = { resources: "resources-panel", network: "network-panel", models: "models-panel", files: "files-panel", secrets: "secrets-panel" }[state.panel];
   const messageHost = messagePanel ? $(messagePanel).querySelector(".page-body") : null;
   if (messageHost && $("local-message").parentNode !== messageHost) messageHost.prepend($("local-message"));
   $("local-message").hidden = !message || dismissedMessage === message || !messageHost || $("content").hidden;
@@ -682,25 +682,531 @@ const modelStatuses = {
   "vault-unavailable": "Keychain unavailable", unauthorized: "Credential rejected by server",
   "upstream-error": "Server error", unreachable: "Server not reachable",
 };
-let modelKey;
+const modelDrafts = new Map();
+const newModelSelection = Symbol("new-provider");
+let modelSelection, modelEditorSelection, modelListKey;
+let modelPending = null, modelReplace = false;
+const modelMaxRows = 64;
+ICON_PATHS.pencil = '<path d="M9.5 3.5 12.5 6.5 6.6 12.4 3.4 13l.6-3.2z"/><path d="M8.3 4.7l3 3"/>';
+function mutationButton(label, run, className, icon = "check") {
+  const button = element("button", undefined, className); button.type = "button";
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "ic"); svg.setAttribute("viewBox", "0 0 16 16"); svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = ICON_PATHS[icon] ?? ICON_PATHS.check;
+  button.append(svg, element("span", label));
+  button.addEventListener("click", () => { void run(); });
+  return button;
+}
+function modelCatalogUnavailable(state) { return !state?.models || Boolean(state.models.fault); }
+function modelsBlocked(state) {
+  return Boolean(!state || modelCatalogUnavailable(state) || state.busy || state.filesBusy || state.modelBusy ||
+    state.quitting || state.installation?.busy || state.images?.busy || modelPending ||
+    typeof window.isolated.saveModelProvider !== "function");
+}
+function selectedModelProvider(state) {
+  return (state?.models?.providers ?? []).find(provider => provider.id === modelSelection);
+}
+function normalizeBaseURL(value) { return value.trim().replace(/\/+$/, ""); }
+function blankModelRow() {
+  return { id: "", name: "", contextWindow: "", maxTokens: "", input: ["text"], reasoningEfforts: undefined };
+}
+function storedModelRow(model) {
+  return { id: model.id, name: model.name ?? model.id, contextWindow: String(model.contextWindow),
+    maxTokens: String(model.maxTokens), input: model.input ? [...model.input] : [],
+    reasoningEfforts: model.reasoningEfforts };
+}
+function readModelRows() {
+  return [...$("model-rows").children].filter(row => row._modelRow).map(row => ({
+    id: row._idInput.value, name: row._nameInput.value,
+    contextWindow: row._contextInput.value, maxTokens: row._tokensInput.value,
+    input: [row._textInput.checked ? "text" : null, row._imageInput.checked ? "image" : null].filter(Boolean),
+    reasoningEfforts: row._reasoningEfforts,
+  }));
+}
+// Only metadata is drafted. API keys live transiently in the password field and
+// are cleared on submission, cancel, selection/panel/auth changes and fault.
+function captureModelDraft() {
+  if (!modelSelection) return;
+  modelDrafts.set(modelSelection, {
+    id: $("model-id").value, displayName: $("model-display-name").value,
+    baseURL: $("model-baseurl").value, authMode: $("model-auth").value,
+    models: readModelRows(),
+  });
+}
+function clearModelValue() {
+  $("model-value").value = "";
+  modelReplace = false;
+}
+function modelRowLabel(text) {
+  const label = element("label", text); return label;
+}
+function renderModelRows(models) {
+  const container = $("model-rows");
+  container.replaceChildren(...models.map((model, index) => {
+    const row = element("div", undefined, "model-row");
+    row._modelRow = true;
+    row.append(element("h3", `Model ${index + 1}`));
+    const idInput = element("input"); idInput.maxLength = 256; idInput.autocomplete = "off"; idInput.required = true;
+    const idLabel = modelRowLabel("Model ID"); idLabel.append(idInput);
+    const nameInput = element("input"); nameInput.maxLength = 256; nameInput.autocomplete = "off"; nameInput.required = true;
+    const nameLabel = modelRowLabel("Display name"); nameLabel.append(nameInput);
+    const contextInput = element("input"); contextInput.type = "number"; contextInput.min = "1"; contextInput.step = "1"; contextInput.required = true;
+    const contextLabel = modelRowLabel("Context window (tokens)"); contextLabel.append(contextInput);
+    const tokensInput = element("input"); tokensInput.type = "number"; tokensInput.min = "1"; tokensInput.step = "1"; tokensInput.required = true;
+    const tokensLabel = modelRowLabel("Max output tokens"); tokensLabel.append(tokensInput);
+    const fieldset = element("fieldset", undefined, "model-row-input");
+    fieldset.append(element("legend", "Input modes"));
+    const textInput = element("input"); textInput.type = "checkbox"; textInput.checked = model.input.includes("text");
+    const textLabel = element("label", "Text"); textLabel.prepend(textInput);
+    const imageInput = element("input"); imageInput.type = "checkbox"; imageInput.checked = model.input.includes("image");
+    const imageLabel = element("label", "Image"); imageLabel.prepend(imageInput);
+    const options = element("div", undefined, "model-input-options"); options.append(textLabel, imageLabel);
+    fieldset.append(options);
+    const remove = element("button", "Remove model"); remove.type = "button";
+    remove.disabled = models.length === 1;
+    remove.title = models.length === 1 ? "Keep at least one model." : "Remove this model row.";
+    row._idInput = idInput; row._nameInput = nameInput; row._contextInput = contextInput; row._tokensInput = tokensInput;
+    row._textInput = textInput; row._imageInput = imageInput;
+    row._reasoningEfforts = model.reasoningEfforts;
+    row._removeButton = remove;
+    idInput.value = model.id; nameInput.value = model.name;
+    contextInput.value = model.contextWindow; tokensInput.value = model.maxTokens;
+    for (const input of [idInput, nameInput, contextInput, tokensInput])
+      input.addEventListener("input", () => captureModelDraft());
+    for (const input of [textInput, imageInput])
+      input.addEventListener("change", () => captureModelDraft());
+    remove.addEventListener("click", () => removeModelRow(index));
+    row.append(idLabel, nameLabel, contextLabel, tokensLabel, fieldset, remove);
+    return row;
+  }));
+}
+function setModelRowsDisabled(disabled) {
+  for (const row of [...$("model-rows").children].filter(node => node._modelRow)) {
+    for (const input of [row._idInput, row._nameInput, row._contextInput, row._tokensInput])
+      input.disabled = disabled;
+    for (const input of [row._textInput, row._imageInput]) input.disabled = disabled;
+    row._removeButton.disabled = disabled || $("model-rows").children.length <= 1;
+  }
+}
+function applyModelEditor(state, entry) {
+  const draft = modelDrafts.get(modelSelection);
+  const base = draft ?? (entry ? {
+    id: entry.id, displayName: entry.displayName, baseURL: entry.baseURL, authMode: entry.authMode,
+    models: entry.models.map(storedModelRow),
+  } : { id: "", displayName: "", baseURL: "", authMode: "bearer", models: [blankModelRow()] });
+  $("model-id").value = base.id;
+  $("model-id").readOnly = Boolean(entry);
+  $("model-id").title = entry ? "Provider ID cannot change after the first save." : "";
+  $("model-display-name").value = base.displayName;
+  $("model-baseurl").value = base.baseURL;
+  $("model-auth").value = base.authMode;
+  renderModelRows(base.models);
+  $("model-editor-title").textContent = entry ? `Edit ${entry.displayName}` : "Add a provider";
+  $("model-remove").hidden = !entry;
+  modelEditorSelection = modelSelection;
+}
+function syncModelEditor(state, entry) {
+  const authMode = $("model-auth").value;
+  const hasSaved = Boolean(entry && entry.authMode === "bearer" && entry.credentialAvailable);
+  const blocked = modelsBlocked(state);
+  const value = $("model-value");
+  value.disabled = blocked || authMode === "none";
+  // A saved key is never revealed: the field stays empty and locked until Replace.
+  value.readOnly = blocked || (hasSaved && !modelReplace);
+  value.placeholder = authMode === "none" ? "No API key needed"
+    : hasSaved ? (modelReplace ? "Enter the replacement API key" : "Saved key is kept") : "Enter the API key";
+  $("model-value-label").textContent = authMode === "none" ? "API key (not used)" : "API key";
+  $("model-replace").hidden = !(hasSaved && authMode === "bearer") || modelReplace;
+  $("model-replace").disabled = blocked;
+}
+function renderModelList(state, blocked) {
+  const providers = state.models?.providers ?? [];
+  const selected = state.models?.selected;
+  const key = JSON.stringify([providers.map(provider => [provider.id, provider.displayName, provider.baseURL,
+    provider.authMode, provider.credentialAvailable, provider.availability,
+    provider.models.map(model => [model.id, model.name])]), selected, blocked, modelPending]);
+  if (key === modelListKey) return;
+  modelListKey = key;
+  const list = $("model-list");
+  list.replaceChildren(...providers.map(provider => {
+    const row = element("div", undefined, "network-item"), details = element("div", undefined, "identity");
+    details.append(element("strong", provider.displayName), element("code", provider.baseURL));
+    const authText = provider.authMode === "none" ? "No authentication"
+      : provider.credentialAvailable ? "API key saved on Mac" : "API key missing";
+    details.append(element("small", `${authText} · ${modelStatuses[provider.availability] ?? "Not checked yet"}`));
+    const models = element("div", undefined, "model-models");
+    for (const model of provider.models) {
+      const line = element("span", undefined, "model-model");
+      const label = element("span", `${model.name} · ${model.id}`);
+      if (selected && selected.provider === provider.id && selected.model === model.id) {
+        label.append(element("span", "Default", "model-default"));
+        line.append(label);
+      } else {
+        line.append(label);
+        const set = mutationButton("Set default", () => selectModelDefault(provider.id, model.id), "", "check");
+        set.disabled = blocked;
+        set.title = "Set as the default model for every environment. Stops environments and running jobs; connect again to apply.";
+        line.append(set);
+      }
+      models.append(line);
+    }
+    details.append(models);
+    const actions = element("div", undefined, "actions");
+    const edit = mutationButton("Edit", () => editModelProvider(provider.id), "", "pencil");
+    const remove = mutationButton("Remove provider", () => removeModelProviderAction(provider.id), "revoke", "trash");
+    remove.title = "Removes this provider from every environment. Stops environments and running jobs; connect again to apply.";
+    edit.disabled = blocked; remove.disabled = blocked;
+    actions.append(edit, remove);
+    row.append(details, actions);
+    return row;
+  }));
+  if (!providers.length) list.append(element("p", "No model providers saved. Add a provider below or import from DSH.", "empty"));
+}
 function renderModels(state) {
   $("models-panel").hidden = state.panel !== "models";
-  $("models-import").disabled = state.busy || state.filesBusy || state.modelBusy || state.quitting;
-  $("models-probe").disabled = state.busy || state.filesBusy || state.modelBusy || state.quitting || !state.models?.providers.length;
-  const key = JSON.stringify(state.models); if (key === modelKey) return; modelKey = key;
-  $("model-list").replaceChildren(...(state.models?.providers ?? []).map(provider => {
-    const row = element("div", undefined, "network-item"), details = element("div", undefined, "identity");
-    details.append(element("strong", provider.displayName), element("p", provider.models.map(model => model.name).join(", ")),
-      element("code", provider.baseURL),
-      element("small", `${provider.credentialAvailable ? "Credential saved on Mac" : "Credential missing"} · ${modelStatuses[provider.availability] ?? "Not checked yet"}`));
-    row.append(details); return row;
-  }));
-  if (!state.models?.providers.length) $("model-list").append(element("p", "No models imported. Import from DSH on your Mac to add your local providers.", "empty"));
+  const open = state.panel === "models";
+  const unavailable = modelCatalogUnavailable(state);
+  if (!open) { clearModelValue(); modelEditorSelection = undefined; return; }
+  $("model-fault").hidden = !unavailable;
+  $("model-cleanup-pending").hidden = !state.models?.cleanupPending;
+  const blocked = modelsBlocked(state);
+  $("models-import").disabled = blocked || typeof window.isolated.importModels !== "function";
+  $("models-probe").disabled = blocked || !state.models?.providers.length || typeof window.isolated.probeModels !== "function";
+  const providers = state.models?.providers ?? [];
+  if (modelSelection !== newModelSelection && !providers.some(provider => provider.id === modelSelection)) {
+    modelSelection = state.models?.selected?.provider ??
+      (providers.length ? providers[0].id : newModelSelection);
+  }
+  renderModelList(state, blocked);
+  const entry = selectedModelProvider(state);
+  if (modelEditorSelection !== modelSelection) {
+    clearModelValue();
+    applyModelEditor(state, entry);
+  }
+  syncModelEditor(state, entry);
+  const editorBlocked = blocked || modelSelection === undefined;
+  for (const id of ["model-id", "model-display-name", "model-baseurl", "model-auth", "model-row-add", "model-save"])
+    $(id).disabled = editorBlocked;
+  $("model-id").readOnly = editorBlocked || Boolean(entry);
+  $("model-add").disabled = blocked || !providers.length || modelSelection === newModelSelection;
+  $("model-cancel").disabled = Boolean(state.quitting || modelPending);
+  $("model-remove").disabled = blocked || typeof window.isolated.removeModelProvider !== "function";
+  $("model-row-add").disabled = blocked || readModelRows().length >= modelMaxRows;
+  setModelRowsDisabled(blocked);
+  if (unavailable || state.quitting) clearModelValue();
+}
+function editModelProvider(id) {
+  if (!lastState || modelsBlocked(lastState)) return;
+  captureModelDraft();
+  modelSelection = id;
+  modelEditorSelection = undefined;
+  clearModelValue();
+  void act(() => window.isolated.showPanel("models"));
+}
+async function selectModelDefault(providerId, modelId) {
+  const state = lastState;
+  if (!state || modelPending || modelsBlocked(state) || typeof window.isolated.selectModel !== "function") return;
+  modelPending = "select";
+  clearModelValue();
+  renderModels(state);
+  try { await act(() => window.isolated.selectModel({ provider: providerId, model: modelId })); }
+  finally { modelPending = null; if (lastState) renderModels(lastState); }
+}
+async function removeModelProviderAction(id) {
+  const state = lastState;
+  if (!state || modelPending || modelsBlocked(state) || typeof window.isolated.removeModelProvider !== "function") return;
+  modelPending = "remove";
+  const selectionAtSubmit = modelSelection;
+  clearModelValue();
+  renderModels(state);
+  try {
+    await act(async () => {
+      const result = await window.isolated.removeModelProvider(id);
+      modelDrafts.delete(id);
+      if (modelSelection === selectionAtSubmit) { modelEditorSelection = undefined; modelSelection = newModelSelection; }
+      return result;
+    });
+  } finally { modelPending = null; if (lastState) renderModels(lastState); }
+}
+async function importModelProviders() {
+  const state = lastState;
+  if (!state || modelPending || modelsBlocked(state) || typeof window.isolated.importModels !== "function") return;
+  modelPending = "import";
+  clearModelValue();
+  renderModels(state);
+  try { await act(() => window.isolated.importModels()); }
+  finally { modelPending = null; if (lastState) renderModels(lastState); }
+}
+async function verifyModelAvailability() {
+  const state = lastState;
+  if (!state || modelPending || modelsBlocked(state) || typeof window.isolated.probeModels !== "function") return;
+  modelPending = "probe";
+  renderModels(state);
+  try { await act(() => window.isolated.probeModels()); }
+  finally { modelPending = null; if (lastState) renderModels(lastState); }
 }
 $("models").addEventListener("click", () => act(() => window.isolated.showPanel("models")));
 $("models-back").addEventListener("click", () => act(() => window.isolated.showPanel("harness")));
-$("models-import").addEventListener("click", () => act(() => window.isolated.importModels()));
-$("models-probe").addEventListener("click", () => act(() => window.isolated.probeModels()));
+$("models-import").addEventListener("click", () => { void importModelProviders(); });
+$("models-probe").addEventListener("click", () => { void verifyModelAvailability(); });
+$("model-add").addEventListener("click", () => {
+  if (!lastState || $("model-add").disabled) return;
+  captureModelDraft();
+  modelSelection = newModelSelection;
+  modelEditorSelection = undefined;
+  clearModelValue();
+  renderModels(lastState);
+});
+$("model-cancel").addEventListener("click", () => {
+  if (!lastState || modelPending) return;
+  modelDrafts.delete(modelSelection);
+  modelEditorSelection = undefined;
+  clearModelValue();
+  renderModels(lastState);
+});
+$("model-auth").addEventListener("change", () => {
+  if (!lastState) return;
+  captureModelDraft();
+  clearModelValue();
+  syncModelEditor(lastState, selectedModelProvider(lastState));
+});
+for (const id of ["model-id", "model-display-name", "model-baseurl"])
+  $(id).addEventListener("input", () => { if (lastState) captureModelDraft(); });
+$("model-replace").addEventListener("click", () => {
+  if (!lastState || $("model-replace").disabled) return;
+  modelReplace = true;
+  syncModelEditor(lastState, selectedModelProvider(lastState));
+  $("model-value").focus();
+});
+$("model-row-add").addEventListener("click", () => {
+  if (!lastState || $("model-row-add").disabled) return;
+  captureModelDraft();
+  const draft = modelDrafts.get(modelSelection);
+  if (!draft || draft.models.length >= modelMaxRows) return;
+  draft.models.push(blankModelRow());
+  renderModelRows(draft.models);
+  setModelRowsDisabled(modelsBlocked(lastState));
+  $("model-row-add").disabled = draft.models.length >= modelMaxRows;
+  renderModelList(lastState, modelsBlocked(lastState));
+});
+function removeModelRow(index) {
+  if (!lastState || modelsBlocked(lastState)) return;
+  captureModelDraft();
+  const draft = modelDrafts.get(modelSelection);
+  if (!draft || draft.models.length <= 1) return;
+  draft.models.splice(index, 1);
+  renderModelRows(draft.models);
+  setModelRowsDisabled(modelsBlocked(lastState));
+  $("model-row-add").disabled = draft.models.length >= modelMaxRows;
+}
+$("model-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveModelProviderEntry();
+});
+function modelPayloadError(state, entry) {
+  const id = $("model-id").value.trim();
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) return "Enter a provider ID using lowercase letters, numbers and hyphens.";
+  const displayName = $("model-display-name").value.trim();
+  if (!displayName || displayName.length > 200) return "Enter a provider display name up to 200 characters.";
+  const baseURL = $("model-baseurl").value.trim();
+  if (!/^https?:\/\/[^\s]+$/.test(baseURL)) return "Enter an HTTP or HTTPS API base URL.";
+  const authMode = $("model-auth").value;
+  if (authMode !== "bearer" && authMode !== "none") return "Choose an authentication mode.";
+  const rows = readModelRows();
+  if (!rows.length || rows.length > modelMaxRows) return "Enter between 1 and 64 models.";
+  const seen = new Set();
+  for (const row of rows) {
+    const modelId = row.id.trim();
+    if (!modelId || modelId.length > 256 || seen.has(modelId)) return "Enter unique model IDs up to 256 characters.";
+    seen.add(modelId);
+    if (!row.name.trim() || row.name.length > 256) return "Enter a model display name.";
+    const contextWindow = Number(row.contextWindow);
+    const maxTokens = Number(row.maxTokens);
+    if (!Number.isSafeInteger(contextWindow) || contextWindow < 1) return "Enter a positive integer context window for every model.";
+    if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > contextWindow)
+      return "Max output tokens must be positive and no larger than the model's context window.";
+  }
+  const value = $("model-value").value;
+  if (authMode === "none") {
+    if (value) return "This endpoint does not use an API key.";
+  } else if (value) {
+    if (!value.trim() || value !== value.trim()) return "Enter a valid API key.";
+  } else {
+    const savedKey = Boolean(entry && entry.authMode === "bearer" && entry.credentialAvailable);
+    const sameBase = entry && normalizeBaseURL(entry.baseURL) === normalizeBaseURL(baseURL);
+    if (!savedKey || !sameBase) return "Enter an API key for this endpoint.";
+  }
+  return "";
+}
+function buildModelPayload(state, entry, value) {
+  const id = $("model-id").value.trim();
+  const displayName = $("model-display-name").value.trim();
+  const baseURL = $("model-baseurl").value.trim();
+  const authMode = $("model-auth").value;
+  const rows = readModelRows();
+  const models = rows.map((row, index) => {
+    const model = { id: row.id.trim(), name: row.name.trim(),
+      contextWindow: Number(row.contextWindow), maxTokens: Number(row.maxTokens) };
+    if (row.input.length) model.input = [...row.input];
+    if (row.reasoningEfforts) model.reasoningEfforts = row.reasoningEfforts;
+    return model;
+  });
+  const payload = { id, displayName, api: "openai-completions", baseURL, authMode, models };
+  // None-mode endpoints never send a value; bearer saves include a typed key
+  // only when supplied (omission keeps the saved key).
+  if (value !== undefined && value !== "" && authMode === "bearer") payload.value = value;
+  return payload;
+}
+async function saveModelProviderEntry() {
+  const state = lastState;
+  if (!state || modelPending || modelsBlocked(state) || typeof window.isolated.saveModelProvider !== "function") return;
+  const entry = selectedModelProvider(state);
+  const error = modelPayloadError(state, entry);
+  const value = $("model-value").value;
+  if (error) {
+    clearModelValue();
+    await act(async () => { throw Error(error); });
+    return;
+  }
+  const payload = buildModelPayload(state, entry, value);
+  const selectionAtSubmit = modelSelection;
+  // Copy the payload, then clear the password before awaiting IPC, including failures.
+  clearModelValue();
+  modelPending = "save";
+  renderModels(state);
+  try {
+    await act(async () => {
+      const result = await window.isolated.saveModelProvider(payload);
+      if (modelSelection === selectionAtSubmit) {
+        modelDrafts.delete(selectionAtSubmit);
+        modelEditorSelection = undefined;
+        if (selectionAtSubmit === newModelSelection) modelSelection = payload.id;
+      }
+      return result;
+    });
+  } finally { modelPending = null; if (lastState) renderModels(lastState); }
+}
+$("model-remove").addEventListener("click", () => {
+  if (!lastState || $("model-remove").disabled) return;
+  const entry = selectedModelProvider(lastState);
+  if (!entry) return;
+  void removeModelProviderAction(entry.id);
+});
+
+let gitPending = null, gitListKey;
+function gitCatalogUnavailable(state) { return !state?.git || Boolean(state.git.fault); }
+function gitBlocked(state) {
+  return Boolean(!state || gitCatalogUnavailable(state) || state.busy || state.filesBusy || state.modelBusy ||
+    state.quitting || state.installation?.busy || state.images?.busy || gitPending ||
+    typeof window.isolated.saveGit !== "function" || typeof window.isolated.importGit !== "function");
+}
+function clearGitValue() { $("git-value").value = ""; }
+function renderGit(state, blocked) {
+  const unavailable = gitCatalogUnavailable(state);
+  $("git-fault").hidden = !unavailable;
+  $("git-cleanup-pending").hidden = !state.git?.cleanupPending;
+  for (const id of ["git-repository", "git-username", "git-value"])
+    $(id).disabled = blocked;
+  $("git-save").disabled = blocked;
+  $("git-import").disabled = blocked || typeof window.isolated.importGit !== "function";
+  const key = JSON.stringify([state.git?.repositories, blocked, gitPending]);
+  if (key === gitListKey) return;
+  gitListKey = key;
+  const list = $("git-list");
+  list.replaceChildren(...(state.git?.repositories ?? []).map(item => {
+    const row = element("div", undefined, "network-item"), details = element("div", undefined, "identity");
+    details.append(element("strong", item.repository), element("code", item.baseURL),
+      element("small", item.credentialAvailable ? "Credential kept on Mac" : "Credential missing: repeat the save or import"));
+    const actions = element("div", undefined, "actions");
+    const replace = mutationButton("Replace token", () => replaceGitToken(item.repository), "", "key");
+    replace.disabled = blocked;
+    replace.title = "Fill in this repository, then enter the GitHub login and a new token.";
+    const remove = mutationButton("Remove access and stop environments", () => removeGitAccess(item.id), "revoke", "x");
+    remove.disabled = blocked;
+    remove.title = "Removes this grant from every environment. Stops environments and running jobs; connect again to apply.";
+    actions.append(replace, remove);
+    row.append(details, actions);
+    return row;
+  }));
+  if (!state.git?.repositories.length) list.append(element("p",
+    "No private repository authorized. Enter owner/repository, your GitHub login and a token, or import the credential already available on your Mac.", "empty"));
+}
+function replaceGitToken(repository) {
+  if (!lastState || gitBlocked(lastState)) return;
+  $("git-repository").value = repository;
+  clearGitValue();
+  renderSecrets(lastState);
+  $("git-value").focus();
+}
+async function removeGitAccess(id) {
+  const state = lastState;
+  if (!state || gitPending || gitBlocked(state) || typeof window.isolated.removeGit !== "function") return;
+  gitPending = "remove";
+  clearGitValue();
+  renderSecrets(state);
+  try { await act(() => window.isolated.removeGit(id)); }
+  finally { gitPending = null; if (lastState) renderSecrets(lastState); }
+}
+async function saveGitAccess() {
+  const state = lastState;
+  if (!state || gitPending || gitBlocked(state) || typeof window.isolated.saveGit !== "function") return;
+  const repository = $("git-repository").value.trim();
+  const username = $("git-username").value.trim();
+  const token = $("git-value").value;
+  if (!repository) {
+    clearGitValue();
+    await act(async () => { throw Error("Enter a GitHub owner/repository, without a URL."); });
+    return;
+  }
+  if (!username) {
+    clearGitValue();
+    await act(async () => { throw Error("Enter the GitHub username for this token."); });
+    return;
+  }
+  if (!token) {
+    clearGitValue();
+    await act(async () => { throw Error("Enter a GitHub token."); });
+    return;
+  }
+  const payload = { repository, username, value: token };
+  clearGitValue();
+  gitPending = "save";
+  renderSecrets(state);
+  try {
+    await act(async () => {
+      const result = await window.isolated.saveGit(payload);
+      $("git-repository").value = "";
+      $("git-username").value = "";
+      return result;
+    });
+  } finally { gitPending = null; if (lastState) renderSecrets(lastState); }
+}
+async function importGitAccess() {
+  const state = lastState;
+  if (!state || gitPending || gitBlocked(state) || typeof window.isolated.importGit !== "function") return;
+  const repository = $("git-repository").value.trim();
+  if (!repository) {
+    clearGitValue();
+    await act(async () => { throw Error("Enter a GitHub owner/repository to import."); });
+    return;
+  }
+  // Import reads only the repository field: no username or token validation.
+  clearGitValue();
+  gitPending = "import";
+  renderSecrets(state);
+  try {
+    await act(async () => {
+      const result = await window.isolated.importGit(repository);
+      $("git-repository").value = "";
+      return result;
+    });
+  } finally { gitPending = null; if (lastState) renderSecrets(lastState); }
+}
+$("git-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveGitAccess();
+});
+$("git-import").addEventListener("click", () => { void importGitAccess(); });
 
 let filePlanId, fileEnvironment, filePlanKey, transferScopeEnvironment;
 const fileDrafts = new Map();
@@ -840,23 +1346,303 @@ $("share-confirm").addEventListener("click", () => act(() => window.isolated.con
 $("share-cancel").addEventListener("click", () => act(() => window.isolated.cancelShare()));
 $("share-mode").addEventListener("change", () => act(() => window.isolated.cancelShare()));
 
-function renderGit(state) {
-  const blocked = state.busy || state.filesBusy || state.modelBusy || state.quitting || !state.git;
-  $("git-repository").disabled = blocked; $("git-import").disabled = blocked;
-  $("git-list").replaceChildren(...(state.git?.repositories ?? []).map(item => {
-    const row = element("div", undefined, "network-item"), details = element("div", undefined, "identity");
-    details.append(element("strong", item.repository), element("code", item.baseURL),
-      element("small", item.credentialAvailable ? "Credential kept on Mac" : "Credential missing: repeat the import"));
-    const remove = actionButton("Remove access and stop environments", () => window.isolated.removeGit(item.id), "revoke", "x");
-    remove.disabled = blocked;
-    row.append(details, remove); return row;
-  }));
-  if (!state.git?.repositories.length) $("git-list").append(element("p", "No private repository authorized. Enter owner/repository above to import access from your Mac.", "empty"));
+const secretMethods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
+const secretAuthLabels = { bearer: "Bearer token", "api-key": "API key", basic: "Basic auth" };
+ICON_PATHS.key = '<circle cx="5.4" cy="8" r="3.2"/><path d="M8.6 8H14M11.4 8v2.4M13.6 8v1.8"/>';
+const secretMetadataInputs = ["secret-name", "secret-header", "secret-username", "secret-origin", "secret-path"];
+const secretDrafts = new Map();
+let secretsSelection, secretsEditorSelection, secretsEnvironmentKey, secretsListKey;
+let secretsSearch = "", secretsPending = null, secretsReplace = false;
+function secretsUnavailable(state) { return !state?.secrets || Boolean(state.secrets.fault); }
+function secretsBlocked(state) {
+  return Boolean(!state || secretsUnavailable(state) || state.busy || state.filesBusy || state.modelBusy ||
+    state.quitting || state.installation?.busy || state.images?.busy || secretsPending ||
+    typeof window.isolated.saveSecret !== "function");
 }
-$("git-form").addEventListener("submit", event => {
-  event.preventDefault();
-  void act(() => window.isolated.importGit($("git-repository").value));
+function selectedSecretEntry(state) {
+  return (state?.secrets?.entries ?? []).find(item => item.id === secretsSelection);
+}
+// Only metadata is drafted. Secret values are sent only in the save payload.
+function captureSecretDraft() {
+  if (!secretsSelection) return;
+  secretDrafts.set(secretsSelection, {
+    name: $("secret-name").value, authType: $("secret-auth").value,
+    headerName: $("secret-header").value, username: $("secret-username").value,
+    origin: $("secret-origin").value, pathPrefix: $("secret-path").value,
+    environmentId: $("secret-environment").value,
+    methods: secretMethods.filter(method => $("secret-method-" + method).checked),
+  });
+}
+function clearSecretValue() {
+  $("secret-value").value = "";
+  secretsReplace = false;
+}
+function applySecretEditor(state) {
+  const entry = selectedSecretEntry(state);
+  const draft = secretDrafts.get(secretsSelection);
+  const value = draft ?? (entry ? {
+    name: entry.name, authType: entry.authType, headerName: entry.headerName ?? "",
+    username: entry.username ?? "", origin: entry.origin ?? "", pathPrefix: entry.pathPrefix ?? "",
+    environmentId: entry.environmentId, methods: entry.methods ?? [],
+  } : { name: "", authType: "bearer", headerName: "", username: "", origin: "", pathPrefix: "",
+    environmentId: state.selectedId ?? "", methods: ["GET"] });
+  $("secret-name").value = value.name;
+  $("secret-auth").value = value.authType;
+  $("secret-header").value = value.headerName;
+  $("secret-username").value = value.username;
+  $("secret-origin").value = value.origin;
+  $("secret-path").value = value.pathPrefix;
+  $("secret-environment").value = value.environmentId;
+  for (const method of secretMethods) $("secret-method-" + method).checked = value.methods.includes(method);
+  clearSecretValue();
+}
+function syncSecretEditor(state) {
+  const entry = selectedSecretEntry(state);
+  const authType = $("secret-auth").value;
+  $("secret-header-row").hidden = authType !== "api-key";
+  $("secret-username-row").hidden = authType !== "basic";
+  $("secret-value-label").textContent = authType === "basic" ? "Password" : "Secret value";
+  const blocked = secretsBlocked(state);
+  const hasSaved = Boolean(entry?.credentialAvailable);
+  const value = $("secret-value");
+  value.disabled = blocked;
+  // A saved secret is never revealed: the field stays empty and locked until Replace.
+  value.readOnly = blocked || (hasSaved && !secretsReplace);
+  value.placeholder = hasSaved ? secretsReplace ? "Enter the replacement secret" : "Saved value is kept" : "Enter the secret value";
+  $("secret-replace").hidden = !hasSaved || secretsReplace;
+  $("secret-replace").disabled = blocked;
+  const preview = $("secret-preview");
+  preview.replaceChildren();
+  const header = authType === "api-key" ? $("secret-header").value.trim() || "API key header" : "Authorization";
+  const scheme = authType === "bearer" ? "Bearer ••••••••" : authType === "basic" ? "Basic ••••••••" : "••••••••";
+  preview.append(element("p", `${header}: ${scheme}`), element("p", "Injected by Iron after network approval"));
+}
+function renderSecretList(state, entries) {
+  const environments = state.environments ?? [];
+  const query = secretsSearch.trim().toLowerCase();
+  const visible = query ? entries.filter(item => [item.name, secretAuthLabels[item.authType] ?? item.authType,
+    environments.find(env => env.id === item.environmentId)?.name ?? item.environmentId]
+    .join(" ").toLowerCase().includes(query)) : entries;
+  const key = JSON.stringify([visible.map(item => [item.id, item.name, item.environmentId, item.authType,
+    item.credentialAvailable]), secretsSelection, secretsBlocked(state), Boolean(secretsPending)]);
+  if (key === secretsListKey) return;
+  secretsListKey = key;
+  const list = $("secret-list");
+  list.replaceChildren(...visible.map(item => {
+    const row = element("button", undefined, "secret-row");
+    row.type = "button";
+    row.setAttribute("aria-pressed", String(item.id === secretsSelection));
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "ic"); svg.setAttribute("viewBox", "0 0 16 16"); svg.setAttribute("aria-hidden", "true");
+    svg.innerHTML = ICON_PATHS.key;
+    const identity = element("span", undefined, "identity");
+    identity.append(element("strong", item.name),
+      element("small", `${secretAuthLabels[item.authType] ?? item.authType} · ${environments.find(env => env.id === item.environmentId)?.name ?? item.environmentId}`));
+    const status = element("span", item.credentialAvailable ? "Configured" : "Needs setup", "secret-status");
+    status.dataset.state = item.credentialAvailable ? "ready" : "missing";
+    row.append(svg, identity, status);
+    row.addEventListener("click", () => selectSecret(item.id));
+    return row;
+  }));
+  if (!visible.length) list.append(element("p", query
+    ? "No credentials match this search."
+    : "No credentials saved yet. Add a secret to keep a credential encrypted on your Mac and grant it scoped access.", "empty"));
+}
+let providerStatusKey;
+function renderProviderStatus(state, blocked) {
+  const providers = state.models?.providers ?? [];
+  const key = JSON.stringify([providers.map(provider => [provider.id, provider.displayName, provider.baseURL,
+    provider.authMode, provider.credentialAvailable]), blocked]);
+  if (key === providerStatusKey) return;
+  providerStatusKey = key;
+  const list = $("provider-status-list");
+  list.replaceChildren(...providers.map(provider => {
+    const row = element("div", undefined, "network-item"), details = element("div", undefined, "identity");
+    details.append(element("strong", provider.displayName), element("code", provider.baseURL));
+    const status = provider.authMode === "none" ? "No authentication"
+      : provider.credentialAvailable ? "Configured" : "Needs setup";
+    const statusNode = element("span", status, "secret-status");
+    statusNode.dataset.state = provider.authMode === "none" || provider.credentialAvailable ? "ready" : "missing";
+    details.append(statusNode);
+    const actions = element("div", undefined, "actions");
+    const edit = mutationButton("Edit provider", () => editModelProvider(provider.id), "", "pencil");
+    edit.disabled = blocked;
+    actions.append(edit);
+    row.append(details, actions);
+    return row;
+  }));
+  if (!providers.length) list.append(element("p", "No model providers saved. Add one in Models.", "empty"));
+}
+function renderSecrets(state) {
+  const open = state.panel === "secrets";
+  $("secrets-panel").hidden = !open;
+  if (!open) { clearSecretValue(); clearGitValue(); secretsEditorSelection = undefined; return; }
+  const unavailable = secretsUnavailable(state);
+  $("secrets-fault").hidden = !unavailable;
+  const entries = state.secrets?.entries ?? [];
+  if (secretsSelection !== "new" && !entries.some(item => item.id === secretsSelection)) {
+    secretsSelection = entries.length ? entries[0].id : "new";
+  }
+  const blocked = secretsBlocked(state);
+  const panelBlocked = state.busy || state.filesBusy || state.modelBusy || state.quitting ||
+    state.installation?.busy || state.images?.busy;
+  renderProviderStatus(state, panelBlocked);
+  renderGit(state, gitBlocked(state));
+  if (gitCatalogUnavailable(state) || state.quitting) clearGitValue();
+  const environments = state.environments ?? [];
+  const envKey = JSON.stringify(environments.map(item => [item.id, item.name]));
+  if (envKey !== secretsEnvironmentKey) {
+    const previous = $("secret-environment").value;
+    $("secret-environment").replaceChildren(...environments.map(item => {
+      const option = element("option", item.name); option.value = item.id; return option;
+    }));
+    secretsEnvironmentKey = envKey;
+    if (environments.some(item => item.id === previous)) $("secret-environment").value = previous;
+  }
+  if (secretsEditorSelection !== secretsSelection) {
+    applySecretEditor(state);
+    secretsEditorSelection = secretsSelection;
+  }
+  const entry = selectedSecretEntry(state);
+  const isNew = !entry;
+  $("secret-editor-title").textContent = entry?.name ?? "New credential";
+  $("secret-environment").disabled = blocked || !isNew || !environments.length;
+  $("secret-environment").title = isNew ? "" : "The environment of a saved credential cannot change.";
+  $("secret-environment-help").textContent = isNew
+    ? "New credentials default to the selected environment. Choose another before saving if needed."
+    : "The environment of a saved credential cannot change. Add another secret for a different environment.";
+  for (const id of secretMetadataInputs) $(id).disabled = blocked;
+  $("secret-auth").disabled = blocked;
+  for (const method of secretMethods) $("secret-method-" + method).disabled = blocked;
+  $("secret-add").disabled = blocked || secretsSelection === "new";
+  $("secret-cancel").disabled = Boolean(state.quitting || secretsPending);
+  $("secret-save").disabled = blocked;
+  $("secret-remove").hidden = isNew;
+  $("secret-remove").disabled = blocked || typeof window.isolated.removeSecret !== "function";
+  syncSecretEditor(state);
+  renderSecretList(state, entries);
+}
+function selectSecret(id) {
+  if (!lastState || secretsSelection === id) return;
+  captureSecretDraft();
+  secretsSelection = id;
+  clearSecretValue();
+  renderSecrets(lastState);
+}
+$("secrets").addEventListener("click", () => act(() => window.isolated.showPanel("secrets")));
+$("secrets-back").addEventListener("click", () => act(() => window.isolated.showPanel("harness")));
+$("secret-add").addEventListener("click", () => {
+  if (!lastState || $("secret-add").disabled) return;
+  captureSecretDraft();
+  secretsSelection = "new";
+  clearSecretValue();
+  renderSecrets(lastState);
 });
+$("secret-cancel").addEventListener("click", () => {
+  if (!lastState || secretsPending) return;
+  secretDrafts.delete(secretsSelection);
+  secretsEditorSelection = undefined;
+  clearSecretValue();
+  renderSecrets(lastState);
+});
+$("secret-search").addEventListener("input", () => {
+  secretsSearch = $("secret-search").value;
+  if (lastState) renderSecrets(lastState);
+});
+for (const id of secretMetadataInputs)
+  $(id).addEventListener("input", () => {
+    captureSecretDraft();
+    if (lastState) syncSecretEditor(lastState);
+  });
+$("secret-auth").addEventListener("change", () => {
+  if (!lastState) return;
+  captureSecretDraft();
+  clearSecretValue();
+  syncSecretEditor(lastState);
+});
+$("secret-environment").addEventListener("change", () => {
+  if (!lastState) return;
+  captureSecretDraft();
+  clearSecretValue();
+});
+for (const method of secretMethods)
+  $("secret-method-" + method).addEventListener("change", () => { if (lastState) captureSecretDraft(); });
+$("secret-replace").addEventListener("click", () => {
+  if (!lastState || $("secret-replace").disabled) return;
+  secretsReplace = true;
+  syncSecretEditor(lastState);
+  $("secret-value").focus();
+});
+$("secret-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveSecretEntry();
+});
+async function saveSecretEntry() {
+  const state = lastState;
+  if (!state || secretsPending || secretsBlocked(state)) return;
+  const entry = selectedSecretEntry(state);
+  const authType = $("secret-auth").value;
+  const payload = {
+    name: $("secret-name").value, environmentId: $("secret-environment").value, authType,
+    origin: $("secret-origin").value, pathPrefix: $("secret-path").value,
+    methods: secretMethods.filter(method => $("secret-method-" + method).checked),
+    headerName: authType === "api-key" ? $("secret-header").value : "",
+    username: authType === "basic" ? $("secret-username").value : "",
+  };
+  if (entry) payload.id = entry.id;
+  const value = $("secret-value").value;
+  if (value) payload.value = value;
+  else if (!entry) {
+    await act(async () => { throw Error("Enter a secret value before saving."); });
+    return;
+  } else if (entry.authType !== authType || (entry.username ?? "") !== payload.username) {
+    await act(async () => { throw Error("Changing the authentication type or username requires a new secret value."); });
+    return;
+  }
+  const selectionAtSubmit = secretsSelection;
+  // Copy the payload, then clear the password before awaiting IPC, including failures.
+  clearSecretValue();
+  secretsPending = "save";
+  renderSecrets(state);
+  try {
+    await act(async () => {
+      const result = await window.isolated.saveSecret(payload);
+      // A stale completion must not wipe a draft the user started on another entry.
+      if (secretsSelection === selectionAtSubmit) {
+        secretDrafts.delete(selectionAtSubmit);
+        secretsEditorSelection = undefined;
+      }
+      return result;
+    });
+  } finally {
+    secretsPending = null;
+    if (lastState) renderSecrets(lastState);
+  }
+}
+$("secret-remove").addEventListener("click", () => {
+  void removeSecretEntry();
+});
+async function removeSecretEntry() {
+  const state = lastState;
+  if (!state || secretsPending || secretsBlocked(state) || typeof window.isolated.removeSecret !== "function") return;
+  const entry = selectedSecretEntry(state);
+  if (!entry) return;
+  const selectionAtSubmit = secretsSelection;
+  clearSecretValue();
+  secretsPending = "remove";
+  renderSecrets(state);
+  try {
+    await act(async () => {
+      const result = await window.isolated.removeSecret(entry.id);
+      secretDrafts.delete(entry.id);
+      if (secretsSelection === selectionAtSubmit) secretsEditorSelection = undefined;
+      return result;
+    });
+  } finally {
+    secretsPending = null;
+    if (lastState) renderSecrets(lastState);
+  }
+}
 
 window.isolated.onStatus(render);
 act(() => window.isolated.status());

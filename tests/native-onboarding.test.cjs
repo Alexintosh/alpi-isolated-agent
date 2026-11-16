@@ -2,10 +2,10 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=require('node:vm');
 const {createRequire}=require('node:module'),{EventEmitter}=require('node:events');
 const main=path.resolve(__dirname,'../src/v1-main.cjs');
-function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,saveDestination,deferSave=false,viewerNavigation,harnessNavigation,storedSelection,imageAvailable=true,manualHealth=false,healthFetch}={}){
- const calls={quit:0,shutdown:0,prepare:0,policy:0,models:0,git:0,savePickers:0,starts:0,networkRestores:0,viewerClose:0,viewerFocus:0,stops:[],selections:[],imageImports:[],imageCancelled:0};let resolvePicker,resolveSave,resolveMessage;
+function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,saveDestination,deferSave=false,viewerNavigation,harnessNavigation,storedSelection,imageAvailable=true,manualHealth=false,healthFetch,catalogMutation,modelCatalogFactory}={}){
+ const calls={quit:0,shutdown:0,prepare:0,policy:0,models:0,git:0,savePickers:0,starts:0,networkRestores:0,viewerClose:0,viewerFocus:0,stops:[],selections:[],imageImports:[],imageCancelled:0,secrets:[],catalogChanges:[]};let resolvePicker,resolveSave,resolveMessage;
  const messages=[],messagePicker=new Promise(resolve=>resolveMessage=resolve);
- let networkState, healthCheck;
+ let networkState, healthCheck, runtimeOptions;
  const handlers=new Map(),savePicker=new Promise(resolve=>resolveSave=resolve);
  const picker=new Promise(resolve=>resolvePicker=resolve);
  const emitter=()=>Object.assign(new EventEmitter(),{snapshot:()=>({}),cancel(){}});
@@ -33,8 +33,35 @@ function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,save
  class Tray extends EventEmitter {setContextMenu(){}setToolTip(){}}
  class Installer extends EventEmitter {snapshot(){return {active:'fixture',recoverable:true}}recoveryOptions(){return {}}async verifyRelease(){}cancel(){}async restore({stopEnvironments}){await stopEnvironments();return {}}async prepare(){calls.prepare++;return 'fixture'}async activate(){return {}}}
  class Policy extends EventEmitter {constructor(){super();calls.policy++}snapshot(){return {events:[]}}close(){}}
- class Models {constructor(){calls.models++}snapshot(){return {}}}
- class Git {constructor(){calls.git++}snapshot(){return {}}}
+ class CatalogFixture {
+  snapshot(){return {}}
+  prepareSave(input){if(!input?.id&&!input?.repository)throw Object.assign(Error('Invalid catalog input.'),{code:'MODEL_CATALOG'});return {...input}}
+  prepareRemove(id){if(typeof id!=='string')throw Error('Invalid id');return {id}}
+  prepareSelect(input){return this.prepareSave({id:input?.provider,...input})}
+  prepareImport(repository){return {repository}}
+  async change(kind,input,options={}){await catalogMutation?.(options.signal);options.signal?.throwIfAborted();calls.catalogChanges.push([kind,input,Boolean(options.signal)])}
+  save(input,options){return this.change('save',input,options)}
+  remove(id,options){return this.change('remove',id,options)}
+  select(input,options){return this.change('select',input,options)}
+  importDesktop(options){return this.change('model-import',options.prepared,options)}
+  importRepository(repository,options){return this.change('git-import',repository,options)}
+ }
+ class Models extends CatalogFixture {constructor(options){super();calls.models++;if(modelCatalogFactory)return modelCatalogFactory(options)}}
+ class Git extends CatalogFixture {constructor(){super();calls.git++}}
+ class Secrets {
+  constructor(){this.entries=[]}
+  snapshot(){return {entries:this.entries.map(({value,...entry})=>({...entry,credentialAvailable:true}))}}
+  entriesFor(id){return this.entries.filter(entry=>entry.environmentId===id)}
+  prepareSave(input){
+   const metadata=realRequire('./runtime/secret-scope.cjs').validateSecretMetadata(input,['lima-v1','wrapvm-v1','wrapvm-arm64-v1']);
+   if(input.id&&!this.entries.some(entry=>entry.id===input.id&&entry.environmentId===input.environmentId))throw Error('Unknown credential');
+   return {...metadata,...(input.id?{id:input.id}:{}),value:input.value};
+  }
+  prepareRemove(id){const entry=this.entries.find(entry=>entry.id===id);if(!entry)throw Error('Unknown credential');return {id,environmentId:entry.environmentId}}
+  async save(input,{signal}={}){signal?.throwIfAborted();calls.secrets.push(['save',input.environmentId]);const entry={...input,id:input.id??'fixture-secret'};this.entries=[...this.entries.filter(x=>x.id!==entry.id),entry]}
+  async remove(id){calls.secrets.push(['remove',id]);this.entries=this.entries.filter(entry=>entry.id!==id)}
+ }
+
  class Images extends EventEmitter {
   constructor(){super();this.localArchive='/fixture/desktop-images/local.tar';this.state={busy:false}}
   available(){return imageAvailable}
@@ -47,13 +74,54 @@ function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,save
  const realRequire=createRequire(main),mocks={electron:{app,BaseWindow:Window,WebContentsView:View,Tray,session:{fromPartition:()=>({fetch:healthFetch??(async()=>({status:200,body:{cancel:async()=>{}}})),cookies:{get:async()=>[]},clearStorageData:async()=>{},clearCache:async()=>{}})},Menu:{buildFromTemplate:x=>x},nativeImage:{createFromBitmap:()=>({setTemplateImage(){}})},ipcMain:{handle:(name,handler)=>handlers.set(name,handler)},dialog:{showMessageBox:(_window,options)=>{messages.push(options);return deferMessage?messagePicker:Promise.resolve({response:messageChoice})},showOpenDialog:()=>picker,showSaveDialog:async()=>{calls.savePickers++;return deferSave?savePicker:{canceled:!saveDestination,filePath:saveDestination}}}},
   './runtime/viewer-boundary.cjs':{createViewerBoundary:async()=>({revoke(){},close:async()=>{}})},
   './runtime/renderer-boundary.cjs':{createRendererBoundary:async()=>({setOrigin:async()=>{},revoke(){},close:async()=>{}})},
-  'node:fs':{openSync:fs.openSync,writeFileSync:fs.writeFileSync,fsyncSync:fs.fsyncSync,closeSync:fs.closeSync,mkdirSync(){}},'./runtime/index.cjs':{createRuntime:()=>runtime},'./runtime/atomic-json.cjs':{readJson:(file,fallback)=>file.endsWith('selection.json')&&storedSelection?storedSelection:fallback,writeJson(file,value){if(file.endsWith('selection.json'))calls.selections.push(value)}},
+  'node:fs':{openSync:fs.openSync,writeFileSync:fs.writeFileSync,fsyncSync:fs.fsyncSync,closeSync:fs.closeSync,mkdirSync(){}},'./runtime/index.cjs':{createRuntime:options=>{runtimeOptions=options;return runtime}},'./runtime/atomic-json.cjs':{readJson:(file,fallback)=>file.endsWith('selection.json')&&storedSelection?storedSelection:fallback,writeJson(file,value){if(file.endsWith('selection.json'))calls.selections.push(value)}},
   './runtime/desktop-image-store.cjs':{DesktopImageStore:Images},
-  './runtime/artifact-installer.cjs':{ArtifactInstaller:Installer},'./runtime/network-policy.cjs':{NetworkPolicy:Policy},'./runtime/model-catalog.cjs':{ModelCatalog:Models},'./runtime/git-catalog.cjs':{GitCatalog:Git},'./runtime/secret-vault.cjs':{SecretVault:class{}}};
+  './runtime/artifact-installer.cjs':{ArtifactInstaller:Installer},'./runtime/network-policy.cjs':{NetworkPolicy:Policy},'./runtime/model-catalog.cjs':{ModelCatalog:Models},'./runtime/git-catalog.cjs':{GitCatalog:Git},'./runtime/secret-catalog.cjs':{SecretCatalog:Secrets},'./runtime/secret-vault.cjs':{SecretVault:class{}}};
  const context={require:n=>mocks[n]??realRequire(n),module:{exports:{}},__dirname:path.dirname(main),Buffer,clearInterval,setInterval:manualHealth?(fn=>{healthCheck=fn;return 1}):setInterval,process,AbortController,AbortSignal,URL};
  vm.runInNewContext(fs.readFileSync(main,'utf8'),context,{filename:main});
- return {messages,resolveMessage,checkHealth:()=>healthCheck(),ui:context.module.exports,calls,resolvePicker,coordinator,handlers,resolveSave,network,setNetwork:value=>networkState=value};
+ return {credentialBridge:settings=>runtimeOptions.credentialBridge(settings),messages,resolveMessage,checkHealth:()=>healthCheck(),ui:context.module.exports,calls,resolvePicker,coordinator,handlers,resolveSave,network,setNetwork:value=>networkState=value};
 }
+const secretInput = () => ({name:'Test API',environmentId:'wrapvm-v1',authType:'bearer',origin:'https://api.example.com',
+ pathPrefix:'/v1/',methods:['GET'],headerName:'',username:'',value:'synthetic-canary'});
+function localEvent(ui){const sender=ui.getControls();return {sender,senderFrame:sender.mainFrame}}
+test('secret IPC rejects guest, notification and child frames before any stop or vault mutation',async()=>{
+ const {ui,calls,handlers}=harness();await ui.ready;
+ const controls=ui.getControls(),notice=ui.getNotice();
+ for(const channel of ['secret-save','secret-remove'])for(const event of [
+  {sender:notice,senderFrame:notice.mainFrame},{sender:controls,senderFrame:{url:controls.mainFrame.url}},
+  {sender:{},senderFrame:controls.mainFrame}])
+  assert.throws(()=>handlers.get('isolated:'+channel)(event,secretInput()),/IPC denied/);
+ assert.equal(calls.stops.length,0);assert.equal(calls.secrets.length,0);await ui.quit();
+});
+test('secret save stops only its environment and rejects failed stops without mutation',async()=>{
+ const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+ const save=input=>handlers.get('isolated:secret-save')(localEvent(ui),input);
+ await assert.rejects(save({...secretInput(),origin:'https://api.example.com/?canary'}));
+ assert.equal(calls.stops.length,0);
+ const stop=coordinator.stop;coordinator.stop=async()=>{throw Error('unowned')};
+ await assert.rejects(save(secretInput()),/did not complete/);assert.equal(calls.secrets.length,0);
+ coordinator.stop=stop;await save(secretInput());
+ assert.deepEqual(calls.stops,['wrapvm-v1']);assert.deepEqual(calls.secrets,[['save','wrapvm-v1']]);
+ assert(!JSON.stringify(ui.snapshot().secrets).includes('synthetic-canary'));
+ await handlers.get('isolated:secret-remove')(localEvent(ui),'fixture-secret');
+ assert.deepEqual(calls.stops,['wrapvm-v1','wrapvm-v1']);assert.equal(ui.snapshot().secrets.entries.length,0);
+ await ui.quit();
+});
+test('quit during credential stop prevents late publication',async()=>{
+ const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+ let release;coordinator.stop=()=>new Promise(resolve=>release=resolve);
+ const saving=handlers.get('isolated:secret-save')(localEvent(ui),secretInput());
+ const rejected=assert.rejects(saving,/did not complete/);
+ await new Promise(resolve=>setImmediate(resolve));const quitting=ui.quit();
+ release();await rejected;await quitting;assert.equal(calls.secrets.length,0);
+});
+test('secret mutations serialize locally and duplicate clicks cannot publish twice',async()=>{
+ const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+ let release;coordinator.stop=()=>new Promise(resolve=>release=resolve);
+ const save=()=>handlers.get('isolated:secret-save')(localEvent(ui),secretInput());
+ const first=save();await assert.rejects(save(),/operation is in progress/);
+ release();await first;assert.equal(calls.secrets.length,1);await ui.quit();
+});
 test('image switch persists only after owned WrapVM stops; failed stop retains selection',async()=>{
  const {ui,calls,coordinator}=harness();await ui.ready;
  const stop=coordinator.stop;coordinator.stop=async()=>{throw Error('still running')};
@@ -337,4 +405,65 @@ test('released view callbacks and late health results cannot mark a replacement 
  await f.ui.disconnect();pending=false;await f.ui.connect();assert.notEqual(f.ui.getRemote(),old);
  old.emit('render-process-gone');resolveHealth({status:503,body:{cancel:async()=>{}}});await health;
  assert.equal(f.ui.snapshot().connection.issue,null);await f.ui.quit();
+});
+
+for (const channel of ['model-save','model-remove','model-select','git-save','git-import','git-remove']) {
+ test(`${channel} rejects untrusted IPC senders before any lifecycle work`,async()=>{
+  const {ui,calls,handlers}=harness();await ui.ready;
+  const controls=ui.getControls(),notice=ui.getNotice();
+  for(const event of [{sender:notice,senderFrame:notice.mainFrame},{sender:controls,senderFrame:{url:controls.mainFrame.url}},{sender:{},senderFrame:controls.mainFrame}])
+   assert.throws(()=>handlers.get('isolated:'+channel)(event,{}),/IPC denied/);
+  assert.equal(calls.stops.length,0);assert.equal(calls.catalogChanges.length,0);await ui.quit();
+ });
+}
+for (const channel of ['model-save','git-save']) {
+ test(`${channel} validates before stopping and publishes only after all shared leases close`,async()=>{
+  const {ui,calls,handlers,coordinator}=harness();await ui.ready;
+  const save=input=>handlers.get('isolated:'+channel)(localEvent(ui),input);
+  await assert.rejects(save({}),/Invalid catalog input/);assert.equal(calls.stops.length,0);
+  const stop=coordinator.stop;coordinator.stop=async()=>{throw Error('synthetic-secret-must-not-escape')};
+  await assert.rejects(save({id:'provider',repository:'owner/repo'}),error=>/did not complete/.test(error.message)&&!error.message.includes('synthetic-secret'));
+  assert.equal(calls.catalogChanges.length,0);
+  coordinator.stop=stop;await save({id:'provider',repository:'owner/repo'});
+  assert.equal(calls.stops.length,3);assert.equal(new Set(calls.stops).size,3);
+  assert.equal(calls.catalogChanges.length,1);assert.equal(calls.catalogChanges[0][2],true);await ui.quit();
+ });
+ test(`${channel} forwards shutdown cancellation through an unfinished catalog write`,async()=>{
+  let release,signal;const pending=new Promise(resolve=>release=resolve);
+  const {ui,calls,handlers}=harness({catalogMutation:async value=>{signal=value;await pending}});await ui.ready;
+  const invoke=()=>handlers.get('isolated:'+channel)(localEvent(ui),{id:'provider',repository:'owner/repo'});
+  const saving=invoke();const rejected=assert.rejects(saving,/did not complete/);
+  await new Promise(resolve=>setImmediate(resolve));assert(signal);
+  await assert.rejects(invoke(),/another operation/);
+  const quitting=ui.quit();assert(signal.aborted);release();await rejected;await quitting;
+  assert.equal(calls.catalogChanges.length,0);
+ });
+}
+
+
+test('real model publication failure reaches status UI while runtime grants still fail closed',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'native-model-fault-'));
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const {ModelCatalog}=require('../src/runtime/model-catalog.cjs');
+ let catalog;
+ const f=harness({modelCatalogFactory:()=>catalog=new ModelCatalog({stateRoot:root,vault:{has:()=>false}})});
+ await f.ui.ready;t.after(()=>f.ui.quit());
+ const published=[];
+ f.ui.getControls().send=(channel,value)=>{if(channel==='isolated:status')published.push(value)};
+ // The real atomic writer rejects a non-file metadata destination before writing.
+ fs.mkdirSync(catalog.file);
+ const input={id:'fixture',displayName:'Fixture',api:'openai-completions',baseURL:'https://example.test/v1',
+  authMode:'none',models:[{id:'fixture-model',name:'Fixture',contextWindow:1000,maxTokens:100}]};
+ await assert.rejects(f.handlers.get('isolated:model-save')(localEvent(f.ui),input),{message:'The model catalog is unavailable. Saved data was preserved.'});
+ assert.equal(catalog.fault,true);
+ assert.equal(f.calls.stops.length,3);
+ assert(published.some(value=>value.models.fault===true));
+ const status=f.handlers.get('isolated:status')(localEvent(f.ui));
+ assert.equal(status.models.fault,true);assert.equal(status.models.providers.length,0);
+ assert.equal(status.networkPresentation.groups.length,0);
+ const panel=await f.handlers.get('isolated:panel')(localEvent(f.ui),'secrets');
+ assert.equal(panel.panel,'secrets');assert.equal(panel.models.fault,true);
+ assert.throws(()=>f.credentialBridge({definition:{id:'wrapvm-v1'}}),{code:'MODEL_CATALOG'});
+ assert.throws(()=>catalog.providers,{code:'MODEL_CATALOG'});
+ await f.ui.quit();assert.equal(f.ui.snapshot().quitting,true);
 });
