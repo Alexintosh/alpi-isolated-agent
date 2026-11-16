@@ -45,5 +45,6 @@ jobs:
         with:
           name: factory-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: .factory-results/*.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
