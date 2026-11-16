@@ -26,6 +26,10 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
     if (!/^[a-z0-9-]+$/.test(provider.id) || entries.has(provider.id) || provider.api !== 'openai-completions') throw new Error('Invalid bridge provider');
     const base = new URL(provider.baseURL);
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || !provider.models?.length) throw new Error('Invalid bridge endpoint');
+    const authMode = provider.authMode ?? 'bearer';
+    if (!['bearer', 'none'].includes(authMode) ||
+        (authMode === 'none' ? provider.credentialRef !== undefined : typeof provider.credentialRef !== 'string' || !provider.credentialRef))
+      throw new Error('Invalid bridge authentication');
     entries.set(provider.id, { provider: clone(provider), base, token: 'isolated-' + randomBytes(32).toString('hex') });
   }
   const first = [...entries.values()][0]?.provider;
@@ -84,9 +88,14 @@ async function createCredentialBridge({ environmentId, providers = [], selected,
             (parsed.stream !== undefined && typeof parsed.stream !== 'boolean')) return fail(400);
       } else if (req.headers['transfer-encoding'] || Number(req.headers['content-length'] || 0) !== 0) return fail(400);
       controller.signal.throwIfAborted();
-      const secret = await vault.get((git ? entry.repository : scoped ? entry.secret : entry.provider).credentialRef);
-      if (typeof secret !== 'string' || !secret.length || /[\r\n\x00]/.test(secret)) return fail(503);
-      const credential = git ? gitCredential(secret) : scoped ? secretCredential(entry, secret) : { authorization: `Bearer ${secret}`, redact: [secret] };
+      const noAuth = !git && !scoped && entry.provider.authMode === 'none';
+      let credential;
+      if (noAuth) credential = { headers: {}, redact: [] };
+      else {
+        const secret = await vault.get((git ? entry.repository : scoped ? entry.secret : entry.provider).credentialRef);
+        if (typeof secret !== 'string' || !secret.length || /[\r\n\x00]/.test(secret)) return fail(503);
+        credential = git ? gitCredential(secret) : scoped ? secretCredential(entry, secret) : { authorization: `Bearer ${secret}`, redact: [secret] };
+      }
       const upstream = git?.upstream ?? scoped?.upstream ?? new URL(entry.base.href.replace(/\/$/, '') + '/' + operation);
       const applicationHeaders = scoped ? secretRequestHeaders(req) : { Accept: { values: [git ? '*/*' : 'application/json, text/event-stream'] },
         'Accept-Encoding': { values: ['identity'] } };

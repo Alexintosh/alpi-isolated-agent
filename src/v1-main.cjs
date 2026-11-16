@@ -57,7 +57,7 @@ let viewerView, viewerLease, viewerBoundary, viewerController, viewerTask, viewe
 let viewerGeneration=0, viewerClosing=Promise.resolve();
 
 function networkPresentation() {
-  const groups = pendingGroups(policy?.snapshot(), catalog?.providers);
+  const groups = pendingGroups(policy?.snapshot(), catalog?.snapshot().providers);
   const now = Date.now();
   for (const [key, until] of dismissedNotices) if (until <= now) dismissedNotices.delete(key);
   return { groups, notification: !quitting && panel !== 'network' ? groups.find(group => !dismissedNotices.has(group.key)) ?? null : null };
@@ -493,25 +493,65 @@ async function showViewer(kind) {
   })();
   await viewerTask;return snapshot();
 }
-async function modelAction(operation) {
-  if (quitting || busy || modelBusy || !catalog) return snapshot();
-  modelBusy = true; publish();
-  try { if (operation === "import") await catalog.importDesktop(); else await catalog.probe(); }
-  catch { throw new Error("Model operation failed. Check the configuration and Keychain availability."); }
-  finally { modelBusy = false; publish(); }
+function sharedCatalogReady(target) {
+  if (busy || filesBusy || modelBusy || installationBusy || imageTask || quitting ||
+      !runtime || runtime.coordinator.closing || !target)
+    throw new Error('Catalog changes are unavailable while another operation is in progress.');
+}
+function catalogError(error) {
+  return new Error(['MODEL_CATALOG', 'GIT_CATALOG'].includes(error?.code) ? error.message :
+    'The catalog change did not complete. Check environment ownership, saved state and Keychain availability.');
+}
+async function sharedCatalogChange(target, prepare, mutate, title) {
+  sharedCatalogReady(target);
+  let prepared;
+  try { prepared = prepare(); } catch (error) { throw catalogError(error); }
+  let failure;
+  await action(async ({ signal }) => {
+    try {
+      await releaseView();
+      // All environments share these grants. No new catalog may be published
+      // until every old lease has closed successfully.
+      for (const definition of ENVIRONMENTS) {
+        signal.throwIfAborted();
+        await runtime.coordinator.stop(definition.id, { signal });
+      }
+      signal.throwIfAborted();
+      await mutate(prepared, signal);
+      publish(title, target.snapshot().cleanupPending
+        ? 'Access was updated. An unused encrypted record could not be removed. Environments are stopped; select Connect to continue.'
+        : 'Environments are stopped. Select Connect to apply the updated catalog.');
+    } catch (error) { failure = catalogError(error); throw failure; }
+  });
+  if (failure) throw failure;
   return snapshot();
 }
-function gitAction(operation, value) {
-  return action(async ({ signal }) => {
-    if (!gitCatalog) throw new Error('Git catalog unavailable');
-    await releaseView();
-    // Close every old credential lease before a rotation/revocation. This is
-    // serialized with connection/start actions and made explicit in the UI.
-    for (const definition of ENVIRONMENTS) await runtime.coordinator.stop(definition.id, { signal });
-    signal.throwIfAborted();
-    if (operation === 'import') await gitCatalog.importRepository(value); else await gitCatalog.remove(value);
-    publish('Git access updated', 'Environments are stopped. Select Connect to apply the updated catalog.');
-  });
+async function modelAction(operation, input) {
+  if (operation === 'probe') {
+    sharedCatalogReady(catalog);
+    modelBusy = true; publish();
+    try { await catalog.probe(); }
+    catch { throw new Error('Model check failed. Check the endpoint and Keychain availability.'); }
+    finally { modelBusy = false; publish(); }
+    return snapshot();
+  }
+  const operations = {
+    import: [() => catalog.prepareImport(), (prepared, signal) => catalog.importDesktop({ prepared, signal })],
+    save: [() => catalog.prepareSave(input), (prepared, signal) => catalog.save(prepared, { signal })],
+    remove: [() => catalog.prepareRemove(input), (prepared, signal) => catalog.remove(prepared.id, { signal })],
+    select: [() => catalog.prepareSelect(input), (prepared, signal) => catalog.select(prepared, { signal })],
+  };
+  if (!Object.hasOwn(operations, operation)) throw new Error('Unknown model operation.');
+  return sharedCatalogChange(catalog, ...operations[operation], 'Models updated');
+}
+function gitAction(operation, input) {
+  const operations = {
+    import: [() => gitCatalog.prepareImport(input), (prepared, signal) => gitCatalog.importRepository(prepared.repository, { signal })],
+    save: [() => gitCatalog.prepareSave(input), (prepared, signal) => gitCatalog.save(prepared, { signal })],
+    remove: [() => gitCatalog.prepareRemove(input), (prepared, signal) => gitCatalog.remove(prepared.id, { signal })],
+  };
+  if (!Object.hasOwn(operations, operation)) throw new Error('Unknown Git operation.');
+  return sharedCatalogChange(gitCatalog, ...operations[operation], 'Git access updated');
 }
 async function secretAction(operation, input) {
   if (busy || filesBusy || modelBusy || installationBusy || imageTask || quitting ||
@@ -813,7 +853,10 @@ else {
       "network-notice-state": () => networkPresentation().notification,
       "network-notice-review": () => { setPanel('network'); showWindow(); return snapshot(); },
       "model-import": () => modelAction("import"), "model-probe": () => modelAction("probe"),
+      'model-save': input => modelAction('save', input), 'model-remove': id => modelAction('remove', id),
+      'model-select': selection => modelAction('select', selection),
       'git-import': repository => gitAction('import', repository), 'git-remove': id => gitAction('remove', id),
+      'git-save': input => gitAction('save', input),
       'secret-save': input => secretAction('save', input), 'secret-remove': id => secretAction('remove', id),
       "file-import": input => fileAction("import", input), "file-export": input => fileAction("export", input),
       "file-execute": id => fileAction("execute", { id }), "file-cancel": () => { runtime?.transfers.cancel(); return publish(); },

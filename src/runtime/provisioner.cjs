@@ -109,19 +109,20 @@ rm runtime.tar.gz`, options);
     const secrets = options.network.bridge?.guestSecrets?.(`http://${credentialHost}:${options.network.bridge.port}`) ?? { version: 1, entries: [] };
     writeJson(path.join(directory, 'secrets.json'), secrets);
     await driver.putFile(path.join(directory, 'secrets.json'), `${guestRoot}/secrets.json`, options);
-    if (options.network.bridge) {
-      const entries = options.network.bridge.guestProviders(`http://${credentialHost}:${options.network.bridge.port}`);
-      const providers = {}, credentials = {};
-      for (const { provider, token } of entries) {
-        const ref = `ISOLATED_MODEL_${provider.id.replaceAll("-", "_").toUpperCase()}`;
-        providers[provider.id] = { displayName: provider.displayName ?? provider.id, api: provider.api, baseURL: provider.baseURL,
-          models: provider.models, apiKeyEnv: ref };
-        credentials[ref] = token;
-      }
-      writeJson(path.join(directory, "model-providers.json"), { providers, credentials,
-        selected: options.network.bridge.defaultModel });
-      await driver.putFile(path.join(directory, "model-providers.json"), `${guestRoot}/model-providers.json`, options);
+    const entries = options.network.bridge
+      ? options.network.bridge.guestProviders(`http://${credentialHost}:${options.network.bridge.port}`) : [];
+    const providers = {}, credentials = {};
+    for (const { provider, token } of entries) {
+      const ref = `ISOLATED_MODEL_${provider.id.replaceAll("-", "_").toUpperCase()}`;
+      providers[provider.id] = { displayName: provider.displayName ?? provider.id, api: provider.api, baseURL: provider.baseURL,
+        models: provider.models, apiKeyEnv: ref };
+      credentials[ref] = token;
     }
+    // Also replace an old model manifest when the final provider was removed
+    // and no Git or Secrets grants remain to require a bridge.
+    writeJson(path.join(directory, "model-providers.json"), { providers, credentials,
+      selected: options.network.bridge?.defaultModel ?? null });
+    await driver.putFile(path.join(directory, "model-providers.json"), `${guestRoot}/model-providers.json`, options);
     // flock owns the service lifetime. Repeated starts do not create a backend.
     await driver.exec('if ! /usr/bin/curl -s --max-time 2 -o /dev/null http://127.0.0.1:3080/; then rm -f "$HOME/.harness-isolated/launch-url"; fi', options);
     await driver.exec('test -x "$HOME/.harness-isolated/node/bin/node" && test -s "$HOME/.harness-isolated/service.cjs" && nohup flock -n "$HOME/.harness-isolated/service.lock" "$HOME/.harness-isolated/node/bin/node" "$HOME/.harness-isolated/service.cjs" </dev/null >/dev/null 2>&1 &', options);

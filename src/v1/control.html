@@ -235,44 +235,88 @@
       </div>
     </section>
 
-    <section id="models-panel" class="page" hidden aria-label="Local models">
+    <section id="models-panel" class="page" hidden aria-label="Models">
       <div class="panel-head">
         <button id="models-back" class="panel-back" type="button">
           <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>
           <span>Back to Harness</span>
         </button>
         <div>
-          <h1>Local models</h1>
-          <p class="subtitle">A shared catalog for Lima and WrapVM. Saved credentials stay protected by Keychain on your Mac.</p>
+          <h1>Models</h1>
+          <p class="subtitle">Inference providers shared across managed environments. Saved API keys stay protected by Keychain on your Mac.</p>
         </div>
       </div>
       <div class="page-body">
-        <p class="note">Import the providers explicitly listed in your host model-authorizations.json file. Verification checks the currently served model without running inference.</p>
-        <p class="note">Guest-side availability is not verified yet.</p>
+        <p class="note">Add OpenAI Chat Completions compatible providers with explicit endpoints and model limits.</p>
+        <p class="note">Providers, models and grants are shared by every managed environment. Saving, removing, choosing a default or importing stops all environments and their running jobs; select Connect again to apply.</p>
+        <p id="model-fault" class="alert" role="alert" hidden>The model catalog is unavailable. Saved providers were preserved. Saving, removing and selecting are disabled.</p>
+        <p id="model-cleanup-pending" class="note warn-note" role="status" hidden>An unused encrypted record could not be removed. Environments are stopped; connect again to continue.</p>
         <div class="row">
           <button id="models-import" class="primary" type="button">
             <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v7M5 6.6l3 3 3-3M2.5 13h11"/></svg>
-            <span>Import from DSH on Mac</span>
+            <span>Import from DSH</span>
           </button>
           <button id="models-probe" type="button">
             <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="3.6"/><path d="M10.4 10.4 13 13"/></svg>
             <span>Verify availability</span>
           </button>
         </div>
-        <div id="model-list" class="list" aria-live="polite"></div>
-        <h2>Private GitHub over HTTPS</h2>
-        <p class="note">Authorize one specific repository for clone, fetch and push. The credential already available on your Mac is kept by the app; the guest receives a substitute token. No personal login in the guest browser.</p>
-        <p class="note">Importing, updating or removing access stops environments and running jobs, closing old substitute credentials. Then press Connect. Redirect and Git LFS are not supported.</p>
-        <form id="git-form" class="settings-form">
-          <label for="git-repository">GitHub repository
-            <input id="git-repository" placeholder="owner/repository" maxlength="140" autocomplete="off" required>
-          </label>
-          <button id="git-import" type="submit">
-            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v7M5 6.6l3 3 3-3M2.5 13h11"/></svg>
-            <span>Import credential from Mac and stop environments</span>
+        <p class="note">Import from DSH copies the providers configured in the desktop profile. It is optional and never required.</p>
+        <p class="note">Verify availability checks the configured endpoint and listed models with a GET request. It does not run inference.</p>
+        <div class="row-between">
+          <h2>Providers</h2>
+          <button id="model-add" type="button" class="primary">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+            <span>Add provider</span>
           </button>
+        </div>
+        <div id="model-list" class="list" aria-live="polite"></div>
+        <form id="model-form" novalidate class="model-editor" aria-label="Provider editor">
+          <div class="row-between">
+            <div id="model-editor-title" class="model-editor-heading">Add a provider</div>
+            <button id="model-cancel" type="button">Cancel</button>
+          </div>
+          <label for="model-id">Provider ID
+            <input id="model-id" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" autocomplete="off" required>
+          </label>
+          <label for="model-display-name">Display name
+            <input id="model-display-name" maxlength="200" autocomplete="off" required>
+          </label>
+          <label for="model-baseurl">API base URL
+            <input id="model-baseurl" type="url" maxlength="2048" placeholder="https://api.example.com/v1" autocomplete="off" required>
+          </label>
+          <label for="model-auth">Authentication
+            <select id="model-auth">
+              <option value="bearer">API key</option>
+              <option value="none">No authentication</option>
+            </select>
+          </label>
+          <div class="model-key-row">
+            <label for="model-value"><span id="model-value-label">API key</span>
+              <input id="model-value" type="password" maxlength="8192" autocomplete="new-password">
+            </label>
+            <button id="model-replace" type="button" hidden>Replace</button>
+          </div>
+          <p class="note">Saved keys are never shown again. The endpoint keeps its exact API base path; no /v1 suffix is added.</p>
+          <h2 id="model-models-heading">Models</h2>
+          <p class="note">Enter 1 to 64 models. Context window and max output tokens are required; input modes are optional and preserved when present.</p>
+          <div id="model-rows"></div>
+          <button id="model-row-add" type="button">
+            <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+            <span>Add model</span>
+          </button>
+          <p id="model-scope-note" class="note warn-note">Saving stops every environment and its running jobs. Connect again to apply.</p>
+          <div class="row model-editor-actions">
+            <button id="model-remove" type="button" class="danger" hidden>
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.2 4.5l.6-1h2.4l.6 1M5.4 4.5V12.5h5.2V4.5"/><path d="M7 6.8v3.8M9 6.8v3.8"/></svg>
+              <span>Remove provider and stop environments</span>
+            </button>
+            <button id="model-save" type="submit" class="primary">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+              <span>Save and stop environments</span>
+            </button>
+          </div>
         </form>
-        <div id="git-list" class="list" aria-live="polite"></div>
       </div>
     </section>
 
@@ -374,6 +418,41 @@
             </button>
           </div>
         </form>
+        <section id="provider-status-section" class="secrets-full" aria-labelledby="provider-status-heading">
+          <h2 id="provider-status-heading">Model providers</h2>
+          <p class="note">Credential status for inference providers, read from the model catalog. Keys stay on the host and are forwarded only to the configured provider. Edit provider details, endpoints and models in Models.</p>
+          <div id="provider-status-list" class="list" aria-live="polite"></div>
+        </section>
+        <section id="git-section" class="secrets-full" aria-labelledby="git-heading">
+          <h2 id="git-heading">GitHub repository access</h2>
+          <p class="note">Authorize one exact owner/repository for HTTPS clone, fetch and push, shared by every managed environment. The guest receives a substitute credential; no personal login in the guest browser.</p>
+          <p class="note">Repository grants are separate from the GitHub REST API secrets above. No token is ever prefilled or shown again. Redirects and Git LFS are not supported.</p>
+          <p id="git-fault" class="alert" role="alert" hidden>Git repository access is unavailable. Saved grants were preserved. Saving, importing and removing are disabled.</p>
+          <p id="git-cleanup-pending" class="note warn-note" role="status" hidden>An unused encrypted record could not be removed. Environments are stopped; connect again to continue.</p>
+          <div id="git-list" class="list" aria-live="polite"></div>
+          <form id="git-form" novalidate class="settings-form git-form" aria-label="Repository access editor">
+            <label for="git-repository">GitHub repository
+              <input id="git-repository" placeholder="owner/repository" maxlength="140" autocomplete="off" required>
+            </label>
+            <label for="git-username">GitHub username
+              <input id="git-username" maxlength="256" autocomplete="off" required>
+            </label>
+            <label for="git-value"><span id="git-value-label">Token</span>
+              <input id="git-value" type="password" maxlength="8192" autocomplete="new-password" required>
+            </label>
+            <p class="note">Manual save always supplies the GitHub login and a current token. Import uses only the repository field to read the credential already available on your Mac.</p>
+            <div class="row">
+              <button id="git-save" type="submit" class="primary">
+                <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.2l3 3 6-6.4"/></svg>
+                <span>Save and stop environments</span>
+              </button>
+              <button id="git-import" type="button">
+                <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v7M5 6.6l3 3 3-3M2.5 13h11"/></svg>
+                <span>Import credential from Mac</span>
+              </button>
+            </div>
+          </form>
+        </section>
       </div>
     </section>
 
