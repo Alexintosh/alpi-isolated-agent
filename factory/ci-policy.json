@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "status": "pilot-advisory",
+  "checks": [
+    {
+      "id": "portable",
+      "minimumTests": 202,
+      "files": [
+        "tests/atomic-json.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/environment-management.test.cjs",
+        "tests/model-catalog.test.cjs",
+        "tests/secret-vault.test.cjs",
+        "tests/secret-redactor.test.cjs",
+        "tests/network-policy.test.cjs",
+        "tests/network-presentation.test.cjs",
+        "tests/git-catalog.test.cjs",
+        "tests/diagnostics.test.cjs",
+        "tests/welcome-screen.test.cjs",
+        "tests/environment-management-ui.test.cjs",
+        "tests/ui-control-polish.test.cjs",
+        "tests/secret-scope.test.cjs",
+        "tests/secret-catalog.test.cjs",
+        "tests/secret-bridge.test.cjs",
+        "tests/secret-controls.test.cjs",
+        "tests/model-relay.test.cjs",
+        "tests/model-git-controls.test.cjs",
+        "tests/guest-artifacts.test.cjs"
+      ]
+    },
+    {
+      "id": "factory",
+      "minimumTests": 108,
+      "files": [
+        "tests/factory-evidence.test.cjs",
+        "tests/atc-adapter.test.cjs",
+        "tests/factory-node-runner.test.cjs"
+      ]
+    }
+  ]
+}

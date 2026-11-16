@@ -1,6 +1,7 @@
 node_modules/
 vendor/
 .state/
+.factory-results/
 *.log
 evidence/installed-*
 dist/

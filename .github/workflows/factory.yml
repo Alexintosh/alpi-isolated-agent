@@ -1,0 +1,50 @@
+name: Factory pilot
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: factory-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Synthetic checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.13.0'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Syntax checks
+        run: git ls-files -z '*.cjs' '*.js' | xargs -0 -n1 node --check
+      - name: Run explicit inventories and save evidence
+        env:
+          FACTORY_REPOSITORY: ${{ github.repository }}
+          FACTORY_PR: ${{ github.event.pull_request.number }}
+          FACTORY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          FACTORY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node factory/ci-run.cjs
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: factory-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .factory-results/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
