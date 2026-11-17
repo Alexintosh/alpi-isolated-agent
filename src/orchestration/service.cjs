@@ -155,18 +155,14 @@ function validateRequest(value) {
   };
 }
 
-function validateTask(value) {
-  const allowed = new Set([...TASK_KEYS, "reasoningEffort"]);
-  if (!isPlainObject(value)
-    || Object.keys(value).some(key => !allowed.has(key))
-    || TASK_KEYS.some(key => !Object.hasOwn(value, key))) {
-    throw new Error("invalid task record");
-  }
+// Shared field invariants for both the journal loader and write-time validation.
+// Callers persist only records that this function accepts, so accepted metadata
+// can never produce a journal the loader refuses after restart.
+function validateTaskFields(value) {
   if (!UUID.test(value.taskId) || !UUID.test(value.sessionId)
     || !text(value.environmentId, 64) || !ENVIRONMENT.test(value.environmentId)
     || !text(value.cwd, 4096) || !value.cwd.startsWith("/")
     || !text(value.provider, 128) || !text(value.model, 256)
-    || !text(value.ownershipToken, 256)
     || !timestamp(value.createdAt) || !timestamp(value.updatedAt)
     || !TASK_STATES.has(value.state)
     || !Array.isArray(value.requests)
@@ -176,7 +172,18 @@ function validateTask(value) {
   if (value.reasoningEffort !== undefined && !text(value.reasoningEffort, 64)) {
     throw new Error("invalid task record");
   }
-  const requests = value.requests.map(validateRequest);
+  return value.requests.map(validateRequest);
+}
+
+function validateTask(value) {
+  const allowed = new Set([...TASK_KEYS, "reasoningEffort"]);
+  if (!isPlainObject(value)
+    || Object.keys(value).some(key => !allowed.has(key))
+    || TASK_KEYS.some(key => !Object.hasOwn(value, key))) {
+    throw new Error("invalid task record");
+  }
+  const requests = validateTaskFields(value);
+  if (!text(value.ownershipToken, 256)) throw new Error("invalid task record");
   // A task is created by one delegate call whose requestId becomes its taskId.
   // Its first request state always mirrors the task setup state.
   if (requests[0].requestId !== value.taskId
@@ -197,6 +204,25 @@ function validateTask(value) {
     state: value.state,
     requests,
   };
+}
+
+// Reject metadata that the loader would refuse before reserving a task identity,
+// acquiring the runtime or touching the guest. Caller mistakes are a fixed
+// invalid-argument error, never a durable record that poisons later recovery.
+function assertPersistedFields(value) {
+  try {
+    validateTaskFields(value);
+  } catch {
+    throw fixed("invalid_arguments");
+  }
+}
+
+function persistedTask(value) {
+  try {
+    return validateTask(value);
+  } catch {
+    throw fixed("invalid_arguments");
+  }
 }
 
 function validateJournal(value) {
@@ -253,20 +279,8 @@ function pickEnvironment(value) {
   };
 }
 
-function taskReceipt(task) {
-  return {
-    taskId: task.taskId,
-    environmentId: task.environmentId,
-    sessionId: task.sessionId,
-    state: task.state,
-    provider: task.provider,
-    model: task.model,
-    ...(task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort }),
-    requestId: task.requests[0].requestId,
-    requestStatus: task.requests[0].status,
-  };
-}
-
+// Delegate receipts and follow-up receipts share one construction path; the
+// delegate receipt is simply the task's first request.
 function requestReceipt(task, request) {
   return {
     taskId: task.taskId,
@@ -693,39 +707,44 @@ class OrchestrationService {
     const existingTask = this.task(args.requestId);
     if (existingTask) {
       if (existingTask.requests[0].fingerprint !== digest) throw fixed("request_conflict");
-      return taskReceipt(existingTask);
+      return requestReceipt(existingTask, existingTask.requests[0]);
     }
     if (this.findRequest(args.requestId)) throw fixed("request_conflict");
+
+    const sessionId = randomUUID();
+    const stamp = now();
+    const candidate = {
+      taskId: args.requestId,
+      environmentId: args.environmentId,
+      sessionId,
+      cwd: args.cwd,
+      provider: args.provider,
+      model: args.model,
+      ...(args.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
+      createdAt: stamp,
+      updatedAt: stamp,
+      state: "preparing",
+      requests: [{
+        requestId: args.requestId,
+        fingerprint: digest,
+        status: "preparing",
+        createdAt: stamp,
+        updatedAt: stamp,
+      }],
+    };
+    // Validate the metadata that would be persisted before reserving identity,
+    // entering the runtime or calling the guest. A journal the loader would
+    // refuse must never be published in the first place.
+    assertPersistedFields(candidate);
     this.requireModel(args.provider, args.model, args.reasoningEffort);
     if (this.tasks.length >= MAX_TASKS) throw fixed("capacity");
 
-    const sessionId = randomUUID();
     return this.coordinatorCall(runtime, () =>
       runtime.coordinator.withRunning(args.environmentId, async (driver, options) => {
         this.assertActive(runtime, signal);
         const ownershipToken = options.ownershipToken;
         if (!text(ownershipToken, 256)) throw fixed("runtime_unavailable");
-        const stamp = now();
-        const task = {
-          taskId: args.requestId,
-          environmentId: args.environmentId,
-          sessionId,
-          cwd: args.cwd,
-          provider: args.provider,
-          model: args.model,
-          ...(args.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
-          ownershipToken,
-          createdAt: stamp,
-          updatedAt: stamp,
-          state: "preparing",
-          requests: [{
-            requestId: args.requestId,
-            fingerprint: digest,
-            status: "preparing",
-            createdAt: stamp,
-            updatedAt: stamp,
-          }],
-        };
+        const task = persistedTask({ ...candidate, ownershipToken });
         // Record intent and identity before the first guest mutation.
         this.commit([...this.tasks, task], runtime, signal);
 
@@ -770,14 +789,14 @@ class OrchestrationService {
         this.assertActive(runtime, signal);
 
         const submittedAt = now();
-        const submitted = {
+        const submitted = persistedTask({
           ...task,
           state: "submitted",
           updatedAt: submittedAt,
           requests: [{ ...task.requests[0], status: "submitted", updatedAt: submittedAt }],
-        };
+        });
         this.commit(this.replaceTask(submitted), runtime, signal);
-        return taskReceipt(submitted);
+        return requestReceipt(submitted, submitted.requests[0]);
       }, { signal }))
       .catch(error => {
         // An RPC failure or abort leaves the persisted preparing record. Record
@@ -819,12 +838,13 @@ class OrchestrationService {
           createdAt: stamp,
           updatedAt: stamp,
         };
-        // Reserve the request identity before the prompt RPC.
-        this.commit(this.replaceTask({
+        // Reserve the request identity before the prompt RPC. The reserved
+        // record is validated with the same invariants the loader applies.
+        this.commit(this.replaceTask(persistedTask({
           ...task,
           updatedAt: stamp,
           requests: [...task.requests, request],
-        }), runtime, signal);
+        })), runtime, signal);
 
         this.assertActive(runtime, signal);
         await this.guestCall(() => this.guest.harnessRpc(
@@ -842,11 +862,11 @@ class OrchestrationService {
 
         const submittedAt = now();
         const submittedRequest = { ...request, status: "submitted", updatedAt: submittedAt };
-        const submittedTask = {
+        const submittedTask = persistedTask({
           ...task,
           updatedAt: submittedAt,
           requests: [...task.requests, submittedRequest],
-        };
+        });
         this.commit(this.replaceTask(submittedTask), runtime, signal);
         return requestReceipt(submittedTask, submittedRequest);
       }, { signal }))
@@ -863,7 +883,12 @@ class OrchestrationService {
     if (this.fault) throw fixed("journal_unavailable");
     const task = this.task(args.taskId);
     if (!task) throw fixed("task_not_found");
-    if (task.state !== "submitted") throw fixed("session_unusable");
+    // Passive observation is safe for a recorded uncertain binding: it uses the
+    // requested session ID, dispatches no setup/prompt RPC and never promotes
+    // uncertainty. A session that was never created returns a fixed safe error.
+    if (task.state !== "submitted" && task.state !== "uncertain") {
+      throw fixed("session_unusable");
+    }
     const timeoutMs = args.timeoutMs ?? 1000;
     const maxMessages = args.maxMessages ?? 8;
 
@@ -890,7 +915,12 @@ class OrchestrationService {
     if (this.fault) throw fixed("journal_unavailable");
     const task = this.task(args.taskId);
     if (!task) throw fixed("task_not_found");
-    if (task.state !== "submitted") throw fixed("session_unusable");
+    // Cooperative cancellation remains available for a recorded uncertain
+    // binding: the admission ambiguity must not also forbid an explicit cancel.
+    // It targets only the recorded requested session and never replays setup.
+    if (task.state !== "submitted" && task.state !== "uncertain") {
+      throw fixed("session_unusable");
+    }
 
     return this.coordinatorCall(runtime, () =>
       runtime.coordinator.withRunning(task.environmentId, async (driver, options) => {

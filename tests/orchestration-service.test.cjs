@@ -6,7 +6,9 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { randomUUID, createHash } = require("node:crypto");
+const { Writable } = require("node:stream");
 const { OrchestrationService } = require("../src/orchestration/service.cjs");
+const { FileTransfers } = require("../src/runtime/file-transfers.cjs");
 
 const execFileAsync = promisify(execFile);
 const JOURNAL = "orchestration-tasks.json";
@@ -49,7 +51,7 @@ function makeModels(overrides = {}) {
   };
 }
 
-function makeRuntime({ token = "token-1", onStart, transfers } = {}) {
+function makeRuntime({ token = "token-1", onStart, transfers, driver } = {}) {
   const calls = { start: [], stop: [], withRunning: [] };
   const environment = {
     id: "env-1",
@@ -62,6 +64,7 @@ function makeRuntime({ token = "token-1", onStart, transfers } = {}) {
     issue: "raw-issue-must-not-leak",
     networkStatus: { proxy: "http://raw-proxy-must-not-leak" },
   };
+  const activeDriver = driver ?? { exec: async () => "" };
   const coordinator = {
     snapshot() { return [environment]; },
     async start(id) {
@@ -75,7 +78,7 @@ function makeRuntime({ token = "token-1", onStart, transfers } = {}) {
     },
     async withRunning(id, operation, { signal } = {}) {
       calls.withRunning.push(id);
-      return operation({ exec: async () => "" }, { ownershipToken: token, signal });
+      return operation(activeDriver, { ownershipToken: token, signal });
     },
   };
   if (transfers && typeof transfers === "object" && !transfers.coordinator) {
@@ -102,10 +105,19 @@ function makeGuest({ onCall, onExec, failAt, createResult, block } = {}) {
       if (failAt === method) throw Object.assign(new Error("raw prompt secret"), { code: "guest-rpc-failed" });
       switch (method) {
         case "session/create": return createResult ?? { sessionId: args.sessionId };
-        case "session/selectModel": return { ok: true };
-        case "session/prompt": return { queued: true, requestId: args.requestId };
+        // Pinned stock Harness shapes. The service deliberately ignores these
+        // values; the doubles mirror them so a future dependency on the shape
+        // fails visibly here instead of only against a live guest.
+        case "session/selectModel": return {
+          selected: {
+            provider: args.provider,
+            model: args.model,
+            ...(args.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
+          },
+        };
+        case "session/prompt": return { accepted: true };
         case "session/wait": return { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] };
-        case "session/cancel": return { cancelled: true };
+        case "session/cancel": return { accepted: true };
         default: throw new Error("unexpected RPC");
       }
     },
@@ -564,6 +576,18 @@ test("a mismatched session create response is not adopted", async t => {
   assert.notEqual(tasks.tasks[0].sessionId, wrongSession);
   const rpc = h.guest.calls.filter(call => call.kind === "rpc");
   assert.deepEqual(rpc.map(call => call.method), ["session/create"]);
+
+  // Recovery observation and cancellation target only the recorded requested
+  // session; the mismatched returned identity is never adopted.
+  const freshGuest = makeGuest();
+  const restarted = h.open({ guest: freshGuest });
+  await restarted.dispatch("alpi_wait", { taskId: requestId });
+  await restarted.dispatch("alpi_cancel", { taskId: requestId });
+  assert.deepEqual(freshGuest.calls.map(call => call.method), ["session/wait", "session/cancel"]);
+  for (const call of freshGuest.calls) {
+    assert.equal(call.args.sessionId, tasks.tasks[0].sessionId);
+    assert.notEqual(call.args.sessionId, wrongSession);
+  }
 });
 
 test("a persisted preparing record becomes uncertain on restart and is never replayed", async t => {
@@ -601,6 +625,159 @@ test("a persisted preparing record becomes uncertain on restart and is never rep
   assert.equal(receipt.state, "uncertain");
   assert.equal(receipt.requestStatus, "uncertain");
   assert.equal(freshGuest.calls.length, 0);
+});
+
+test("a lost initial prompt response stays observable and cancellable after restart without replay", async t => {
+  const h = makeHarness(t, { guestOptions: { failAt: "session/prompt" } });
+  const requestId = uuid();
+  const args = delegateArgs(requestId);
+  // The guest accepts the prompt but the host loses the acknowledgement, so the
+  // persisted record is uncertain rather than submitted.
+  await assert.rejects(
+    h.service.dispatch("alpi_delegate", args),
+    error => error.code === "guest_failed",
+  );
+  const recorded = await h.service.dispatch("alpi_tasks", {});
+  assert.equal(recorded.tasks.length, 1);
+  assert.equal(recorded.tasks[0].state, "uncertain");
+  assert.equal(recorded.tasks[0].lastRequest.status, "uncertain");
+  const sessionId = recorded.tasks[0].sessionId;
+
+  const freshGuest = makeGuest();
+  const restarted = h.open({ guest: freshGuest });
+  assert.equal((await restarted.dispatch("alpi_tasks", {})).tasks[0].state, "uncertain");
+
+  // Reusing the original delegate ID returns the uncertain receipt and admits
+  // no second create/select/prompt.
+  const receipt = await restarted.dispatch("alpi_delegate", args);
+  assert.equal(receipt.state, "uncertain");
+  assert.equal(receipt.requestStatus, "uncertain");
+  assert.equal(freshGuest.calls.length, 0);
+
+  // Passive wait dispatches against only the recorded requested session ID.
+  const waited = await restarted.dispatch("alpi_wait", { taskId: requestId });
+  assert.deepEqual(waited, {
+    taskId: requestId,
+    untrusted: true,
+    value: { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] },
+  });
+  assert.deepEqual(freshGuest.calls.map(call => call.method), ["session/wait"]);
+  assert.deepEqual(freshGuest.calls[0].args, {
+    sessionId, timeoutMs: 1000, maxMessages: 8,
+  });
+
+  // Explicit cooperative cancel is allowed for the same recorded binding.
+  const cancelled = await restarted.dispatch("alpi_cancel", { taskId: requestId });
+  assert.deepEqual(cancelled, { taskId: requestId, acknowledged: true, cooperative: true });
+  assert.deepEqual(freshGuest.calls.map(call => call.method), ["session/wait", "session/cancel"]);
+  assert.deepEqual(freshGuest.calls[1].args, { sessionId });
+
+  // Observation never promotes uncertainty, and new prompt admission stays
+  // stricter than observation.
+  const after = await restarted.dispatch("alpi_tasks", {});
+  assert.equal(after.tasks[0].state, "uncertain");
+  assert.equal(after.tasks[0].lastRequest.status, "uncertain");
+  await assert.rejects(
+    restarted.dispatch("alpi_send", {
+      taskId: requestId, prompt: "new work", requestId: uuid(),
+    }),
+    error => error.code === "session_unusable",
+  );
+  assert.equal(freshGuest.calls.length, 2);
+
+  // Ownership mismatch refuses before any further RPC.
+  h.state.runtime = makeRuntime({ token: "different-owner" });
+  await assert.rejects(
+    restarted.dispatch("alpi_wait", { taskId: requestId }),
+    error => error.code === "ownership_mismatch",
+  );
+  await assert.rejects(
+    restarted.dispatch("alpi_cancel", { taskId: requestId }),
+    error => error.code === "ownership_mismatch",
+  );
+  assert.equal(freshGuest.calls.length, 2);
+});
+
+test("uncertain observation against a missing session returns a fixed safe error", async t => {
+  const h = makeHarness(t, { guestOptions: { failAt: "session/create" } });
+  const requestId = uuid();
+  await assert.rejects(
+    h.service.dispatch("alpi_delegate", delegateArgs(requestId)),
+    error => error.code === "guest_failed",
+  );
+
+  const restarted = h.open({
+    guest: {
+      async executeGuest() { throw canaryError("guest_failed"); },
+      async harnessRpc() { throw canaryError("guest-rpc-rejected"); },
+    },
+  });
+  await assert.rejects(
+    restarted.dispatch("alpi_wait", { taskId: requestId }),
+    error => { assertSanitized(error, "guest_failed"); return true; },
+  );
+  await assert.rejects(
+    restarted.dispatch("alpi_cancel", { taskId: requestId }),
+    error => { assertSanitized(error, "guest_failed"); return true; },
+  );
+  const tasks = await restarted.dispatch("alpi_tasks", {});
+  assert.equal(tasks.tasks[0].state, "uncertain");
+  assert.equal(tasks.tasks[0].lastRequest.status, "uncertain");
+});
+
+test("invalid metadata is rejected before reservation and never poisons a populated journal", async t => {
+  const h = makeHarness(t);
+  const validId = uuid();
+  await h.service.dispatch("alpi_delegate", delegateArgs(validId));
+  const beforeJournal = fs.readFileSync(journalPath(h));
+  const beforeTasks = (await h.service.dispatch("alpi_tasks", {})).tasks;
+
+  // Reopen with the actual guest adapter and a synthetic driver that counts
+  // every mutation attempt.
+  const guest = require("../src/orchestration/guest.cjs");
+  const driverCalls = [];
+  const runtime = makeRuntime({
+    driver: {
+      async exec(...args) { driverCalls.push(args); return ""; },
+    },
+  });
+  h.state.runtime = runtime;
+  const service = h.open({ guest });
+  const recovered = await service.dispatch("alpi_tasks", {});
+  assert.equal(recovered.fault, false);
+  assert.equal(recovered.tasks.length, 1);
+  assert.equal(recovered.tasks[0].taskId, validId);
+
+  // The shared schema accepts these control characters, but the real guest
+  // adapter and the journal loader reject them.
+  for (const cwd of [
+    "/home/user/workspace/line\nbreak",
+    "/home/user/workspace/tab\tbreak",
+    "/home/user/workspace/del\x7fbreak",
+  ]) {
+    await assert.rejects(
+      service.dispatch("alpi_delegate", delegateArgs(uuid(), { cwd })),
+      error => error.code === "invalid_arguments",
+      cwd,
+    );
+  }
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(uuid(), { reasoningEffort: "high\n" })),
+    error => error.code === "invalid_arguments",
+  );
+
+  // Nothing reached the runtime, guest or driver, and the existing journal is
+  // byte-preserved with its prior task still recoverable.
+  assert.equal(runtime.calls.withRunning.length, 0);
+  assert.equal(driverCalls.length, 0);
+  assert.deepEqual(fs.readFileSync(journalPath(h)), beforeJournal);
+  assert.deepEqual((await service.dispatch("alpi_tasks", {})).tasks, beforeTasks);
+
+  const reopened = h.open({ guest });
+  const after = await reopened.dispatch("alpi_tasks", {});
+  assert.equal(after.fault, false);
+  assert.equal(after.tasks.length, 1);
+  assert.equal(after.tasks[0].taskId, validId);
 });
 
 test("a failed journal write latches a fault, preserves the file and leaves stop/exec usable", async t => {
@@ -914,6 +1091,80 @@ function exportArgs(overrides = {}) {
   };
 }
 
+// The real FileTransfers manager and journal are exercised below. Only the VM
+// driver and the local/remote byte channels are synthetic; plan, journal,
+// ownership and commit/discard transitions are the production implementation.
+function transferJournalRecord(overrides = {}) {
+  return {
+    id: uuid(),
+    environmentId: "env-1",
+    direction: "import",
+    destination: "/home/user/workspace/interrupted",
+    transaction: "b".repeat(64),
+    ownershipToken: uuid(),
+    phase: "receiving",
+    createdAt: Date.now(),
+    ...overrides,
+  };
+}
+
+function seedTransferJournal(h, records) {
+  fs.writeFileSync(path.join(h.root, "file-transfers.json"),
+    JSON.stringify({ version: 1, operations: records }));
+}
+
+function transferJournal(h) {
+  return JSON.parse(fs.readFileSync(path.join(h.root, "file-transfers.json"), "utf8"));
+}
+
+function syntheticChannel(chunks) {
+  const input = new Writable({
+    write(chunk, encoding, callback) { callback(); },
+  });
+  const output = (async function* () {
+    for (const chunk of chunks) yield Buffer.from(chunk);
+  })();
+  return { input, output, done: Promise.resolve(), stop() {} };
+}
+
+function transferDriver({ exec, putFile } = {}) {
+  return {
+    launch: "synthetic-launch",
+    async exec() { return "no"; },
+    async putFile() {},
+    async requireOwned() {},
+    ...(exec ? { exec } : {}),
+    ...(putFile ? { putFile } : {}),
+  };
+}
+
+function makeRealTransfers(h, { token = uuid(), driver = transferDriver() } = {}) {
+  const runtime = makeRuntime({ token, driver });
+  const transfers = new FileTransfers({
+    coordinator: runtime.coordinator,
+    stateRoot: h.root,
+    runtimeRoot: path.join(h.root, "runtime"),
+    home: path.join(h.root, "home"),
+    python: "/usr/bin/python3",
+    helper: path.join(__dirname, "..", "src", "runtime", "file-stream.py"),
+    protectedPaths: [],
+  });
+  runtime.transfers = transfers;
+  h.state.runtime = runtime;
+  return { runtime, transfers, token, driver };
+}
+
+function transferSource(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "alpi-transfer-source-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(directory, "file.txt"), "hello");
+  return directory;
+}
+
+function scanSummary(entries = 1, bytes = 5) {
+  return syntheticChannel([JSON.stringify({ type: "summary", entries, bytes })]);
+}
+
 test("successful import and export return only verified receipt metadata", async t => {
   const importFake = new FakeTransfers({ entries: 3, bytes: 42 });
   const importHarness = makeHarness(t, { transfers: importFake });
@@ -1199,6 +1450,93 @@ test("a task journal fault does not block transfers, while a transfer journal fa
   assert.equal(broken.calls.prepareExport.length, 0);
   assert.equal(broken.calls.execute.length, 0);
   assert.equal(broken.calls.cancel, 0);
+});
+
+test("the real transfer journal refuses capacity without discarding interrupted records", async t => {
+  const h = makeHarness(t);
+  const records = Array.from({ length: 100 }, () => transferJournalRecord());
+  seedTransferJournal(h, records);
+  const source = transferSource(t);
+  const { transfers } = makeRealTransfers(h);
+  transfers.local = mode => {
+    if (mode !== "scan") throw new Error("unexpected local mode");
+    return scanSummary();
+  };
+
+  const before = fs.readFileSync(path.join(h.root, "file-transfers.json"));
+  await assert.rejects(
+    h.open().dispatch("alpi_import", importArgs({ source })),
+    error => error.code === "operation_failed",
+  );
+  assert.deepEqual(fs.readFileSync(path.join(h.root, "file-transfers.json")), before);
+  assert.equal(transferJournal(h).operations.length, 100);
+  assert.equal(transfers.plans.size, 0);
+  assert.equal(transfers.active, undefined);
+});
+
+test("a late abort during preview preserves an older interrupted transfer record", async t => {
+  const h = makeHarness(t);
+  const older = transferJournalRecord();
+  seedTransferJournal(h, [older]);
+  const source = transferSource(t);
+  const controller = new AbortController();
+  const { transfers } = makeRealTransfers(h, {
+    driver: transferDriver({ exec: async () => { controller.abort(); return "no"; } }),
+  });
+  transfers.local = mode => {
+    if (mode !== "scan") throw new Error("unexpected local mode");
+    return scanSummary();
+  };
+
+  const before = fs.readFileSync(path.join(h.root, "file-transfers.json"));
+  await assert.rejects(
+    h.open().dispatch("alpi_import", importArgs({ source }), { signal: controller.signal }),
+    error => error.code === "aborted",
+  );
+  assert.deepEqual(fs.readFileSync(path.join(h.root, "file-transfers.json")), before);
+  const journal = transferJournal(h);
+  assert.equal(journal.operations.length, 1);
+  assert.equal(journal.operations[0].id, older.id);
+  assert.equal(transfers.plans.size, 0);
+  assert.equal(transfers.active, undefined);
+  assert.equal(transfers.status.state, "cancelled");
+});
+
+test("the real transfer execute/commit returns a receipt and removes only its own journal record", async t => {
+  const h = makeHarness(t);
+  const older = transferJournalRecord();
+  seedTransferJournal(h, [older]);
+  const source = transferSource(t);
+  const { transfers } = makeRealTransfers(h);
+  transfers.local = mode => {
+    if (mode === "scan") return scanSummary();
+    if (mode === "send") return syntheticChannel(["hello"]);
+    throw new Error("unexpected local mode");
+  };
+  transfers.remote = (driver, mode, target, options, plan) => {
+    if (mode === "receive") {
+      return syntheticChannel([
+        `${JSON.stringify({ type: "complete", entries: plan.entries, bytes: plan.bytes })}\n`,
+      ]);
+    }
+    if (mode === "commit") return syntheticChannel([JSON.stringify({ type: "committed" })]);
+    throw new Error("unexpected remote mode");
+  };
+
+  const receipt = await h.open().dispatch("alpi_import", importArgs({ source }));
+  assert.deepEqual(receipt, {
+    direction: "import",
+    destination: "/home/user/workspace/copy",
+    state: "complete",
+    entries: 1,
+    bytes: 5,
+  });
+  const journal = transferJournal(h);
+  assert.equal(journal.operations.length, 1);
+  assert.equal(journal.operations[0].id, older.id);
+  assert.equal(transfers.plans.size, 0);
+  assert.equal(transfers.active, undefined);
+  assert.equal(transfers.status.state, "complete");
 });
 
 test("known dependency errors are rebuilt as fresh safe errors", async t => {
