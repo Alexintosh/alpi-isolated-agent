@@ -1,6 +1,7 @@
 # Alpi orchestration observability and workflow plan
 
-Status: planned; contract discovery is the first gate, not completed implementation.
+Status: implemented and component-reviewed; packaged/live evidence complete within
+the documented scope; final integrated review pending.
 Branch: `feat/alpi-agent-orchestration`; base `628600af4c6704e133afe8c667dc09fb8ee8edfb`.
 Tracking PR: https://github.com/Alexintosh/alpi-isolated-agent/pull/3.
 The separately committed Settings change `8cd26a1` remains on `feat/settings-sliders`.
@@ -174,9 +175,9 @@ new implementation is pushed until required gates pass. No merge without instruc
 | --- | --- | --- | --- | --- |
 | R0 | completed | n/a | source evidence recorded | Frozen observation contract below; approval resolution deferred |
 | D1 | accepted at 25030bc | 1/3 | 9.88; no blockers, optional repetition cleanup | PR review 5938016116; source/docs checks and CI passed |
-| O1/O2 | integrated; review 1 prepared | 0/3 | unscored | Neutral adapter + service; 72 scoped, 31 MCP checks pass |
+| O1/O2 | accepted at be75b26 | 2/3 | 9.68; R1 resolved | PR review 5938678057; 105 focused, 462 portable on Node22/24 |
 | T2 | accepted at f3c8dad | 1/3 | 9.60; no blockers | PR review 5938424517; 96 independent tests; optional marker-spoofing follow-up |
-| Integrated increment | pending | 0/3 | unscored | Separate whole-feature assessment |
+| Integrated increment | review 1 prepared | 0/3 | unscored | 737 host tests; packaged/live acceptance recorded in usage guide |
 
 Durable per-run records: `.state/orchestration/observability-runs.md`. Create each
 entry before launch; add run ID, confirmed settings, duration, results and limits.

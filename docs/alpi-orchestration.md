@@ -297,3 +297,49 @@ subagent registration or comprehensive guest-root containment. Network bypass
 and proxy-failure tests were not rerun live for this orchestration change; the
 existing boundary and synthetic regression coverage remain in place. The final
 integrated PR review is a separate acceptance gate.
+
+## Observability increment acceptance
+
+Runtime head `be75b26f25b42ba6fd8efa1b702f911a7d3cc0cd`, development Mac,
+Node 24.13.0, separate `Alpi-observability-be75b26.app` (Electron 45.3.1,
+`sourceDirty: false`). All 80 packaged source files matched the reviewed source.
+The old app quit normally and removed its socket before the replacement launched;
+profile, VM disk, engine, model catalog, shares and network policy were preserved.
+The two previously submitted task sessions were idle with empty queues beforehand;
+the earlier uncertain model-selection task was not observable.
+
+Executed through the actual stdio MCP client, private native broker and existing
+`wrapvm-arm64-v1` with selected `spark` / `DeepSeek-V4.1-Flash-1017`:
+
+- Import outside the supported guest workspace returned `transfer_path_refused`.
+  Import of a fresh synthetic project returned `contentRoot`; guest execution
+  verified that root contained the expected README before delegation.
+- A dependency-free clamp implementation task produced compact running and idle
+  snapshots. Default text was bounded; no raw stream records were exposed.
+  The final response marked records truncated, accurately avoiding a full-history
+  claim. No raw observation was requested or reasoning trace retained.
+- Independently executed all **12 guest tests** and additional boundary/type
+  assertions. Inspected the implementation, then verified SHA-256 equality for
+  all three exported files. Export `contentRoot` identified the nested source;
+  repeating the export destination returned `transfer_collision`.
+- A fresh MCP connection recovered the same task/session using the same request
+  ID and arguments without resubmission.
+- A follow-up cancellation probe wrote its ready marker before cancellation.
+  The receipt reported requested/acknowledged/cooperative with termination unknown.
+  A subsequent observation was idle; a separate `/proc` check found zero matching
+  Node probe processes. Those observations do not strengthen the generic receipt
+  into a guarantee about hostile guest-root termination or future work.
+
+No approval arose in this live task. Kind-only approval/question handoff is backed
+by pinned stock source and synthetic adapter/service/stdio tests, not live UI
+resolution. No approval-resolution API exists. Upstream oversize replies, external
+MCP client UIs, fresh-machine setup, other harnesses/engines and native visual
+acceptance were not tested live in this increment. Reasoning effort was omitted
+because the selected model has no supported mapping; effective effort is uncontrolled.
+
+Host evidence: **737/737 tracked tests** passed on Node 24.13.0; independent component
+review ran **462/462 portable tests on Node 22 and 24**. One earlier overlapping
+broad run hit an existing factory SIGTERM fixture reading its readiness JSON before
+that write finished; unchanged focused and subsequent full runs passed. No test
+was disabled or weakened. Exact-SHA scored reviews are on PR #3; component acceptance
+does not substitute for the final integrated review.
