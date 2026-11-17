@@ -97,7 +97,9 @@ function toolResult(value) {
   return { content: [{ type: "text", text }], isError: false };
 }
 
-const TRANSFER_ERRORS = Object.freeze({
+const SERVICE_ERRORS = Object.freeze({
+  unsupported: "This orchestration operation is not available yet.",
+  guest_failed: "The guest operation failed.",
   transfer_path_refused: "The selected path is not permitted for transfer.",
   transfer_collision: "The transfer destination already exists.",
   transfer_preview_failed: "Preview unavailable. Check paths, permissions and file types.",
@@ -120,8 +122,8 @@ function toolFailure(error) {
   if (code === "EPROTO" || code === "EMSGSIZE") {
     return toolError("invalid_response", "The Alpi broker returned an invalid response.");
   }
-  if (typeof code === "string" && Object.hasOwn(TRANSFER_ERRORS, code)) {
-    return toolError(code, TRANSFER_ERRORS[code]);
+  if (typeof code === "string" && Object.hasOwn(SERVICE_ERRORS, code)) {
+    return toolError(code, SERVICE_ERRORS[code]);
   }
   return toolError("request_failed", "The Alpi request failed.");
 }

@@ -10,6 +10,8 @@ const path = require("node:path");
 const { randomUUID, createHash } = require("node:crypto");
 const { writeJson } = require("../runtime/atomic-json.cjs");
 const { validateCall } = require("./tools.cjs");
+const { validateObservation, validateCancellation } = require("./observation.cjs");
+const { createHarnessAdapter } = require("./harness-adapter.cjs");
 
 const MAX_TASKS = 256;
 const MAX_REQUESTS = 64;
@@ -365,10 +367,11 @@ function transferReceipt(direction, preview) {
 }
 
 class OrchestrationService {
-  constructor({ stateRoot, getRuntime, getModels, runExclusive, guest } = {}) {
+  constructor({ stateRoot, getRuntime, getModels, runExclusive, guest, createAdapter } = {}) {
     if (typeof stateRoot !== "string" || !stateRoot
       || typeof getRuntime !== "function" || typeof getModels !== "function"
-      || typeof runExclusive !== "function") {
+      || typeof runExclusive !== "function"
+      || (createAdapter !== undefined && typeof createAdapter !== "function")) {
       throw new Error("Invalid orchestration service dependencies.");
     }
     this.file = path.join(stateRoot, "orchestration-tasks.json");
@@ -376,6 +379,9 @@ class OrchestrationService {
     this.getModels = getModels;
     this.runExclusive = runExclusive;
     this.guest = guest ?? require("./guest.cjs");
+    // A factory, never a persisted instance: the adapter is created inside the
+    // verified withRunning callback with an RPC closure bound to that attempt.
+    this.createAdapter = createAdapter ?? createHarnessAdapter;
     this.tasks = [];
     this.fault = false;
     this.busy = false;
@@ -466,6 +472,36 @@ class OrchestrationService {
       }
       throw fixed("guest_failed");
     }
+  }
+
+  // Adapter dependencies are untrusted too. A recognised fixed code keeps its
+  // category; everything else collapses to guest_failed with no cause, message,
+  // stack or extra properties carried outward.
+  adapterError(error) {
+    const known = knownServiceError(error);
+    if (known) return known;
+    if (isAbortError(error)) return fixed("aborted");
+    return fixed("guest_failed");
+  }
+
+  async adapterCall(work) {
+    try {
+      return await work();
+    } catch (error) {
+      throw this.adapterError(error);
+    }
+  }
+
+  // Capability absence is explicit: it fails unsupported before any optional
+  // method is invoked, and never falls back to a guessed RPC or backend.
+  async adapterCapabilities(adapter) {
+    if (!adapter || typeof adapter !== "object"
+      || typeof adapter.capabilities !== "function") {
+      throw fixed("unsupported");
+    }
+    const value = await this.adapterCall(() => adapter.capabilities());
+    if (!isPlainObject(value)) throw fixed("unsupported");
+    return value;
   }
 
   modelView() {
@@ -895,6 +931,20 @@ class OrchestrationService {
       });
   }
 
+  // Build the adapter only inside the ownership-verified runtime callback. The
+  // RPC closure captures this attempt's driver/options; nothing is persisted.
+  async observationAdapter(task, driver, options) {
+    const rpc = (method, rpcArgs) => this.guestCall(() => this.guest.harnessRpc(
+      driver,
+      { ownershipToken: task.ownershipToken, signal: options.signal },
+      method,
+      rpcArgs,
+    ));
+    const adapter = await this.adapterCall(async () => this.createAdapter({ rpc }));
+    const capabilities = await this.adapterCapabilities(adapter);
+    return { adapter, capabilities };
+  }
+
   async wait(args, signal) {
     const runtime = this.runtime();
     this.assertActive(runtime, signal);
@@ -907,23 +957,45 @@ class OrchestrationService {
     if (task.state !== "submitted" && task.state !== "uncertain") {
       throw fixed("session_unusable");
     }
+    const format = args.format ?? "compact";
+    if (format !== "compact" && format !== "raw") throw fixed("invalid_arguments");
     const timeoutMs = args.timeoutMs ?? 1000;
-    const maxMessages = args.maxMessages ?? 8;
+    // Compact is the bounded default; raw keeps the legacy diagnostic default.
+    const maxMessages = args.maxMessages ?? (format === "raw" ? 8 : 1);
 
     return this.coordinatorCall(runtime, () =>
       runtime.coordinator.withRunning(task.environmentId, async (driver, options) => {
         this.assertActive(runtime, signal);
         if (options.ownershipToken !== task.ownershipToken) throw fixed("ownership_mismatch");
-        const rpcArgs = { sessionId: task.sessionId, timeoutMs, maxMessages };
-        if (args.afterSeq !== undefined) rpcArgs.afterSeq = args.afterSeq;
-        const value = await this.guestCall(() => this.guest.harnessRpc(
-          driver,
-          { ownershipToken: task.ownershipToken, signal: options.signal },
-          "session/wait",
-          rpcArgs,
-        ));
+        const { adapter, capabilities } = await this.observationAdapter(task, driver, options);
         this.assertActive(runtime, signal);
-        return { taskId: task.taskId, untrusted: true, value };
+
+        const binding = { conversationId: task.sessionId };
+        // afterSeq remains the public numeric cursor; the adapter owns the
+        // backend-specific argument mapping and omits an unavailable cursor.
+        const request = { timeoutMs, maxMessages };
+        if (args.afterSeq !== undefined) request.cursor = args.afterSeq;
+
+        if (format === "raw") {
+          // Explicit diagnostic compatibility mode. Capability and method
+          // support are checked before the optional call; no fallback RPC.
+          if (capabilities.rawObservation !== true
+            || typeof adapter.observeRaw !== "function") {
+            throw fixed("unsupported");
+          }
+          const value = await this.adapterCall(() => adapter.observeRaw(binding, request));
+          this.assertActive(runtime, signal);
+          return { taskId: task.taskId, untrusted: true, value };
+        }
+
+        if (capabilities.observation !== true
+          || typeof adapter.observe !== "function") {
+          throw fixed("unsupported");
+        }
+        const snapshot = await this.adapterCall(async () =>
+          validateObservation(await adapter.observe(binding, request)));
+        this.assertActive(runtime, signal);
+        return { taskId: task.taskId, untrusted: true, snapshot };
       }, { signal }));
   }
 
@@ -944,16 +1016,19 @@ class OrchestrationService {
       runtime.coordinator.withRunning(task.environmentId, async (driver, options) => {
         this.assertActive(runtime, signal);
         if (options.ownershipToken !== task.ownershipToken) throw fixed("ownership_mismatch");
-        await this.guestCall(() => this.guest.harnessRpc(
-          driver,
-          { ownershipToken: task.ownershipToken, signal: options.signal },
-          "session/cancel",
-          { sessionId: task.sessionId },
-        ));
+        const { adapter, capabilities } = await this.observationAdapter(task, driver, options);
         this.assertActive(runtime, signal);
-        // Harness cancellation is cooperative; this is not proof that guest
-        // processes terminated. alpi_stop is the verified whole-VM stop.
-        return { taskId: task.taskId, acknowledged: true, cooperative: true };
+
+        if (capabilities.cancellationRequest !== true
+          || typeof adapter.requestCancel !== "function") {
+          throw fixed("unsupported");
+        }
+        const receipt = await this.adapterCall(async () =>
+          validateCancellation(await adapter.requestCancel({ conversationId: task.sessionId })));
+        this.assertActive(runtime, signal);
+        // The adapter receipt is an admission acknowledgement only. It is not
+        // proof that guest processes terminated; alpi_stop is the verified stop.
+        return { taskId: task.taskId, ...receipt };
       }, { signal }));
   }
 

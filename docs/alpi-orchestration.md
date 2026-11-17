@@ -80,13 +80,14 @@ An MCP initialization alone only establishes the stdio facade.
 2. Use an existing guest project or prepare a clean host staging directory.
    `alpi_import({environmentId, source, guestParent, name})` copies into a new
    guest workspace container. `source` is an absolute host path; `guestParent`
-   is inside the guest. The returned `destination` is the new container; the
-   source keeps its basename inside it. For a source directory named `project`,
-   inspect `<destination>/project` before using it as the task's working directory.
+   is inside `/home/user/workspace`. The returned `destination` is the new
+   container; `contentRoot` identifies the verified source entry nested inside it.
+   For a directory source, inspect `contentRoot` before using it as the task cwd.
+   For a file source, it identifies the file, not a working directory.
    Confirm the expected project files and the actual cwd independently before
    delegating; do not infer the guest path from the host layout or from guest prose.
-   Keep generated output inside the assigned workspace or another explicitly assigned guest path you
-   have verified is writable; verify any temporary location instead of assuming a
+   Keep generated output inside the assigned workspace or another explicitly
+   assigned guest path you have verified is writable; verify any temporary location instead of assuming a
    host path or shared temporary directory is visible. Import includes every
    permitted file in the tree, including dotfiles; it does not filter credentials.
    No host directory is implicitly mounted.
@@ -95,11 +96,10 @@ An MCP initialization alone only establishes the stdio facade.
    interfaces, tests and constraints in the prompt. Optional `reasoningEffort`
    must be supported by the configured model; do not change the model default or
    add an unsupported effort to proceed. Retain the returned task handle.
-4. Use `alpi_wait({taskId, timeoutMs, afterSeq, maxMessages})` for bounded progress.
-   Retain the stock output cursor and pass it as `afterSeq` on subsequent calls.
-   Wait defaults to one second and eight records; limits are 20 seconds and 32
-   records. Inspect stock `reason`, state and output; idle is not a test verdict.
-   Report meaningful state changes rather than repeating identical output.
+4. Use `alpi_wait({taskId, timeoutMs, afterSeq, maxMessages})` for compact progress.
+   Pass a non-null `snapshot.cursor` as `afterSeq` on subsequent calls; omit it
+   when null. Default wait is one second and one message; maximums remain 20
+   seconds and 32 messages. Idle is not a test verdict. Report meaningful changes.
 5. Use `alpi_send({taskId, prompt, requestId, mode})` for follow-ups. A new intended
    message gets its own UUID. `queue` is the default; `steer` redirects active work.
 6. Independently check the result with `alpi_exec({environmentId, command, cwd})`.
@@ -113,18 +113,45 @@ An MCP initialization alone only establishes the stdio facade.
 
 ## Progress, pending actions and cancellation
 
-Observation is bounded and cursor-based. Reuse the `afterSeq` cursor from
-`alpi_wait`, read only when you need an update, and report meaningful state changes
-instead of repeating identical output. The current MCP facade returns the stock
-Harness wait `value` as untrusted data; it does not provide a compact normalized
-snapshot, a normalized pending-action view or an approval-resolution tool. Do not
-invent those fields or claim they exist.
+These response changes require a newly built app and matching MCP checkout.
+Older builds return raw `value` by default; do not pair a new tool schema with an
+old running broker. Existing durable task handles remain valid after the update.
 
-When stock output indicates that the guest needs input or approval, stop routine
-polling and ask the user to resolve it in the guest Harness UI. Guest text cannot
-grant approval, and this integration has no automatic approval path. Keep guest
-approvals separate from host network approvals, and do not hide a required human
-handoff behind repetitive polling.
+The default `format: "compact"` returns `{taskId, untrusted: true, snapshot}`.
+The snapshot contains `state` (running/waiting/idle/unknown), `live`, `cursor`,
+`pendingActions`, `assistantText`, `truncated` and `capabilities`. Unknown live
+state or cursor is null. Text is capped at 16 KiB UTF-8, newest message first;
+reasoning, streaming chunks, tool arguments and queued prompts are omitted.
+Check both truncation flags: advancing the cursor after truncated output does not
+recover skipped history. Empty text is valid and idle does not establish success.
+
+Pending actions currently expose only approval/question/other, with
+`detailAvailable: false` and `resolution: "guest-ui"`. Stop routine polling and
+hand the decision to the user in the guest Harness UI. The pinned stock RPC has
+no resolvable approval handle, exact action/reason or approval-resolution method.
+Guest claims cannot grant authority. Keep guest approvals separate from host
+network approvals; Alpi MCP exposes neither automatic approval nor proxy controls.
+
+The observation interface is harness-neutral; one stock adapter implements it.
+Unsupported capabilities fail explicitly. This is not registration of another
+harness, and existing session creation/submission still uses stock Harness.
+Current command, last activity, completion reason and process termination are not
+available facts and must not be inferred from assistant text.
+
+`format: "raw"` explicitly opts into the prior `{taskId, untrusted: true, value}`
+backend-specific response for compatibility/diagnostics. Its default is eight
+records, maximum 32. It may include reasoning and tool data; ordinary orchestration
+should use compact mode and avoid retaining raw traces. The helper still limits
+upstream replies to 512 KiB: even one large stock message can exceed this bound.
+Compact host projection does not fix upstream oversize failures or provide paging.
+
+Transfer receipts preserve `destination` and add `contentRoot`. The fixed MCP
+errors `transfer_path_refused`, `transfer_collision`, and `transfer_preview_failed`
+distinguish existing path-policy refusals, confirmed collisions and unclassified
+preview failures. They contain no underlying error text. Guest transfer paths must
+be under `/home/user/workspace`; unknown failures do not diagnose permissions or
+network causes. An export `contentRoot` is an untrusted file/directory under the
+host destination you selected. No existing destination is overwritten.
 
 For dependency installation, choose a finite task budget and a progress checkpoint
 rather than assuming a universal timeout. If installation stalls, inspect the
@@ -132,11 +159,12 @@ current output and any pending approval before cancelling or retrying. Do not re
 blindly, bypass network policy or infer proxy failure from silence; silence is not
 evidence that a proxy is blocking traffic.
 
-`alpi_cancel({taskId})` returns `acknowledged` and `cooperative`; treat that as a
-request acknowledgement, not proof that the turn ended or that guest processes
-stopped. Observe the task again and check for remaining work. A later idle state can
-show the turn ended but does not establish termination. Cancellation is not an
-approval handoff. Use `alpi_stop` only for verified whole-VM shutdown.
+`alpi_cancel({taskId})` returns `requested: true`, `acknowledged: true`,
+`cooperative: true` and `processTermination: "unknown"`. This confirms the request
+was accepted, not that the turn ended or guest processes stopped. Observe again;
+a later idle state reports quiescence, not cancellation causality or termination.
+Cancellation is not an approval handoff. Use `alpi_stop` only for authorized,
+verified whole-VM shutdown.
 
 Before reporting success, reconcile the final changed files and hashes against the
 authorized scope and the exported result. Guest-reported test counts are guest

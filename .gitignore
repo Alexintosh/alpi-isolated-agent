@@ -44,3 +44,5 @@ dist/
 # Public orchestration design and usage documentation.
 !/docs/alpi-orchestration-plan.md
 !/docs/alpi-orchestration.md
+
+!/docs/alpi-orchestration-observability-plan.md

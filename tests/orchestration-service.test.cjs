@@ -87,7 +87,96 @@ function makeRuntime({ token = "token-1", onStart, transfers, driver } = {}) {
   return { coordinator, calls, environment, transfers };
 }
 
-function makeGuest({ onCall, onExec, failAt, createResult, block } = {}) {
+// Realistic pinned-stock `session/wait` envelope: newest-first assistant message
+// records under output, sampled state and a stopping reason. The service must
+// consume it only through the adapter, never by parsing these fields itself.
+function stockWait({ reason = "idle", cursor = 42, active = true, running = false,
+  pendingInput = [], text = "assistant output", content, truncated = false } = {}) {
+  return {
+    reason,
+    state: { cursor, active, running, queue: active ? [] : null, pendingInput },
+    output: {
+      records: content === null ? [] : [{
+        type: "event",
+        event: {
+          type: "assistant/message",
+          seq: cursor,
+          time: 0,
+          data: {
+            turn: 1,
+            step: 1,
+            message: {
+              id: `m${cursor}`,
+              role: "assistant",
+              source: { kind: "model", provider: "p1", model: "m1" },
+              content: content ?? [{ type: "text", text }],
+            },
+          },
+        },
+      }],
+      truncated,
+    },
+  };
+}
+
+const STOCK_CAPABILITIES = Object.freeze({
+  observation: true,
+  pendingActionDetail: "kind-only",
+  approvalResolution: false,
+  cancellationRequest: true,
+  rawObservation: true,
+});
+
+const NEUTRAL_RECEIPT = Object.freeze({
+  requested: true,
+  acknowledged: true,
+  cooperative: true,
+  processTermination: "unknown",
+});
+
+function neutralSnapshot(overrides = {}) {
+  return {
+    state: "waiting",
+    live: true,
+    cursor: 12,
+    pendingActions: [{ kind: "question", detailAvailable: false, resolution: "guest-ui" }],
+    assistantText: "neutral assistant text",
+    truncated: { text: false, records: false },
+    capabilities: { ...STOCK_CAPABILITIES },
+    ...overrides,
+  };
+}
+
+// A minimal backend-neutral adapter. It deliberately has no stock RPC names,
+// record shapes or projection logic, so service success proves the seam does not
+// branch on the stock implementation.
+function fakeAdapter(overrides = {}) {
+  const calls = { observe: [], observeRaw: [], requestCancel: [] };
+  const adapter = {
+    capabilities() {
+      return overrides.capabilities ?? { ...STOCK_CAPABILITIES };
+    },
+    async observe(binding, request) {
+      calls.observe.push({ binding, request });
+      if (overrides.observe) return overrides.observe(binding, request);
+      return neutralSnapshot();
+    },
+    async observeRaw(binding, request) {
+      calls.observeRaw.push({ binding, request });
+      if (overrides.observeRaw) return overrides.observeRaw(binding, request);
+      return { backend: "fake", records: [] };
+    },
+    async requestCancel(binding) {
+      calls.requestCancel.push(binding);
+      if (overrides.requestCancel) return overrides.requestCancel(binding);
+      return { ...NEUTRAL_RECEIPT };
+    },
+  };
+  return { adapter, calls };
+}
+
+
+function makeGuest({ onCall, onExec, failAt, createResult, block, waitResult, cancelResult } = {}) {
   const calls = [];
   const guest = {
     calls,
@@ -116,8 +205,9 @@ function makeGuest({ onCall, onExec, failAt, createResult, block } = {}) {
           },
         };
         case "session/prompt": return { accepted: true };
-        case "session/wait": return { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] };
-        case "session/cancel": return { accepted: true };
+        case "session/wait": return typeof waitResult === "function"
+          ? waitResult(args) : (waitResult ?? stockWait());
+        case "session/cancel": return cancelResult ?? { accepted: true };
         default: throw new Error("unexpected RPC");
       }
     },
@@ -316,6 +406,7 @@ function makeHarness(t, options = {}) {
     getModels: () => overrides.models ?? models,
     runExclusive: overrides.runExclusive ?? runExclusive,
     guest: overrides.guest ?? guest,
+    createAdapter: overrides.createAdapter ?? options.createAdapter,
   });
   return { root, state, models, guest, service: open(), open };
 }
@@ -412,20 +503,42 @@ test("full delegation cycle is durable, idempotent and exposes no endpoint or cr
   assert.deepEqual(waited, {
     taskId: requestId,
     untrusted: true,
-    value: { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] },
+    snapshot: {
+      state: "idle",
+      live: true,
+      cursor: 42,
+      pendingActions: [],
+      assistantText: "assistant output",
+      truncated: { text: false, records: false },
+      capabilities: STOCK_CAPABILITIES,
+    },
   });
+  assert.equal(Object.hasOwn(waited.snapshot, "completed"), false);
   assert.deepEqual(guest.calls.at(-1).args, {
-    sessionId: receipt.sessionId, timeoutMs: 1000, maxMessages: 8,
+    sessionId: receipt.sessionId, maxMessages: 1, timeoutMs: 1000,
   });
-  await service.dispatch("alpi_wait", {
-    taskId: requestId, timeoutMs: 5000, maxMessages: 4, afterSeq: 3,
+  // Raw remains an explicit diagnostic compatibility envelope.
+  const rawWait = await service.dispatch("alpi_wait", {
+    taskId: requestId, format: "raw", timeoutMs: 5000, maxMessages: 4, afterSeq: 3,
   });
+  assert.deepEqual(rawWait, { taskId: requestId, untrusted: true, value: stockWait() });
   assert.deepEqual(guest.calls.at(-1).args, {
-    sessionId: receipt.sessionId, timeoutMs: 5000, maxMessages: 4, afterSeq: 3,
+    sessionId: receipt.sessionId, maxMessages: 4, timeoutMs: 5000, afterSeq: 3,
+  });
+  // The public numeric cursor maps to the adapter cursor in compact mode too.
+  await service.dispatch("alpi_wait", { taskId: requestId, afterSeq: 7 });
+  assert.deepEqual(guest.calls.at(-1).args, {
+    sessionId: receipt.sessionId, maxMessages: 1, timeoutMs: 1000, afterSeq: 7,
   });
 
   const cancelled = await service.dispatch("alpi_cancel", { taskId: requestId });
-  assert.deepEqual(cancelled, { taskId: requestId, acknowledged: true, cooperative: true });
+  assert.deepEqual(cancelled, {
+    taskId: requestId,
+    requested: true,
+    acknowledged: true,
+    cooperative: true,
+    processTermination: "unknown",
+  });
   assert.deepEqual(guest.calls.at(-1).args, { sessionId: receipt.sessionId });
 
   const tasks = await service.dispatch("alpi_tasks", {});
@@ -666,16 +779,30 @@ test("a lost initial prompt response stays observable and cancellable after rest
   assert.deepEqual(waited, {
     taskId: requestId,
     untrusted: true,
-    value: { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] },
+    snapshot: {
+      state: "idle",
+      live: true,
+      cursor: 42,
+      pendingActions: [],
+      assistantText: "assistant output",
+      truncated: { text: false, records: false },
+      capabilities: STOCK_CAPABILITIES,
+    },
   });
   assert.deepEqual(freshGuest.calls.map(call => call.method), ["session/wait"]);
   assert.deepEqual(freshGuest.calls[0].args, {
-    sessionId, timeoutMs: 1000, maxMessages: 8,
+    sessionId, maxMessages: 1, timeoutMs: 1000,
   });
 
   // Explicit cooperative cancel is allowed for the same recorded binding.
   const cancelled = await restarted.dispatch("alpi_cancel", { taskId: requestId });
-  assert.deepEqual(cancelled, { taskId: requestId, acknowledged: true, cooperative: true });
+  assert.deepEqual(cancelled, {
+    taskId: requestId,
+    requested: true,
+    acknowledged: true,
+    cooperative: true,
+    processTermination: "unknown",
+  });
   assert.deepEqual(freshGuest.calls.map(call => call.method), ["session/wait", "session/cancel"]);
   assert.deepEqual(freshGuest.calls[1].args, { sessionId });
 
@@ -703,6 +830,281 @@ test("a lost initial prompt response stays observable and cancellable after rest
     error => error.code === "ownership_mismatch",
   );
   assert.equal(freshGuest.calls.length, 2);
+});
+
+test("a neutral fake adapter proves observation and cancel never depend on stock shapes", async t => {
+  const { adapter, calls } = fakeAdapter();
+  const factoryCalls = [];
+  const h = makeHarness(t, {
+    createAdapter: ({ rpc }) => {
+      factoryCalls.push(typeof rpc);
+      return adapter;
+    },
+  });
+  const requestId = uuid();
+  const receipt = await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+  const afterDelegate = h.guest.calls.length;
+
+  const waited = await h.service.dispatch("alpi_wait", { taskId: requestId, afterSeq: 5 });
+  assert.deepEqual(waited, { taskId: requestId, untrusted: true, snapshot: neutralSnapshot() });
+  assert.deepEqual(calls.observe, [{
+    binding: { conversationId: receipt.sessionId },
+    request: { timeoutMs: 1000, maxMessages: 1, cursor: 5 },
+  }]);
+  assert.equal(factoryCalls.length, 1);
+  assert.equal(factoryCalls[0], "function");
+  // The service issues no stock wait RPC of its own.
+  assert.equal(h.guest.calls.length, afterDelegate);
+
+  // An unavailable cursor is omitted rather than sent as a sentinel.
+  await h.service.dispatch("alpi_wait", { taskId: requestId });
+  assert.equal(Object.hasOwn(calls.observe[1].request, "cursor"), false);
+  assert.equal(calls.observe[1].request.maxMessages, 1);
+
+  const raw = await h.service.dispatch("alpi_wait", { taskId: requestId, format: "raw" });
+  assert.deepEqual(raw, {
+    taskId: requestId, untrusted: true, value: { backend: "fake", records: [] },
+  });
+  assert.deepEqual(calls.observeRaw[0], {
+    binding: { conversationId: receipt.sessionId },
+    request: { timeoutMs: 1000, maxMessages: 8 },
+  });
+
+  const cancelled = await h.service.dispatch("alpi_cancel", { taskId: requestId });
+  assert.deepEqual(cancelled, { taskId: requestId, ...NEUTRAL_RECEIPT });
+  assert.deepEqual(calls.requestCancel, [{ conversationId: receipt.sessionId }]);
+  assert.equal(h.guest.calls.length, afterDelegate);
+
+  assert.throws(() => new OrchestrationService({
+    stateRoot: h.root,
+    getRuntime: () => h.state.runtime,
+    getModels: () => makeModels(),
+    runExclusive: async work => work(),
+    createAdapter: "not-a-factory",
+  }), /Invalid orchestration service dependencies/);
+});
+
+test("absent capabilities or methods fail unsupported before any optional call or RPC", async t => {
+  const cases = [
+    { name: "observation false", capabilities: () => ({ ...STOCK_CAPABILITIES, observation: false }) },
+    { name: "rawObservation false", capabilities: () => ({ ...STOCK_CAPABILITIES, rawObservation: false }), format: "raw" },
+    { name: "cancellationRequest false", capabilities: () => ({ ...STOCK_CAPABILITIES, cancellationRequest: false }), cancel: true },
+    { name: "observe absent", capabilities: () => ({ ...STOCK_CAPABILITIES }), absent: "observe" },
+    { name: "observeRaw absent", capabilities: () => ({ ...STOCK_CAPABILITIES }), format: "raw", absent: "observeRaw" },
+    { name: "requestCancel absent", capabilities: () => ({ ...STOCK_CAPABILITIES }), cancel: true, absent: "requestCancel" },
+  ];
+
+  for (const entry of cases) {
+    let touched = 0;
+    const adapter = {
+      capabilities: entry.capabilities,
+      observe() { touched += 1; throw canaryError("guest_failed"); },
+      observeRaw() { touched += 1; throw canaryError("guest_failed"); },
+      requestCancel() { touched += 1; throw canaryError("guest_failed"); },
+    };
+    if (entry.absent) delete adapter[entry.absent];
+
+    const h = makeHarness(t, { createAdapter: () => adapter });
+    const requestId = uuid();
+    await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+    const before = h.guest.calls.length;
+    const method = entry.cancel ? "alpi_cancel" : "alpi_wait";
+    const args = entry.cancel
+      ? { taskId: requestId }
+      : { taskId: requestId, ...(entry.format === undefined ? {} : { format: entry.format }) };
+    await assert.rejects(h.service.dispatch(method, args), error => {
+      assertSanitized(error, "unsupported");
+      return true;
+    });
+    assert.equal(touched, 0, entry.name);
+    assert.equal(h.guest.calls.length, before, entry.name);
+  }
+});
+
+test("malformed snapshots, receipts and adapter failures normalize to fixed codes", async t => {
+  const waitCases = [
+    { name: "short snapshot", observe: () => ({ state: "idle" }) },
+    { name: "capability drift", observe: () => neutralSnapshot({
+      capabilities: { ...STOCK_CAPABILITIES, approvalResolution: true },
+    }) },
+    { name: "duplicate pending kinds", observe: () => neutralSnapshot({
+      pendingActions: [
+        { kind: "approval", detailAvailable: false, resolution: "guest-ui" },
+        { kind: "approval", detailAvailable: false, resolution: "guest-ui" },
+      ],
+    }) },
+    { name: "unknown adapter error", observe: () => { throw canaryError("guest-rpc-failed"); } },
+    { name: "canary guest failure", observe: () => { throw canaryError("guest_failed"); } },
+    { name: "fixed unsupported", observe: () => { throw canaryError("unsupported"); } },
+  ];
+  for (const entry of waitCases) {
+    const { adapter } = fakeAdapter({ observe: entry.observe });
+    const h = makeHarness(t, { createAdapter: () => adapter });
+    const requestId = uuid();
+    await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+    await assert.rejects(h.service.dispatch("alpi_wait", { taskId: requestId }), error => {
+      assertSanitized(error, entry.name === "fixed unsupported" ? "unsupported" : "guest_failed");
+      return true;
+    });
+  }
+
+  const rawFailure = fakeAdapter({
+    observeRaw: () => { throw canaryError("guest-rpc-failed"); },
+  });
+  const rawHarness = makeHarness(t, { createAdapter: () => rawFailure.adapter });
+  const rawTask = uuid();
+  await rawHarness.service.dispatch("alpi_delegate", delegateArgs(rawTask));
+  await assert.rejects(
+    rawHarness.service.dispatch("alpi_wait", { taskId: rawTask, format: "raw" }),
+    error => { assertSanitized(error, "guest_failed"); return true; },
+  );
+
+  const cancelCases = [
+    { name: "accepted-only ack", requestCancel: () => ({ accepted: true }) },
+    { name: "unacknowledged", requestCancel: () => ({ ...NEUTRAL_RECEIPT, acknowledged: false }) },
+    { name: "termination claim", requestCancel: () => ({ ...NEUTRAL_RECEIPT, processTermination: "terminated" }) },
+    { name: "canary failure", requestCancel: () => { throw canaryError("guest-rpc-failed"); } },
+  ];
+  for (const entry of cancelCases) {
+    const { adapter, calls } = fakeAdapter({ requestCancel: entry.requestCancel });
+    const h = makeHarness(t, { createAdapter: () => adapter });
+    const requestId = uuid();
+    await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+    await assert.rejects(h.service.dispatch("alpi_cancel", { taskId: requestId }), error => {
+      assertSanitized(error, "guest_failed");
+      return true;
+    });
+    assert.equal(calls.requestCancel.length, 1, entry.name);
+  }
+
+  // A failing capability probe or factory is sanitized, not mapped to a runtime
+  // error, and never falls through to a stock RPC.
+  const capabilityFailure = makeHarness(t, {
+    createAdapter: () => ({
+      capabilities() { throw canaryError("guest-rpc-failed"); },
+      observe() { throw canaryError("guest_failed"); },
+    }),
+  });
+  const capabilityTask = uuid();
+  await capabilityFailure.service.dispatch("alpi_delegate", delegateArgs(capabilityTask));
+  const beforeCapability = capabilityFailure.guest.calls.length;
+  await assert.rejects(
+    capabilityFailure.service.dispatch("alpi_wait", { taskId: capabilityTask }),
+    error => { assertSanitized(error, "guest_failed"); return true; },
+  );
+  assert.equal(capabilityFailure.guest.calls.length, beforeCapability);
+
+  const factoryFailure = makeHarness(t, {
+    createAdapter: () => { throw canaryError("guest-rpc-failed"); },
+  });
+  const factoryTask = uuid();
+  await factoryFailure.service.dispatch("alpi_delegate", delegateArgs(factoryTask));
+  await assert.rejects(
+    factoryFailure.service.dispatch("alpi_cancel", { taskId: factoryTask }),
+    error => { assertSanitized(error, "guest_failed"); return true; },
+  );
+});
+
+test("late adapter completion after abort or runtime replacement is never a success", async t => {
+  const gate = deferred();
+  const entered = deferred();
+  const { adapter } = fakeAdapter({
+    observe: async () => {
+      entered.resolve();
+      await gate.promise;
+      return neutralSnapshot();
+    },
+  });
+  const h = makeHarness(t, { createAdapter: () => adapter });
+  const requestId = uuid();
+  await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+  const controller = new AbortController();
+  const pending = h.service.dispatch("alpi_wait", { taskId: requestId }, { signal: controller.signal });
+  await entered.promise;
+  controller.abort();
+  gate.resolve();
+  await assert.rejects(pending, error => error.code === "aborted");
+
+  let replacedHarness;
+  const replacement = fakeAdapter({
+    observe: () => {
+      replacedHarness.state.runtime = makeRuntime({ token: "token-2" });
+      return neutralSnapshot();
+    },
+  });
+  replacedHarness = makeHarness(t, { createAdapter: () => replacement.adapter });
+  const replacedTask = uuid();
+  await replacedHarness.service.dispatch("alpi_delegate", delegateArgs(replacedTask));
+  await assert.rejects(
+    replacedHarness.service.dispatch("alpi_wait", { taskId: replacedTask }),
+    error => error.code === "runtime_replaced",
+  );
+});
+
+test("compact suppresses reasoning, tool arguments and queue data while raw preserves them", async t => {
+  const canaries = ["REASONING_CANARY", "TOOL_ARGS_CANARY", "QUEUE_CANARY"];
+  const fixture = stockWait({
+    content: [
+      { type: "text", text: "visible" },
+      { type: "reasoning", text: "REASONING_CANARY" },
+      { type: "tool-call", id: "c1", name: "t", arguments: { TOOL_ARGS_CANARY: 1 } },
+    ],
+  });
+  fixture.state.queue = [{ content: [{ type: "text", text: "QUEUE_CANARY" }] }];
+  const h = makeHarness(t, { guestOptions: { waitResult: fixture } });
+  const requestId = uuid();
+  await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+
+  const waited = await h.service.dispatch("alpi_wait", { taskId: requestId });
+  assert.equal(waited.snapshot.assistantText, "visible");
+  assert.equal(Object.hasOwn(waited.snapshot, "completed"), false);
+  assert.equal(Object.hasOwn(waited.snapshot, "success"), false);
+  const compact = JSON.stringify(waited);
+  for (const canary of canaries) assert.equal(compact.includes(canary), false, canary);
+
+  // Raw is unchanged backend data and remains explicitly untrusted.
+  const raw = await h.service.dispatch("alpi_wait", { taskId: requestId, format: "raw" });
+  assert.equal(raw.value, fixture);
+  assert.equal(raw.untrusted, true);
+  assert.equal(JSON.stringify(raw.value).includes("TOOL_ARGS_CANARY"), true);
+});
+
+test("compact observation surfaces kind-only approval handoff and empty or malformed states", async t => {
+  const approval = makeHarness(t, {
+    guestOptions: {
+      waitResult: stockWait({
+        reason: "input-required", running: true, pendingInput: ["approval"], text: null,
+      }),
+    },
+  });
+  const approvalTask = uuid();
+  await approval.service.dispatch("alpi_delegate", delegateArgs(approvalTask));
+  const waiting = await approval.service.dispatch("alpi_wait", { taskId: approvalTask });
+  assert.equal(waiting.snapshot.state, "waiting");
+  assert.deepEqual(waiting.snapshot.pendingActions, [
+    { kind: "approval", detailAvailable: false, resolution: "guest-ui" },
+  ]);
+  assert.equal(waiting.snapshot.assistantText, "");
+  assert.equal(Object.hasOwn(waiting.snapshot, "actionId"), false);
+  assert.equal(Object.hasOwn(waiting.snapshot, "success"), false);
+
+  const empty = makeHarness(t, { guestOptions: { waitResult: stockWait({ text: null }) } });
+  const emptyTask = uuid();
+  await empty.service.dispatch("alpi_delegate", delegateArgs(emptyTask));
+  const emptyWait = await empty.service.dispatch("alpi_wait", { taskId: emptyTask });
+  assert.equal(emptyWait.snapshot.state, "idle");
+  assert.equal(emptyWait.snapshot.assistantText, "");
+  assert.deepEqual(emptyWait.snapshot.pendingActions, []);
+
+  const malformed = makeHarness(t, { guestOptions: { waitResult: {} } });
+  const malformedTask = uuid();
+  await malformed.service.dispatch("alpi_delegate", delegateArgs(malformedTask));
+  const unknown = await malformed.service.dispatch("alpi_wait", { taskId: malformedTask });
+  assert.equal(unknown.snapshot.state, "unknown");
+  assert.equal(unknown.snapshot.live, null);
+  assert.equal(unknown.snapshot.cursor, null);
+  assert.equal(unknown.snapshot.assistantText, "");
+  assert.deepEqual(unknown.snapshot.pendingActions, []);
 });
 
 test("uncertain observation against a missing session returns a fixed safe error", async t => {

@@ -4,7 +4,7 @@
   "checks": [
     {
       "id": "portable",
-      "minimumTests": 422,
+      "minimumTests": 460,
       "files": [
         "tests/atomic-json.test.cjs",
         "tests/coordinator.test.cjs",
@@ -30,6 +30,7 @@
         "tests/orchestration-guest.test.cjs",
         "tests/orchestration-mcp.test.cjs",
         "tests/orchestration-service.test.cjs",
+        "tests/orchestration-observation.test.cjs",
         "tests/native-onboarding.test.cjs"
       ]
     },

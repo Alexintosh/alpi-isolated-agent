@@ -172,10 +172,10 @@ new implementation is pushed until required gates pass. No merge without instruc
 
 | Scope | State | Reviews used | Score / findings | Evidence / next action |
 | --- | --- | --- | --- | --- |
-| R0 | ready for source discovery | n/a | unscored | Freeze adapter contract or defer unsupported API |
+| R0 | completed | n/a | source evidence recorded | Frozen observation contract below; approval resolution deferred |
 | D1 | accepted at 25030bc | 1/3 | 9.88; no blockers, optional repetition cleanup | PR review 5938016116; source/docs checks and CI passed |
-| O1/O2 | blocked on contract discovery | 0/3 | unscored | Coordinator freezes cohesive observation scope |
-| T2 | implementation launch prepared | 0/3 | unscored | Runs before O2 while R0 research continues |
+| O1/O2 | integrated; review 1 prepared | 0/3 | unscored | Neutral adapter + service; 72 scoped, 31 MCP checks pass |
+| T2 | accepted at f3c8dad | 1/3 | 9.60; no blockers | PR review 5938424517; 96 independent tests; optional marker-spoofing follow-up |
 | Integrated increment | pending | 0/3 | unscored | Separate whole-feature assessment |
 
 Durable per-run records: `.state/orchestration/observability-runs.md`. Create each

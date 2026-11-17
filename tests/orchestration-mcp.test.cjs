@@ -1752,3 +1752,73 @@ test("fixed transfer categories survive Unix transport and MCP without dependenc
   }
   assert.equal(f.stderr(), "");
 });
+
+
+test("actual MCP and service normalize stock observations and keep raw explicit", async (t) => {
+  const { OrchestrationService } = require("../src/orchestration/service.cjs");
+  const root = privateDir(t);
+  const calls = [];
+  const envelope = {
+    reason: "input-required",
+    state: {cursor: 12, active: true, running: true, queue: [], pendingInput: ["approval"]},
+    output: {truncated: false, records: [{type: "event", event: {
+      type: "assistant/message", seq: 12, data: {message: {content: [
+        {type: "text", text: "Waiting for user input"},
+        {type: "reasoning", text: "SYNTHETIC-REASONING-CANARY"},
+      ]}, stream: [{arguments: "SYNTHETIC-ARGS-CANARY"}]},
+    }}]},
+  };
+  const runtime = {coordinator: {
+    withRunning: async (_id, fn, {signal}) => fn({}, {ownershipToken: "synthetic-owner", signal}),
+  }};
+  const service = new OrchestrationService({stateRoot: root, getRuntime: () => runtime,
+    getModels: () => ({fault: false, providers: [{id: "p", models: [{id: "m"}]}]}),
+    runExclusive: work => work(),
+    guest: {harnessRpc: async (_driver, _options, method, args) => {
+      calls.push({method, args});
+      if (method === "session/create") return {sessionId: args.sessionId};
+      if (method === "session/wait") return envelope;
+      return {accepted: true};
+    }},
+  });
+  t.after(() => service.close());
+  const socketPath = socketIn(root);
+  const server = await startServer({socketPath, dispatch: (method, args, context) => service.dispatch(method, args, context)});
+  t.after(() => server.close());
+  const f = spawnFacade(t, socketPath);
+  await initialize(f);
+  let id = 100;
+  async function invoke(name, args) {
+    f.send(request(++id, "tools/call", {name, arguments: args}));
+    const response = JSON.parse(await f.out.next());
+    assert.equal(response.id, id);
+    assert.equal(response.error, undefined);
+    return {error: response.result.isError, value: JSON.parse(response.result.content[0].text)};
+  }
+  const delegated = await invoke("alpi_delegate", {environmentId: "test", cwd: "/home/user/workspace",
+    provider: "p", model: "m", prompt: "Synthetic task", requestId: randomUUID()});
+  assert.equal(delegated.error, false);
+  const taskId = delegated.value.taskId;
+  const compact = await invoke("alpi_wait", {taskId});
+  assert.equal(compact.error, false);
+  assert.equal(compact.value.snapshot.state, "waiting");
+  assert.equal(compact.value.snapshot.cursor, 12);
+  assert.deepEqual(compact.value.snapshot.pendingActions, [{kind: "approval", detailAvailable: false, resolution: "guest-ui"}]);
+  assert.equal(JSON.stringify(compact).includes("CANARY"), false);
+  assert.equal(calls.at(-1).args.maxMessages, 1);
+  const raw = await invoke("alpi_wait", {taskId, format: "raw", afterSeq: 12});
+  assert.deepEqual(raw.value.value, envelope);
+  assert.equal(calls.at(-1).args.maxMessages, 8);
+  assert.equal(calls.at(-1).args.afterSeq, 12);
+  const cancelled = await invoke("alpi_cancel", {taskId});
+  assert.deepEqual(cancelled.value, {taskId, requested: true, acknowledged: true, cooperative: true, processTermination: "unknown"});
+  const after = await invoke("alpi_wait", {taskId});
+  assert.equal(after.value.snapshot.state, "waiting", "acknowledgment cannot imply completion");
+  const count = calls.length;
+  service.createAdapter = () => ({capabilities: () => ({observation: false})});
+  const unsupported = await invoke("alpi_wait", {taskId});
+  assert.equal(unsupported.error, true);
+  assert.deepEqual(unsupported.value, {code: "unsupported", message: "This orchestration operation is not available yet."});
+  assert.equal(calls.length, count);
+  assert.equal(f.stderr(), "");
+});
