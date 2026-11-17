@@ -25,8 +25,12 @@ const {ArtifactInstaller}=require('./runtime/artifact-installer.cjs');
 const {diagnosticSnapshot}=require('./runtime/diagnostics.cjs');
 const {FileTransfers}=require('./runtime/file-transfers.cjs');
 const {pendingGroups}=require('./runtime/network-presentation.cjs');
+const {startBroker}=require('./orchestration/broker.cjs');
 
 const installedMode=app.isPackaged;
+// The host orchestration broker is opt-in from the explicit native startup
+// command line only. No renderer, guest or second-instance message can enable it.
+const orchestrationEnabled=process.argv.includes('--enable-orchestration');
 const stateRoot = path.join(app.getPath("appData"), "Harness Isolated",...(installedMode?['personal-v1']:[]));
 fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
 app.setPath("userData", path.join(stateRoot, "electron")); app.setName("Harness Isolated"); // Preserve existing safeStorage/Keychain identity; display branding is Alpi.
@@ -45,6 +49,8 @@ let ready;
 let installer,installationReady=!installedMode,installationBusy=false,artifactTask,artifactPicker,diagnosticExportBusy=false;
 let diagnostic = {};
 let environmentVerification = "pending";
+let orchestrationState=orchestrationEnabled?'unavailable':'disabled';
+let orchestrationSocket,orchestrationClose,orchestrationStarted=false,orchestrationStarting=false,orchestrationSealed=false,orchestrationBusy=false;
 let selectedImage = "stock-amd64";
 const imageStore = new DesktopImageStore({stateRoot,artifactRoot:path.join(__dirname,"../vendor")});
 let imageTask, imagePicker;
@@ -62,10 +68,21 @@ function networkPresentation() {
   for (const [key, until] of dismissedNotices) if (until <= now) dismissedNotices.delete(key);
   return { groups, notification: !quitting && panel !== 'network' ? groups.find(group => !dismissedNotices.has(group.key)) ?? null : null };
 }
+// Trusted local status only. Fixed English text; no socket path, token or raw
+// error is exposed unless the broker reached a ready state.
+function orchestrationSnapshot() {
+  return {
+    enabled: orchestrationEnabled,
+    state: orchestrationState,
+    ...(orchestrationState === 'ready' && orchestrationSocket ? { socketPath: orchestrationSocket } : {}),
+    ...(orchestrationState === 'unavailable' ? { detail: 'The managed runtime is not verified.' } : {}),
+    ...(orchestrationState === 'error' ? { detail: 'The orchestration broker could not be started.' } : {}),
+  };
+}
 function snapshot() {
   const environments = runtime?.coordinator.snapshot() ?? [];
   const phase = diagnostic.step === 'start' ? environments.find(item => item.id === selectedId)?.phase ?? 'starting' : diagnostic.step ?? 'working';
-  return { environmentVerification, connection:{issue:harnessIssue}, images:{...imageStore.snapshot(selectedImage),busy:Boolean(imageTask)||imageStore.state.busy}, viewer: {available: Boolean(activeId && activeId === selectedId && environment(activeId).desktop), opening: viewerOpening, kind: viewerKind, error: viewerError}, progress: busy && operationStartedAt ? { startedAt: operationStartedAt, phase } : null, networkPresentation: networkPresentation(), selectedId, activeId, busy, quitting, label, detail, panel, modelBusy, filesBusy, installation:installer?{...installer.snapshot(),ready:installationReady}:undefined, resources:runtime?.resources.snapshot(), transfers: runtime?.transfers.snapshot(), shares: runtime?.shares.snapshot(), models: catalog?.snapshot(), git: gitCatalog?.snapshot(), secrets: secretCatalog?.snapshot(), networkPolicy: policy?.snapshot(), environments: runtime?.coordinator.snapshot() ?? [] };
+  return { environmentVerification, connection:{issue:harnessIssue}, images:{...imageStore.snapshot(selectedImage),busy:Boolean(imageTask)||imageStore.state.busy}, viewer: {available: Boolean(activeId && activeId === selectedId && environment(activeId).desktop), opening: viewerOpening, kind: viewerKind, error: viewerError}, progress: busy && operationStartedAt ? { startedAt: operationStartedAt, phase } : null, networkPresentation: networkPresentation(), selectedId, activeId, busy, quitting, label, detail, panel, modelBusy, filesBusy, installation:installer?{...installer.snapshot(),ready:installationReady}:undefined, resources:runtime?.resources.snapshot(), transfers: runtime?.transfers.snapshot(), shares: runtime?.shares.snapshot(), models: catalog?.snapshot(), git: gitCatalog?.snapshot(), secrets: secretCatalog?.snapshot(), networkPolicy: policy?.snapshot(), environments: runtime?.coordinator.snapshot() ?? [], orchestration: orchestrationSnapshot() };
 }
 function publish(nextLabel, nextDetail = "") {
   if (nextLabel) { label = nextLabel; detail = nextDetail; }
@@ -265,7 +282,7 @@ function connect() {
   });
 }
 async function disconnect() {
-  if (quitting || filesBusy || installationBusy) return snapshot();
+  if (quitting || filesBusy || installationBusy || orchestrationBusy) return snapshot();
   const current = ++generation, previousTask = task;
   busy = true; publish(); controller?.abort(); removeView();
   task = (async () => {
@@ -397,6 +414,9 @@ async function importDesktopImage() {
 async function quit(exitCode = 0) {
   if (quitting) return;
   quitting = true; ++generation; controller?.abort(); removeView();
+  // No broker may be created after a quit attempt, even if verified shutdown
+  // fails and the process stays alive with its network guards.
+  orchestrationSealed = true;
   installer?.cancel(); imageStore.cancel();
   const pendingImagePicker=imagePicker;
   if(pendingImagePicker)pendingImagePicker.cancelled=true;
@@ -405,6 +425,13 @@ async function quit(exitCode = 0) {
   runtime?.transfers.cancel();
   policy?.close();
   publish("Stopping environments…");
+  // Abort admitted broker requests and close its listener before verified
+  // runtime shutdown. A close failure is bounded and must not change VM
+  // shutdown semantics; the closed state is reported either way.
+  const brokerClose = orchestrationClose;
+  orchestrationClose = undefined; orchestrationStarted = false;
+  if (orchestrationEnabled) orchestrationState = 'closed';
+  if (brokerClose) { try { await brokerClose(); } catch {} }
   try {
     // Native sheets close when the verified shutdown reaches app.quit().
     // Do not wait for user input; the cancelled ticket forbids later installation.
@@ -779,6 +806,49 @@ function initializeServices() {
   if (!gitCatalog) gitCatalog = new GitCatalog({ stateRoot, vault: catalog.vault });
   if (!secretCatalog) secretCatalog = new SecretCatalog({ stateRoot, vault: catalog.vault, environmentIds: ENVIRONMENTS.map(item => item.id) });
 }
+// Broker operations share the native lifecycle exclusion. The service already
+// admits one request at a time; this guard additionally refuses while a trusted
+// UI mutation owns the runtime or the environment is not verified.
+function orchestrationRefusal(code) {
+  const messages = { busy: 'Another operation is in progress.',
+    closing: 'Application shutdown is in progress.',
+    runtime_unavailable: 'The managed runtime is unavailable.' };
+  const error = new Error(messages[code]);
+  error.code = code;
+  return error;
+}
+async function orchestrationExclusive(work) {
+  if (quitting) throw orchestrationRefusal('closing');
+  if (!runtime || runtime.coordinator.closing) throw orchestrationRefusal('runtime_unavailable');
+  if (!installationReady || environmentVerification !== 'verified') throw orchestrationRefusal('runtime_unavailable');
+  if (orchestrationBusy || busy || filesBusy || modelBusy || installationBusy || imageTask || viewerOpening) throw orchestrationRefusal('busy');
+  orchestrationBusy = true; busy = true; operationStartedAt = Date.now();
+  try { publish(); return await work(); }
+  finally {
+    orchestrationBusy = false;
+    // Quit owns the final busy state; never overwrite a failed-shutdown reset.
+    if (!quitting) { busy = false; publish(); }
+  }
+}
+async function startOrchestration() {
+  if (!orchestrationEnabled || orchestrationSealed || orchestrationStarted || orchestrationStarting || quitting) return;
+  if (!runtime || !installationReady || environmentVerification !== 'verified') { orchestrationState = 'unavailable'; return; }
+  orchestrationStarting = true;
+  try {
+    const broker = await startBroker({ stateRoot, getRuntime: () => runtime,
+      getModels: () => catalog?.snapshot(), runExclusive: orchestrationExclusive });
+    if (quitting || orchestrationSealed) {
+      try { await broker.close(); } catch {}
+      orchestrationState = 'closed';
+      return;
+    }
+    orchestrationClose = broker.close;
+    orchestrationSocket = broker.socketPath;
+    orchestrationStarted = true;
+    orchestrationState = 'ready';
+  } catch { orchestrationState = (quitting || orchestrationSealed) ? 'closed' : 'error'; }
+  finally { orchestrationStarting = false; }
+}
 async function stopForArtifacts(){
  if(quitting)throw Error('Application shutdown is in progress.');
  await releaseView();
@@ -807,6 +877,7 @@ async function artifactAction(operation){
    if(quitting)return;
    installationReady=false;
    initializeRuntime(options);await reconcileRuntime();initializeServices();installationReady=true;
+   await startOrchestration();
    publish('Runtime ready','Choose an environment and connect. Its workspace stays inside the VM.');
   }catch{
    if(environmentVerification === 'pending')environmentVerification = 'failed';
@@ -848,7 +919,7 @@ else {
     controls.webContents.on("will-attach-webview", event => event.preventDefault());
     for (const [name, handler] of Object.entries({ connect, disconnect, 'viewer-open':showViewer, select, stop, quit, status: snapshot,
       'environment-manage':manageEnvironment, 'diagnostics-export':exportDiagnostics, 'desktop-image-switch':switchDesktopImage,
-      'desktop-image-import':importDesktopImage, 'desktop-image-cancel':()=>{if(imagePicker)imagePicker.cancelled=true;imageStore.cancel();return publish();}, panel: setPanel, "network-decision": decideNetwork, "network-revoke": revokeNetwork, "network-add": addNetworkRule, "network-mode": setNetworkMode,
+      'desktop-image-import':importDesktopImage, 'desktop-image-cancel':()=>{if(orchestrationBusy)return snapshot();if(imagePicker)imagePicker.cancelled=true;imageStore.cancel();return publish();}, panel: setPanel, "network-decision": decideNetwork, "network-revoke": revokeNetwork, "network-add": addNetworkRule, "network-mode": setNetworkMode,
       "network-group-decision": decideNetworkGroup, "network-notice-dismiss": dismissNetworkNotice,
       "network-notice-state": () => networkPresentation().notification,
       "network-notice-review": () => { setPanel('network'); showWindow(); return snapshot(); },
@@ -859,13 +930,13 @@ else {
       'git-save': input => gitAction('save', input),
       'secret-save': input => secretAction('save', input), 'secret-remove': id => secretAction('remove', id),
       "file-import": input => fileAction("import", input), "file-export": input => fileAction("export", input),
-      "file-execute": id => fileAction("execute", { id }), "file-cancel": () => { runtime?.transfers.cancel(); return publish(); },
+      "file-execute": id => fileAction("execute", { id }), "file-cancel": () => { if(orchestrationBusy)return snapshot(); runtime?.transfers.cancel(); return publish(); },
       "file-recover": recoverTransfer,
       "resources-set": setResources,
       'runtime-install':()=>artifactAction('install'),'runtime-rollback':()=>artifactAction('rollback'),'runtime-restore':()=>artifactAction('restore'),
-      'runtime-cancel':()=>{installer?.cancel();return publish();},
+      'runtime-cancel':()=>{if(orchestrationBusy)return snapshot();installer?.cancel();return publish();},
       "share-prepare": input => shareAction('prepare', input), "share-confirm": id => shareAction('confirm', { id }),
-      "share-remove": id => shareAction('remove', { id }), "share-cancel": () => { runtime?.shares.cancel(); return publish(); },
+      "share-remove": id => shareAction('remove', { id }), "share-cancel": () => { if(orchestrationBusy)return snapshot(); runtime?.shares.cancel(); return publish(); },
       "network-clear": () => { policy?.clearHistory(); return publish(); } }))
       ipcMain.handle(`isolated:${name}`, (event, ...args) => { authorize(event, name); return handler(...args); });
     imageStore.on('change',()=>publish());
@@ -893,8 +964,9 @@ else {
       initializeServices();
       if(installedMode){
        if(installer.snapshot().active&&!installer.snapshot().fault){await installer.verifyRelease(installer.snapshot().active);installationReady=true;}
-       busy=false;publish(installationReady?'Disconnected':'Runtime setup required',installationReady?'':'Use the menu bar icon → Install runtime package. Previous PoC data remains separate.');
-      }else{busy = false; publish("Disconnected");}
+       busy=false;await startOrchestration();
+       publish(installationReady?'Disconnected':'Runtime setup required',installationReady?'':'Use the menu bar icon → Install runtime package. Previous PoC data remains separate.');
+      }else{busy = false; await startOrchestration(); publish("Disconnected");}
     } catch { if(environmentVerification === "pending")environmentVerification = "failed"; busy = false; publish("Recovery required", "Saved state could not be verified. Unrecognized environments are never adopted."); }
     updateMenu();
   }).catch(() => { allowQuit = true; app.quit(); });
