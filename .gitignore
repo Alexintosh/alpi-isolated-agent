@@ -40,3 +40,7 @@ dist/
 
 !/scripts/package-dmg.cjs
 !/docs/macos-distribution.md
+
+# Public orchestration design and usage documentation.
+!/docs/alpi-orchestration-plan.md
+!/docs/alpi-orchestration.md
