@@ -460,7 +460,7 @@ test('provider credential status in Secrets labels auth-none and navigates Edit 
 });
 
 test('Git lives in Secrets, not Models: shared scope copy, no nested forms, no label-destroys-input, strict CSP', () => {
-  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'"/);
+  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'"/);
   const models = html.slice(html.indexOf('<section id="models-panel"'), html.indexOf('<section id="secrets-panel"'));
   assert(!models.includes('model-authorizations.json'));
   assert(!models.includes('Local models'));

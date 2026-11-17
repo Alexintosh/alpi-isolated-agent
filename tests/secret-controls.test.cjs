@@ -287,7 +287,7 @@ test('secrets markup keeps the reviewed scope copy, accessible controls and stri
   assert(!button.includes('title='));
   assert.match(button, /aria-label="Secrets"/);
   assert.match(button, /aria-hidden="true">Secrets/);
-  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'"/);
+  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'"/);
   const secrets = source.slice(source.indexOf('const secretMethods'), source.indexOf('window.isolated.onStatus'));
   assert(!/window\.confirm\(|localStorage|sessionStorage|dataset\.value|innerHTML\s*=\s*[^I]/.test(secrets.replace('svg.innerHTML = ICON_PATHS.key', '')));
 });
