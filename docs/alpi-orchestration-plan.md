@@ -24,7 +24,8 @@ that T3 displays a native subagent card for Harness.
   commits. It must not silently absorb substantial implementer repairs.
 - Primary implementers: OpenCode `tensorfold/DeepSeek-V4.1-Flash-1017`, explicit
   `variant=low`. Current route exposes low/high/max/none, not medium. No automatic
-  substitution or high-thinking implementation. Two local inference slots allowed.
+  substitution. Two local inference slots allowed. High-thinking implementation is
+  reserved for the final escalation attempt described below.
 - Reviewer: **GPT-6.1 Sol, reasoningEffort=high, exclusively review**. No edits,
   implementation or subdelegation. Every review/recheck is a new delegated task.
 - Freeze each reviewed slice at a commit; reviewer begins with the PR and records
@@ -38,6 +39,14 @@ that T3 displays a native subagent card for Harness.
 - Accept a slice only with an honest score **strictly greater than 9.5/10**, no
   unresolved correctness/security blockers and passing scoped checks. Final integrated
   head must independently meet the same threshold; a slice score does not transfer.
+- Cap each component and the final integrated feature at **three reviews total**:
+  initial review, first repair/review, final repair/review. Never reset a counter
+  by renaming or splitting an unsuccessful task. If the first repair improves the
+  score by less than 0.2 points or leaves the same substantive finding unresolved,
+  raise implementer reasoning for the final repair: medium if exposed by the route,
+  otherwise the verified high setting. Record that change and its rationale.
+  If the third review remains at or below 9.5 or has blockers, stop that loop,
+  preserve the work and report the blockers; do not declare it ready.
 - Do not ask the reviewer to increase scores to satisfy a target. It must explain
   deductions, missing evidence and why remaining limitations are acceptable. If a
   material limitation prevents >9.5, implement the necessary change or report the
