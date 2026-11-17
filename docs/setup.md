@@ -123,6 +123,11 @@ Synthetic catalog, renderer, lifecycle and relay tests do not establish live acc
 
 ### Existing installations and data
 
+For host coding-agent delegation, see [Alpi orchestration](alpi-orchestration.md).
+It documents the explicit `--enable-orchestration` startup flag, private socket,
+stdio MCP configuration and guest task workflow. The MCP client does not start
+Alpi or choose a profile automatically.
+
 Alpi retains the original internal application identifier, safeStorage name and directories to avoid silently migrating VM disks or changing Keychain identity:
 
 - Packaged state: `~/Library/Application Support/Harness Isolated/personal-v1`.

@@ -87,6 +87,20 @@ Treat exported code, archives and documents as untrusted. Opening them in a host
 
 ### Identity, persistence and lifecycle
 
+The optional [host orchestration broker](docs/alpi-orchestration.md) uses a private
+same-user Unix socket and a fixed set of MCP operations. It starts only with an
+explicit native launch flag after runtime verification. It grants the trusted
+host orchestrator guest execution and explicit transfers through existing Alpi
+controls, including guest root; it does not grant guest content host shell, file,
+credential or network-approval APIs. The socket must never be shared into a guest.
+Same-user host compromise remains outside this boundary.
+
+Task request IDs prevent automatic replay of ambiguous submissions. Guest messages
+and exported files remain untrusted. Cancelling a request stops observation;
+Harness cancellation and helper process cleanup are cooperative. Neither proves
+that an untrusted guest stopped. Verified whole-VM stop retains existing ownership
+checks and guards after a failed shutdown.
+
 Persisted registry entries are intent, not proof of live ownership. Drivers verify engine-specific ownership markers, configuration and launch identity before controlling an environment. Unknown resources are refused; there is no fallback to a personal host Harness backend.
 
 Restart retains guest data and stops active jobs. Recreation requires a native confirmation, stops the guest, revokes shares and removes the selected instance. A durable pending-reset record blocks ordinary startup until explicit recovery completes. Other environments, host credentials and exported files are preserved. Saved network rules and the network mode also survive recreation; review them separately when beginning a less-trusted task.

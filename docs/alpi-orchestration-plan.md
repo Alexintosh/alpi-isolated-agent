@@ -261,7 +261,14 @@ its own exact-head record. No two writers own the same file, including tests.
 
 ## Evidence and limits
 
-The existing transport draft reports 25 passing synthetic Unix tests. It has not
-passed independent review or live VM acceptance. Partial guest code is unaccepted.
-No score is assigned by the coordinator. Completion means the integrated behavior,
-required evidence, CI and reviewer threshold are all met, not merely that code exists.
+At reviewed head `44109b7366a565a9a8c38a19544f5476ded90fa3`, the transport
+component passed review at 9.60 (round 2/3), guest adapter at 9.65 (round 2/3),
+and MCP facade at 9.68 (final round 3/3). The MCP reviewer independently ran
+29 focused and 410 portable tests; hosted CI passed. These are component reviews,
+not GitHub approvals or whole-feature acceptance. Exact-SHA reports are on PR #3.
+
+The complete service and native integration require repairs after their first
+reviews (8.78 and 9.35 respectively). Live packaged VM/inference acceptance and
+the final integrated review remain outstanding. No score is assigned by the
+coordinator. Completion requires integrated behavior, live evidence, CI and the
+reviewer threshold; code existence and passing synthetic tests are insufficient.

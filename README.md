@@ -113,6 +113,11 @@ Closing the window leaves the environment running with a menu-bar indicator. **D
 
 Start with [AGENTS.md](AGENTS.md) and the [setup guide](docs/setup.md). They cover the repository map, safe test commands, runtime manifests and the boundaries that changes must preserve. No model key is needed for unit tests.
 
+Source builds also provide an opt-in [Alpi MCP integration](docs/alpi-orchestration.md)
+and [delegation skill](skills/alpi/SKILL.md). A trusted host coding agent can assign
+work inside the VM, verify it with guest commands and export results for review.
+Enable the broker explicitly; guest agents receive no host tool access.
+
 Security bugs belong in a [private vulnerability report](https://github.com/Alexintosh/alpi-isolated-agent/security/advisories/new), not a public issue containing credentials or private logs. Other reproducible bugs and proposals are welcome in [Issues](https://github.com/Alexintosh/alpi-isolated-agent/issues).
 
 ## License and acknowledgments
