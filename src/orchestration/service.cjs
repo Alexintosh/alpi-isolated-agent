@@ -1,0 +1,1216 @@
+// Trusted host orchestration service. It dispatches a fixed set of validated
+// tool calls into the existing protected runtime. It owns no runtime, model
+// catalog, credential or VM driver: those are injected by the main process.
+// Guest output is untrusted data; task records are host intent metadata, never
+// proof that guest work ran or succeeded.
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const { randomUUID, createHash } = require("node:crypto");
+const { writeJson } = require("../runtime/atomic-json.cjs");
+const { validateCall } = require("./tools.cjs");
+const { validateObservation, validateCancellation } = require("./observation.cjs");
+const { createHarnessAdapter } = require("./harness-adapter.cjs");
+
+const MAX_TASKS = 256;
+const MAX_REQUESTS = 64;
+// The caps above bound the journal; 8 MiB leaves room for the pretty-printed
+// worst case (256 tasks with 64 requests each and maximum-length paths).
+const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
+
+const TASK_STATES = new Set(["preparing", "submitted", "uncertain"]);
+const REQUEST_STATES = new Set(["preparing", "submitted", "uncertain"]);
+const TASK_KEYS = ["taskId", "environmentId", "sessionId", "cwd", "provider", "model",
+  "ownershipToken", "createdAt", "updatedAt", "state", "requests"];
+const REQUEST_KEYS = ["requestId", "fingerprint", "status", "createdAt", "updatedAt"];
+
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const ENVIRONMENT = /^[a-z0-9-]+$/;
+const FINGERPRINT = /^[a-f0-9]{64}$/;
+const CONTROL = /[\x00-\x1f\x7f]/;
+
+const MESSAGES = Object.freeze({
+  invalid_arguments: "Invalid orchestration request.",
+  unknown_tool: "Unknown orchestration tool.",
+  unsupported: "This orchestration operation is not available yet.",
+  busy: "Another orchestration operation is in progress.",
+  closing: "The orchestration service is closing.",
+  aborted: "The orchestration operation was cancelled.",
+  runtime_unavailable: "The managed runtime is unavailable.",
+  runtime_replaced: "The managed runtime was replaced during the operation.",
+  model_catalog_unavailable: "The model catalog is unavailable.",
+  model_not_configured: "The requested provider or model is not configured.",
+  reasoning_effort_invalid: "The requested reasoning effort is not supported.",
+  journal_unavailable: "The orchestration task journal is unavailable. Explicit recovery is required.",
+  transfer_unavailable: "The transfer service is unavailable. Explicit recovery is required.",
+  transfer_path_refused: "The selected path is not permitted for transfer.",
+  transfer_collision: "The transfer destination already exists.",
+  transfer_preview_failed: "Preview unavailable. Check paths, permissions and file types.",
+  capacity: "The orchestration task journal capacity has been reached.",
+  task_not_found: "The orchestration task was not found.",
+  request_conflict: "The request ID was already used for a different request.",
+  session_unusable: "The recorded session setup is not usable for this operation.",
+  session_mismatch: "The guest returned a different session than requested.",
+  ownership_mismatch: "The recorded task belongs to a different guest ownership identity.",
+  guest_failed: "The guest operation failed.",
+  operation_failed: "The orchestration operation failed.",
+});
+
+function fixed(code) {
+  const error = new Error(MESSAGES[code]);
+  error.code = code;
+  return error;
+}
+
+// Dependency errors are untrusted objects. A matching fixed code identifies the
+// category, but its message, stack, cause and extra properties are never reused.
+function knownServiceError(error) {
+  let code;
+  try {
+    code = error && typeof error.code === "string" ? error.code : undefined;
+  } catch {
+    return null;
+  }
+  if (code === undefined || !Object.hasOwn(MESSAGES, code)) return null;
+  return fixed(code);
+}
+
+function isAbortError(error) {
+  return Boolean(error && (error.name === "AbortError" || error.code === "ABORT_ERR"));
+}
+
+function isPlainObject(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value, keys) {
+  return isPlainObject(value)
+    && Object.keys(value).length === keys.length
+    && keys.every(key => Object.hasOwn(value, key));
+}
+
+function text(value, maximum) {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= maximum
+    && !CONTROL.test(value);
+}
+
+function timestamp(value) {
+  return text(value, 64) && !Number.isNaN(Date.parse(value));
+}
+
+function now() {
+  return new Date().toISOString();
+}
+
+function fingerprint(parts) {
+  return createHash("sha256").update(JSON.stringify(parts), "utf8").digest("hex");
+}
+
+// Read the journal as a bounded regular file. O_NONBLOCK keeps a hostile FIFO
+// from blocking, lstat rejects symlinks and other non-files, and the read loop
+// stops one byte past the limit.
+function readJournal(file) {
+  let info;
+  try {
+    info = fs.lstatSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!info.isFile()) throw new Error("invalid journal file");
+  const flags = fs.constants.O_RDONLY
+    | (fs.constants.O_NONBLOCK ?? 0)
+    | (fs.constants.O_NOFOLLOW ?? 0);
+  const descriptor = fs.openSync(file, flags);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > MAX_JOURNAL_BYTES) throw new Error("invalid journal file");
+    const buffer = Buffer.alloc(MAX_JOURNAL_BYTES + 1);
+    let total = 0;
+    while (total <= MAX_JOURNAL_BYTES) {
+      const read = fs.readSync(descriptor, buffer, total, buffer.length - total, null);
+      if (read === 0) break;
+      total += read;
+    }
+    if (total > MAX_JOURNAL_BYTES) throw new Error("invalid journal file");
+    return buffer.subarray(0, total).toString("utf8");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function validateRequest(value) {
+  if (!exactKeys(value, REQUEST_KEYS)) throw new Error("invalid request record");
+  if (!UUID.test(value.requestId) || !FINGERPRINT.test(value.fingerprint)
+    || !REQUEST_STATES.has(value.status)
+    || !timestamp(value.createdAt) || !timestamp(value.updatedAt)) {
+    throw new Error("invalid request record");
+  }
+  return {
+    requestId: value.requestId,
+    fingerprint: value.fingerprint,
+    status: value.status,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
+}
+
+// Shared field invariants for both the journal loader and write-time validation.
+// Callers persist only records that this function accepts, so accepted metadata
+// can never produce a journal the loader refuses after restart.
+function validateTaskFields(value) {
+  if (!UUID.test(value.taskId) || !UUID.test(value.sessionId)
+    || !text(value.environmentId, 64) || !ENVIRONMENT.test(value.environmentId)
+    || !text(value.cwd, 4096) || !value.cwd.startsWith("/")
+    || !text(value.provider, 128) || !text(value.model, 256)
+    || !timestamp(value.createdAt) || !timestamp(value.updatedAt)
+    || !TASK_STATES.has(value.state)
+    || !Array.isArray(value.requests)
+    || value.requests.length < 1 || value.requests.length > MAX_REQUESTS) {
+    throw new Error("invalid task record");
+  }
+  if (value.reasoningEffort !== undefined && !text(value.reasoningEffort, 64)) {
+    throw new Error("invalid task record");
+  }
+  return value.requests.map(validateRequest);
+}
+
+function validateTask(value) {
+  const allowed = new Set([...TASK_KEYS, "reasoningEffort"]);
+  if (!isPlainObject(value)
+    || Object.keys(value).some(key => !allowed.has(key))
+    || TASK_KEYS.some(key => !Object.hasOwn(value, key))) {
+    throw new Error("invalid task record");
+  }
+  const requests = validateTaskFields(value);
+  if (!text(value.ownershipToken, 256)) throw new Error("invalid task record");
+  // A task is created by one delegate call whose requestId becomes its taskId.
+  // Its first request state always mirrors the task setup state.
+  if (requests[0].requestId !== value.taskId
+    || requests[0].status !== value.state) {
+    throw new Error("inconsistent task record");
+  }
+  return {
+    taskId: value.taskId,
+    environmentId: value.environmentId,
+    sessionId: value.sessionId,
+    cwd: value.cwd,
+    provider: value.provider,
+    model: value.model,
+    ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }),
+    ownershipToken: value.ownershipToken,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    state: value.state,
+    requests,
+  };
+}
+
+// Reject metadata that the loader would refuse before reserving a task identity,
+// acquiring the runtime or touching the guest. Caller mistakes are a fixed
+// invalid-argument error, never a durable record that poisons later recovery.
+function assertPersistedFields(value) {
+  try {
+    validateTaskFields(value);
+  } catch {
+    throw fixed("invalid_arguments");
+  }
+}
+
+function persistedTask(value) {
+  try {
+    return validateTask(value);
+  } catch {
+    throw fixed("invalid_arguments");
+  }
+}
+
+function validateJournal(value) {
+  if (!exactKeys(value, ["version", "tasks"]) || value.version !== 1
+    || !Array.isArray(value.tasks) || value.tasks.length > MAX_TASKS) {
+    throw new Error("invalid task journal");
+  }
+  const taskIds = new Set();
+  const sessionIds = new Set();
+  const requestIds = new Set();
+  return value.tasks.map(item => {
+    const task = validateTask(item);
+    if (taskIds.has(task.taskId) || sessionIds.has(task.sessionId)) {
+      throw new Error("duplicate task identity");
+    }
+    taskIds.add(task.taskId);
+    sessionIds.add(task.sessionId);
+    for (const request of task.requests) {
+      if (requestIds.has(request.requestId)) throw new Error("duplicate request identity");
+      requestIds.add(request.requestId);
+    }
+    return task;
+  });
+}
+
+function normalizePreparing(tasks) {
+  let changed = false;
+  const stamp = now();
+  const next = tasks.map(task => {
+    const state = task.state === "preparing" ? "uncertain" : task.state;
+    const requests = task.requests.map(request => request.status === "preparing"
+      ? { ...request, status: "uncertain", updatedAt: stamp }
+      : request);
+    if (state !== task.state || requests.some((request, index) =>
+      request.status !== task.requests[index].status)) {
+      changed = true;
+      return { ...task, state, updatedAt: stamp, requests };
+    }
+    return task;
+  });
+  return changed ? next : null;
+}
+
+function pickEnvironment(value) {
+  if (!value) return null;
+  return {
+    id: value.id,
+    name: value.name,
+    kind: value.kind,
+    phase: value.phase,
+    busy: value.busy,
+    network: value.network,
+    prepared: value.prepared,
+  };
+}
+
+// Delegate receipts and follow-up receipts share one construction path; the
+// delegate receipt is simply the task's first request.
+function requestReceipt(task, request) {
+  return {
+    taskId: task.taskId,
+    environmentId: task.environmentId,
+    sessionId: task.sessionId,
+    state: task.state,
+    provider: task.provider,
+    model: task.model,
+    ...(task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort }),
+    requestId: request.requestId,
+    requestStatus: request.status,
+  };
+}
+
+// alpi_tasks is a bounded recovery index, not a transcript. One latest-request
+// pointer per task keeps every handle recoverable at journal capacity while
+// omitting cwd, full request history, prompts, ownership tokens and fingerprints.
+function taskSummary(task) {
+  const last = task.requests[task.requests.length - 1];
+  return {
+    taskId: task.taskId,
+    environmentId: task.environmentId,
+    sessionId: task.sessionId,
+    state: task.state,
+    provider: task.provider,
+    model: task.model,
+    ...(task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort }),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    requestCount: task.requests.length,
+    lastRequest: {
+      requestId: last.requestId,
+      status: last.status,
+      createdAt: last.createdAt,
+      updatedAt: last.updatedAt,
+    },
+  };
+}
+
+// file-stream.py nests the verified source basename as one directory entry in
+// the destination container. A receipt's contentRoot must therefore be exactly
+// one valid path component below the reported container: not the container
+// itself, not a deeper path, and never a caller- or guest-supplied string.
+function transferContentRoot(destination, contentRoot) {
+  if (typeof contentRoot !== "string" || contentRoot.length > 8192 || CONTROL.test(contentRoot)) return false;
+  if (!contentRoot.startsWith(destination + "/")) return false;
+  const name = contentRoot.slice(destination.length + 1);
+  return text(name, 255)
+    && name !== "." && name !== ".."
+    && !name.includes("/") && !name.includes("\\");
+}
+
+function transferPreview(value, direction) {
+  if (!isPlainObject(value)
+    || typeof value.id !== "string" || !UUID.test(value.id)
+    || value.direction !== direction
+    || !text(value.destination, 8192) || !value.destination.startsWith("/")
+    || !Number.isSafeInteger(value.entries) || value.entries < 1
+    || !Number.isSafeInteger(value.bytes) || value.bytes < 0
+    || typeof value.collision !== "boolean"
+    || !transferContentRoot(value.destination, value.contentRoot)) {
+    return null;
+  }
+  return value;
+}
+
+// Only verified transfer outcome metadata is returned. Journal records, source
+// identity, transactions and internal transfer fields stay on the host.
+function transferReceipt(direction, preview) {
+  return {
+    direction,
+    destination: preview.destination,
+    contentRoot: preview.contentRoot,
+    state: "complete",
+    entries: preview.entries,
+    bytes: preview.bytes,
+    ...(direction === "export" ? { untrusted: true } : {}),
+  };
+}
+
+class OrchestrationService {
+  constructor({ stateRoot, getRuntime, getModels, runExclusive, guest, createAdapter } = {}) {
+    if (typeof stateRoot !== "string" || !stateRoot
+      || typeof getRuntime !== "function" || typeof getModels !== "function"
+      || typeof runExclusive !== "function"
+      || (createAdapter !== undefined && typeof createAdapter !== "function")) {
+      throw new Error("Invalid orchestration service dependencies.");
+    }
+    this.file = path.join(stateRoot, "orchestration-tasks.json");
+    this.getRuntime = getRuntime;
+    this.getModels = getModels;
+    this.runExclusive = runExclusive;
+    this.guest = guest ?? require("./guest.cjs");
+    // A factory, never a persisted instance: the adapter is created inside the
+    // verified withRunning callback with an RPC closure bound to that attempt.
+    this.createAdapter = createAdapter ?? createHarnessAdapter;
+    this.tasks = [];
+    this.fault = false;
+    this.busy = false;
+    this.closed = false;
+    this.controllers = new Set();
+    this.loadJournal();
+  }
+
+  loadJournal() {
+    let raw;
+    try {
+      raw = readJournal(this.file);
+    } catch {
+      this.fault = true;
+      return;
+    }
+    if (raw === null) return;
+    let value;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      this.fault = true;
+      return;
+    }
+    try {
+      this.tasks = validateJournal(value);
+    } catch {
+      this.fault = true;
+      return;
+    }
+    // An interrupted submission is uncertain, never replayed. Persist the
+    // downgrade best effort; a failed write latches the journal fault.
+    const normalized = normalizePreparing(this.tasks);
+    if (normalized === null) return;
+    this.tasks = normalized;
+    try {
+      writeJson(this.file, { version: 1, tasks: normalized });
+    } catch {
+      this.fault = true;
+    }
+  }
+
+  runtime() {
+    let runtime;
+    try {
+      runtime = this.getRuntime();
+    } catch {
+      throw fixed("runtime_unavailable");
+    }
+    if (!runtime || typeof runtime !== "object"
+      || !runtime.coordinator || typeof runtime.coordinator !== "object") {
+      throw fixed("runtime_unavailable");
+    }
+    return runtime;
+  }
+
+  assertActive(runtime, signal) {
+    if (this.closed) throw fixed("closing");
+    if (signal && signal.aborted) throw fixed("aborted");
+    let current;
+    try {
+      current = this.getRuntime();
+    } catch {
+      throw fixed("runtime_unavailable");
+    }
+    if (current !== runtime) throw fixed("runtime_replaced");
+  }
+
+  async coordinatorCall(runtime, work) {
+    try {
+      return await work();
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error)) throw fixed("aborted");
+      throw fixed("runtime_unavailable");
+    }
+  }
+
+  async guestCall(work) {
+    try {
+      return await work();
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || (error && error.code === "guest-aborted")) {
+        throw fixed("aborted");
+      }
+      throw fixed("guest_failed");
+    }
+  }
+
+  // Adapter dependencies are untrusted too. A recognised fixed code keeps its
+  // category; everything else collapses to guest_failed with no cause, message,
+  // stack or extra properties carried outward.
+  adapterError(error) {
+    const known = knownServiceError(error);
+    if (known) return known;
+    if (isAbortError(error)) return fixed("aborted");
+    return fixed("guest_failed");
+  }
+
+  async adapterCall(work) {
+    try {
+      return await work();
+    } catch (error) {
+      throw this.adapterError(error);
+    }
+  }
+
+  // Capability absence is explicit: it fails unsupported before any optional
+  // method is invoked, and never falls back to a guessed RPC or backend.
+  async adapterCapabilities(adapter) {
+    if (!adapter || typeof adapter !== "object"
+      || typeof adapter.capabilities !== "function") {
+      throw fixed("unsupported");
+    }
+    const value = await this.adapterCall(() => adapter.capabilities());
+    if (!isPlainObject(value)) throw fixed("unsupported");
+    return value;
+  }
+
+  modelView() {
+    let snapshot;
+    try {
+      snapshot = this.getModels();
+    } catch {
+      return { fault: true, selected: null, providers: [] };
+    }
+    if (!isPlainObject(snapshot) || snapshot.fault === true) {
+      return { fault: true, selected: null, providers: [] };
+    }
+    const providers = Array.isArray(snapshot.providers)
+      ? snapshot.providers.filter(provider => isPlainObject(provider) && text(provider.id, 128))
+        .map(provider => ({
+          id: provider.id,
+          models: Array.isArray(provider.models)
+            ? provider.models.filter(model => isPlainObject(model) && text(model.id, 256))
+              .map(model => ({ id: model.id }))
+            : [],
+        }))
+      : [];
+    let selected = null;
+    const candidate = snapshot.selected;
+    if (isPlainObject(candidate) && text(candidate.provider, 128) && text(candidate.model, 256)) {
+      const provider = providers.find(item => item.id === candidate.provider);
+      const model = provider && provider.models.find(item => item.id === candidate.model);
+      if (model) {
+        selected = { provider: candidate.provider, model: candidate.model };
+        const sourceProvider = snapshot.providers.find(item =>
+          isPlainObject(item) && item.id === candidate.provider);
+        const sourceModel = sourceProvider && Array.isArray(sourceProvider.models)
+          ? sourceProvider.models.find(item => isPlainObject(item) && item.id === candidate.model)
+          : undefined;
+        if (sourceModel && text(candidate.reasoningEffort, 64)) {
+          const efforts = sourceModel.reasoningEfforts;
+          if (!isPlainObject(efforts) || Object.hasOwn(efforts, candidate.reasoningEffort)) {
+            selected.reasoningEffort = candidate.reasoningEffort;
+          }
+        }
+      }
+    }
+    return { fault: false, selected, providers };
+  }
+
+  requireModel(providerId, modelId, effort) {
+    let snapshot;
+    try {
+      snapshot = this.getModels();
+    } catch {
+      throw fixed("model_catalog_unavailable");
+    }
+    if (!isPlainObject(snapshot) || snapshot.fault === true
+      || !Array.isArray(snapshot.providers)) {
+      throw fixed("model_catalog_unavailable");
+    }
+    const provider = snapshot.providers.find(item => isPlainObject(item) && item.id === providerId);
+    const model = provider && Array.isArray(provider.models)
+      ? provider.models.find(item => isPlainObject(item) && item.id === modelId)
+      : undefined;
+    if (!model) throw fixed("model_not_configured");
+    if (effort !== undefined) {
+      const efforts = model.reasoningEfforts;
+      if (isPlainObject(efforts) && !Object.hasOwn(efforts, effort)) {
+        throw fixed("reasoning_effort_invalid");
+      }
+    }
+    return model;
+  }
+
+  status() {
+    if (this.closed) throw fixed("closing");
+    const runtime = this.runtime();
+    let snapshot;
+    try {
+      snapshot = runtime.coordinator.snapshot();
+    } catch {
+      throw fixed("runtime_unavailable");
+    }
+    return {
+      environments: Array.isArray(snapshot) ? snapshot.map(pickEnvironment) : [],
+      models: this.modelView(),
+    };
+  }
+
+  tasksSnapshot() {
+    if (this.closed) throw fixed("closing");
+    if (this.fault) return { fault: true, tasks: [] };
+    return { fault: false, tasks: this.tasks.map(taskSummary) };
+  }
+
+  task(taskId) {
+    return this.tasks.find(task => task.taskId === taskId);
+  }
+
+  findRequest(requestId) {
+    for (const task of this.tasks) {
+      const request = task.requests.find(item => item.requestId === requestId);
+      if (request) return { task, request };
+    }
+    return null;
+  }
+
+  replaceTask(next) {
+    return this.tasks.map(task => task.taskId === next.taskId ? next : task);
+  }
+
+  publish(nextTasks) {
+    const next = { version: 1, tasks: nextTasks };
+    const serialized = `${JSON.stringify(next, null, 2)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > MAX_JOURNAL_BYTES) {
+      throw fixed("capacity");
+    }
+    try {
+      writeJson(this.file, next);
+    } catch {
+      // A rename may have succeeded before a directory sync failed. Never
+      // reset or rewrite the file; mutations stay blocked until restart.
+      this.fault = true;
+      throw fixed("journal_unavailable");
+    }
+    this.tasks = nextTasks;
+  }
+
+  commit(nextTasks, runtime, signal) {
+    this.assertActive(runtime, signal);
+    this.publish(nextTasks);
+  }
+
+  // Best-effort downgrade after an ambiguous RPC or abort. Never downgrade a
+  // submitted request, never write after shutdown or runtime replacement.
+  markUncertain(taskId, runtime) {
+    if (this.fault || this.closed) return;
+    try {
+      let current;
+      try { current = this.getRuntime(); } catch { return; }
+      if (current !== runtime) return;
+      const task = this.task(taskId);
+      if (!task) return;
+      const stamp = now();
+      const state = task.state === "preparing" ? "uncertain" : task.state;
+      const requests = task.requests.map(request => request.status === "preparing"
+        ? { ...request, status: "uncertain", updatedAt: stamp }
+        : request);
+      if (state === task.state && requests.every((request, index) =>
+        request.status === task.requests[index].status)) return;
+      this.publish(this.replaceTask({ ...task, state, updatedAt: stamp, requests }));
+    } catch {
+      // The original safe error remains the outward result; the journal is
+      // either latched faulted or the runtime was replaced.
+    }
+  }
+
+  async dispatch(name, args, { signal } = {}) {
+    if (this.closed) throw fixed("closing");
+    let call;
+    try {
+      call = validateCall(name, args);
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      throw fixed("invalid_arguments");
+    }
+    if (name === "alpi_status") return this.status();
+    if (name === "alpi_tasks") return this.tasksSnapshot();
+    if (signal !== undefined
+      && (!signal || typeof signal.aborted !== "boolean"
+        || typeof signal.addEventListener !== "function")) {
+      throw fixed("invalid_arguments");
+    }
+    // A caller that is already aborted must not admit, preview or cancel work.
+    if (signal && signal.aborted) throw fixed("aborted");
+    if (this.busy) throw fixed("busy");
+
+    this.busy = true;
+    const controller = new AbortController();
+    this.controllers.add(controller);
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    try {
+      return await this.runExclusive(() => this.execute(name, call, combined));
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error)) throw fixed("aborted");
+      throw fixed("operation_failed");
+    } finally {
+      this.controllers.delete(controller);
+      this.busy = false;
+    }
+  }
+
+  async execute(name, args, signal) {
+    switch (name) {
+      case "alpi_start": return this.start(args, signal);
+      case "alpi_stop": return this.stop(args, signal);
+      case "alpi_exec": return this.exec(args, signal);
+      case "alpi_delegate": return this.delegate(args, signal);
+      case "alpi_send": return this.send(args, signal);
+      case "alpi_wait": return this.wait(args, signal);
+      case "alpi_cancel": return this.cancel(args, signal);
+      case "alpi_import": return this.transfer("import", args, signal);
+      case "alpi_export": return this.transfer("export", args, signal);
+      default: throw fixed("unsupported");
+    }
+  }
+
+  environmentFrom(snapshot, environmentId) {
+    const list = Array.isArray(snapshot) ? snapshot : [];
+    return pickEnvironment(list.find(item => item && item.id === environmentId));
+  }
+
+  async start(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    const snapshot = await this.coordinatorCall(runtime, () =>
+      runtime.coordinator.start(args.environmentId, { signal }));
+    this.assertActive(runtime, signal);
+    return { environment: this.environmentFrom(snapshot, args.environmentId) };
+  }
+
+  async stop(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    const snapshot = await this.coordinatorCall(runtime, () =>
+      runtime.coordinator.stop(args.environmentId, { signal }));
+    this.assertActive(runtime, signal);
+    return { environment: this.environmentFrom(snapshot, args.environmentId) };
+  }
+
+  async exec(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    return this.coordinatorCall(runtime, () =>
+      runtime.coordinator.withRunning(args.environmentId, async (driver, options) => {
+        this.assertActive(runtime, signal);
+        const request = { command: args.command };
+        if (args.cwd !== undefined) request.cwd = args.cwd;
+        if (args.root !== undefined) request.root = args.root;
+        if (args.timeoutMs !== undefined) request.timeoutMs = args.timeoutMs;
+        const result = await this.guestCall(() => this.guest.executeGuest(
+          driver,
+          { ownershipToken: options.ownershipToken, signal: options.signal },
+          request,
+        ));
+        this.assertActive(runtime, signal);
+        return result;
+      }, { signal }));
+  }
+
+  async delegate(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    if (this.fault) throw fixed("journal_unavailable");
+
+    const digest = fingerprint(["delegate", args.environmentId, args.cwd, args.prompt,
+      args.provider, args.model, args.reasoningEffort ?? null]);
+    const existingTask = this.task(args.requestId);
+    if (existingTask) {
+      if (existingTask.requests[0].fingerprint !== digest) throw fixed("request_conflict");
+      return requestReceipt(existingTask, existingTask.requests[0]);
+    }
+    if (this.findRequest(args.requestId)) throw fixed("request_conflict");
+
+    const sessionId = randomUUID();
+    const stamp = now();
+    const candidate = {
+      taskId: args.requestId,
+      environmentId: args.environmentId,
+      sessionId,
+      cwd: args.cwd,
+      provider: args.provider,
+      model: args.model,
+      ...(args.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
+      createdAt: stamp,
+      updatedAt: stamp,
+      state: "preparing",
+      requests: [{
+        requestId: args.requestId,
+        fingerprint: digest,
+        status: "preparing",
+        createdAt: stamp,
+        updatedAt: stamp,
+      }],
+    };
+    // Validate the metadata that would be persisted before reserving identity,
+    // entering the runtime or calling the guest. A journal the loader would
+    // refuse must never be published in the first place.
+    assertPersistedFields(candidate);
+    this.requireModel(args.provider, args.model, args.reasoningEffort);
+    if (this.tasks.length >= MAX_TASKS) throw fixed("capacity");
+
+    return this.coordinatorCall(runtime, () =>
+      runtime.coordinator.withRunning(args.environmentId, async (driver, options) => {
+        this.assertActive(runtime, signal);
+        const ownershipToken = options.ownershipToken;
+        if (!text(ownershipToken, 256)) throw fixed("runtime_unavailable");
+        const task = persistedTask({ ...candidate, ownershipToken });
+        // Record intent and identity before the first guest mutation.
+        this.commit([...this.tasks, task], runtime, signal);
+
+        this.assertActive(runtime, signal);
+        const created = await this.guestCall(() => this.guest.harnessRpc(
+          driver,
+          { ownershipToken, signal: options.signal },
+          "session/create",
+          { cwd: args.cwd, sessionId },
+        ));
+        this.assertActive(runtime, signal);
+        if (!isPlainObject(created) || created.sessionId !== sessionId) {
+          this.markUncertain(task.taskId, runtime);
+          throw fixed("session_mismatch");
+        }
+
+        this.assertActive(runtime, signal);
+        await this.guestCall(() => this.guest.harnessRpc(
+          driver,
+          { ownershipToken, signal: options.signal },
+          "session/selectModel",
+          {
+            sessionId,
+            provider: args.provider,
+            model: args.model,
+            ...(args.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
+          },
+        ));
+        this.assertActive(runtime, signal);
+
+        await this.guestCall(() => this.guest.harnessRpc(
+          driver,
+          { ownershipToken, signal: options.signal },
+          "session/prompt",
+          {
+            sessionId,
+            requestId: args.requestId,
+            mode: "queue",
+            content: [{ type: "text", text: args.prompt }],
+          },
+        ));
+        this.assertActive(runtime, signal);
+
+        const submittedAt = now();
+        const submitted = persistedTask({
+          ...task,
+          state: "submitted",
+          updatedAt: submittedAt,
+          requests: [{ ...task.requests[0], status: "submitted", updatedAt: submittedAt }],
+        });
+        this.commit(this.replaceTask(submitted), runtime, signal);
+        return requestReceipt(submitted, submitted.requests[0]);
+      }, { signal }))
+      .catch(error => {
+        // An RPC failure or abort leaves the persisted preparing record. Record
+        // uncertainty best effort; never resubmit on retry.
+        const task = this.task(args.requestId);
+        if (task && task.state === "preparing") this.markUncertain(task.taskId, runtime);
+        throw error;
+      });
+  }
+
+  async send(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    if (this.fault) throw fixed("journal_unavailable");
+    const task = this.task(args.taskId);
+    if (!task) throw fixed("task_not_found");
+
+    const mode = args.mode ?? "queue";
+    const digest = fingerprint(["send", args.taskId, args.prompt, mode]);
+    const existing = this.findRequest(args.requestId);
+    if (existing) {
+      if (existing.task.taskId === args.taskId && existing.request.fingerprint === digest) {
+        return requestReceipt(existing.task, existing.request);
+      }
+      throw fixed("request_conflict");
+    }
+    if (task.state !== "submitted") throw fixed("session_unusable");
+    if (task.requests.length >= MAX_REQUESTS) throw fixed("capacity");
+
+    return this.coordinatorCall(runtime, () =>
+      runtime.coordinator.withRunning(task.environmentId, async (driver, options) => {
+        this.assertActive(runtime, signal);
+        if (options.ownershipToken !== task.ownershipToken) throw fixed("ownership_mismatch");
+        const stamp = now();
+        const request = {
+          requestId: args.requestId,
+          fingerprint: digest,
+          status: "preparing",
+          createdAt: stamp,
+          updatedAt: stamp,
+        };
+        // Reserve the request identity before the prompt RPC. The reserved
+        // record is validated with the same invariants the loader applies.
+        this.commit(this.replaceTask(persistedTask({
+          ...task,
+          updatedAt: stamp,
+          requests: [...task.requests, request],
+        })), runtime, signal);
+
+        this.assertActive(runtime, signal);
+        await this.guestCall(() => this.guest.harnessRpc(
+          driver,
+          { ownershipToken: task.ownershipToken, signal: options.signal },
+          "session/prompt",
+          {
+            sessionId: task.sessionId,
+            requestId: args.requestId,
+            mode,
+            content: [{ type: "text", text: args.prompt }],
+          },
+        ));
+        this.assertActive(runtime, signal);
+
+        const submittedAt = now();
+        const submittedRequest = { ...request, status: "submitted", updatedAt: submittedAt };
+        const submittedTask = persistedTask({
+          ...task,
+          updatedAt: submittedAt,
+          requests: [...task.requests, submittedRequest],
+        });
+        this.commit(this.replaceTask(submittedTask), runtime, signal);
+        return requestReceipt(submittedTask, submittedRequest);
+      }, { signal }))
+      .catch(error => {
+        const current = this.task(args.taskId);
+        if (current) this.markUncertain(current.taskId, runtime);
+        throw error;
+      });
+  }
+
+  // Build the adapter only inside the ownership-verified runtime callback. The
+  // RPC closure captures this attempt's driver/options; nothing is persisted.
+  async observationAdapter(task, driver, options) {
+    const rpc = (method, rpcArgs) => this.guestCall(() => this.guest.harnessRpc(
+      driver,
+      { ownershipToken: task.ownershipToken, signal: options.signal },
+      method,
+      rpcArgs,
+    ));
+    const adapter = await this.adapterCall(async () => this.createAdapter({ rpc }));
+    const capabilities = await this.adapterCapabilities(adapter);
+    return { adapter, capabilities };
+  }
+
+  async wait(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    if (this.fault) throw fixed("journal_unavailable");
+    const task = this.task(args.taskId);
+    if (!task) throw fixed("task_not_found");
+    // Passive observation is safe for a recorded uncertain binding: it uses the
+    // requested session ID, dispatches no setup/prompt RPC and never promotes
+    // uncertainty. A session that was never created returns a fixed safe error.
+    if (task.state !== "submitted" && task.state !== "uncertain") {
+      throw fixed("session_unusable");
+    }
+    const format = args.format ?? "compact";
+    if (format !== "compact" && format !== "raw") throw fixed("invalid_arguments");
+    const timeoutMs = args.timeoutMs ?? 1000;
+    // Compact is the bounded default; raw keeps the legacy diagnostic default.
+    const maxMessages = args.maxMessages ?? (format === "raw" ? 8 : 1);
+
+    return this.coordinatorCall(runtime, () =>
+      runtime.coordinator.withRunning(task.environmentId, async (driver, options) => {
+        this.assertActive(runtime, signal);
+        if (options.ownershipToken !== task.ownershipToken) throw fixed("ownership_mismatch");
+        const { adapter, capabilities } = await this.observationAdapter(task, driver, options);
+        this.assertActive(runtime, signal);
+
+        const binding = { conversationId: task.sessionId };
+        // afterSeq remains the public numeric cursor; the adapter owns the
+        // backend-specific argument mapping and omits an unavailable cursor.
+        const request = { timeoutMs, maxMessages };
+        if (args.afterSeq !== undefined) request.cursor = args.afterSeq;
+
+        if (format === "raw") {
+          // Explicit diagnostic compatibility mode. Capability and method
+          // support are checked before the optional call; no fallback RPC.
+          if (capabilities.rawObservation !== true
+            || typeof adapter.observeRaw !== "function") {
+            throw fixed("unsupported");
+          }
+          const value = await this.adapterCall(() => adapter.observeRaw(binding, request));
+          this.assertActive(runtime, signal);
+          return { taskId: task.taskId, untrusted: true, value };
+        }
+
+        if (capabilities.observation !== true
+          || typeof adapter.observe !== "function") {
+          throw fixed("unsupported");
+        }
+        const snapshot = await this.adapterCall(async () =>
+          validateObservation(await adapter.observe(binding, request)));
+        this.assertActive(runtime, signal);
+        return { taskId: task.taskId, untrusted: true, snapshot };
+      }, { signal }));
+  }
+
+  async cancel(args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    if (this.fault) throw fixed("journal_unavailable");
+    const task = this.task(args.taskId);
+    if (!task) throw fixed("task_not_found");
+    // Cooperative cancellation remains available for a recorded uncertain
+    // binding: the admission ambiguity must not also forbid an explicit cancel.
+    // It targets only the recorded requested session and never replays setup.
+    if (task.state !== "submitted" && task.state !== "uncertain") {
+      throw fixed("session_unusable");
+    }
+
+    return this.coordinatorCall(runtime, () =>
+      runtime.coordinator.withRunning(task.environmentId, async (driver, options) => {
+        this.assertActive(runtime, signal);
+        if (options.ownershipToken !== task.ownershipToken) throw fixed("ownership_mismatch");
+        const { adapter, capabilities } = await this.observationAdapter(task, driver, options);
+        this.assertActive(runtime, signal);
+
+        if (capabilities.cancellationRequest !== true
+          || typeof adapter.requestCancel !== "function") {
+          throw fixed("unsupported");
+        }
+        const receipt = await this.adapterCall(async () =>
+          validateCancellation(await adapter.requestCancel({ conversationId: task.sessionId })));
+        this.assertActive(runtime, signal);
+        // The adapter receipt is an admission acknowledgement only. It is not
+        // proof that guest processes terminated; alpi_stop is the verified stop.
+        return { taskId: task.taskId, ...receipt };
+      }, { signal }));
+  }
+
+  // FileTransfers.prepare*/execute() already acquire the coordinator queue for
+  // the environment. Wrapping them in another withRunning would deadlock.
+  async transfer(direction, args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    const transfers = runtime.transfers;
+    if (!transfers || typeof transfers !== "object"
+      || typeof transfers.prepareImport !== "function"
+      || typeof transfers.prepareExport !== "function"
+      || typeof transfers.execute !== "function"
+      || typeof transfers.snapshot !== "function"
+      || typeof transfers.cancel !== "function") {
+      throw fixed("runtime_unavailable");
+    }
+    // Never clear or cancel a preview another UI action owns.
+    this.assertTransferIdle(transfers);
+
+    const owned = { planId: undefined, preparing: false, executed: false, settled: false };
+    const onAbort = () => { this.cancelOwnedTransfer(transfers, owned); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      this.assertActive(runtime, signal);
+      const preview = await this.prepareTransfer(transfers, direction, args, signal, owned);
+      if (preview.collision) {
+        this.cancelOwnedTransfer(transfers, owned);
+        throw fixed("transfer_collision");
+      }
+      this.assertActive(runtime, signal);
+      if (signal.aborted) {
+        this.cancelOwnedTransfer(transfers, owned);
+        throw fixed("aborted");
+      }
+      this.assertTransferExecutable(transfers, owned);
+      await this.executeTransfer(transfers, owned, signal);
+      this.assertActive(runtime, signal);
+      if (signal.aborted) throw fixed("aborted");
+      return transferReceipt(direction, preview);
+    } catch (error) {
+      // A preview this request created is released on failure. An execute that
+      // already ran owns its own cleanup and partial-output journal record.
+      if (!owned.executed) this.cancelOwnedTransfer(transfers, owned);
+      // Caller cancellation stays authoritative over any typed transfer failure
+      // that raced it; the operation did not complete.
+      if (signal.aborted) throw fixed("aborted");
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error)) throw fixed("aborted");
+      throw fixed("operation_failed");
+    } finally {
+      owned.settled = true;
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  assertTransferIdle(transfers) {
+    let snapshot;
+    try {
+      snapshot = transfers.snapshot();
+    } catch {
+      throw fixed("operation_failed");
+    }
+    if (!isPlainObject(snapshot)) throw fixed("operation_failed");
+    if (snapshot.fault === true) throw fixed("transfer_unavailable");
+    if (transfers.active) throw fixed("busy");
+    if (snapshot.state === "preparing" || snapshot.state === "running"
+      || snapshot.state === "preview") {
+      throw fixed("busy");
+    }
+    const plans = transfers.plans;
+    if (plans && typeof plans.size === "number" && plans.size > 0) throw fixed("busy");
+  }
+
+  assertTransferExecutable(transfers, owned) {
+    if (transfers.active) throw fixed("busy");
+    const plans = transfers.plans;
+    if (!plans || typeof plans.has !== "function" || !plans.has(owned.planId)
+      || (typeof plans.size === "number" && plans.size !== 1)) {
+      throw fixed("operation_failed");
+    }
+    let snapshot;
+    try {
+      snapshot = transfers.snapshot();
+    } catch {
+      throw fixed("operation_failed");
+    }
+    if (!isPlainObject(snapshot)) throw fixed("operation_failed");
+    if (snapshot.fault === true) throw fixed("transfer_unavailable");
+    if (snapshot.state !== "preview") throw fixed("operation_failed");
+  }
+
+  // FileTransfers.cancel() clears every plan and aborts the active operation.
+  // It is therefore called only while this request still owns its plan/active
+  // transfer, never after settle and never for a pre-existing UI preview.
+  cancelOwnedTransfer(transfers, owned) {
+    if (owned.settled) return;
+    try {
+      const plans = transfers.plans;
+      const ownsPlan = Boolean(owned.planId && plans && typeof plans.has === "function"
+        && plans.has(owned.planId)
+        && (typeof plans.size !== "number" || plans.size === 1));
+      const ownsActive = Boolean(owned.planId && transfers.activeTransferId === owned.planId);
+      if (ownsPlan || ownsActive) {
+        transfers.cancel();
+        return;
+      }
+      if (!owned.planId && owned.preparing) {
+        // Admission refused pre-existing work, so an active preview or the one
+        // plan that appeared during prepare belongs to this request.
+        const planCount = plans && typeof plans.size === "number" ? plans.size : 0;
+        if (transfers.active || planCount === 1) transfers.cancel();
+      }
+    } catch {
+      // Keep the transfer journal and partial outputs untouched; the caller
+      // receives the original safe error.
+    }
+  }
+
+  async prepareTransfer(transfers, direction, args, signal, owned) {
+    if (signal.aborted) throw fixed("aborted");
+    owned.preparing = true;
+    let preview;
+    try {
+      preview = direction === "import"
+        ? await transfers.prepareImport(args.environmentId, args.source, args.guestParent, args.name)
+        : await transfers.prepareExport(args.environmentId, args.source, args.hostParent, args.name);
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || signal.aborted) throw fixed("aborted");
+      throw fixed("operation_failed");
+    } finally {
+      owned.preparing = false;
+    }
+    const valid = transferPreview(preview, direction);
+    if (valid === null) {
+      if (preview && typeof preview.id === "string") owned.planId = preview.id;
+      else {
+        const plans = transfers.plans;
+        if (plans && typeof plans.size === "number" && plans.size === 1
+          && typeof plans.keys === "function") owned.planId = [...plans.keys()][0];
+      }
+      this.cancelOwnedTransfer(transfers, owned);
+      throw fixed("transfer_preview_failed");
+    }
+    owned.planId = valid.id;
+    if (signal.aborted) {
+      this.cancelOwnedTransfer(transfers, owned);
+      throw fixed("aborted");
+    }
+    return valid;
+  }
+
+  async executeTransfer(transfers, owned, signal) {
+    if (signal.aborted) {
+      this.cancelOwnedTransfer(transfers, owned);
+      throw fixed("aborted");
+    }
+    owned.executed = true;
+    let snapshot;
+    try {
+      snapshot = await transfers.execute(owned.planId);
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || signal.aborted) throw fixed("aborted");
+      throw fixed("operation_failed");
+    }
+    if (!isPlainObject(snapshot)) throw fixed("operation_failed");
+    // execute() reports its outcome in the snapshot and often does not throw.
+    // Anything other than a complete state is a failure, never a receipt.
+    if (snapshot.state === "cancelled") throw fixed("aborted");
+    if (snapshot.state !== "complete") throw fixed("operation_failed");
+    return snapshot;
+  }
+
+  async close() {
+    this.closed = true;
+    for (const controller of this.controllers) controller.abort();
+  }
+}
+
+module.exports = { OrchestrationService };
