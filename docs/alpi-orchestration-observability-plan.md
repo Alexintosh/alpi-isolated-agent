@@ -83,14 +83,14 @@ and explicit raw compatibility mode in docs before switching defaults.
 | D1 | Safer task workflow guidance using existing tools | `skills/alpi/SKILL.md`, `docs/alpi-orchestration.md` | None; no unimplemented API claims |
 | O1 | Small harness adapter, normalized progress/pending actions | proposed `src/orchestration/harness-adapter.cjs`, `tests/orchestration-observation.test.cjs` | R0 contract frozen by coordinator |
 | O2 | Service/schema wiring, compact default/raw option, cancellation receipt | `src/orchestration/service.cjs`, `src/orchestration/tools.cjs`, `tests/orchestration-service.test.cjs` | O1; serialize central files |
-| T2 | Accurate contentRoot and safe transfer failure categories | same service/test files, plus narrowly justified `src/runtime/file-transfers.cjs` changes | O2 releases files; inspect real manager first |
+| T2 | Accurate contentRoot and safe transfer failure categories | service/test files, `src/runtime/file-transfers.cjs`, `tests/file-transfers.test.cjs` | Starts before O2; O2 waits for release |
 | I2 | MCP error vocabulary, actual stdio integration, portable inventory and docs | coordinator owns `src/orchestration/mcp.cjs`, `tests/orchestration-mcp.test.cjs`, `package.json`, `factory/ci-policy.json`, plan and integration docs after D1 | O2/T2 |
 | V2 | Independent component and final integrated reviews, package/live evidence | Reviewers read only; reports on exact PR SHA | Frozen changes |
 
 Paths above are provisional only for R0-dependent implementation. Coordinator must
 freeze exports, result fields, bounds, options and focused checks in standalone
 briefs before launching O1/O2. No worker can expand ownership on its own. Transfer
-work is serialized with service wiring rather than concurrent edits to service.cjs.
+work is serialized before service wiring rather than concurrent edits to service.cjs.
 
 ### D1 concrete guidance
 
@@ -173,10 +173,88 @@ new implementation is pushed until required gates pass. No merge without instruc
 | Scope | State | Reviews used | Score / findings | Evidence / next action |
 | --- | --- | --- | --- | --- |
 | R0 | ready for source discovery | n/a | unscored | Freeze adapter contract or defer unsupported API |
-| D1 | ready for implementation | 0/3 | unscored | Existing-tool guidance only |
+| D1 | accepted at 25030bc | 1/3 | 9.88; no blockers, optional repetition cleanup | PR review 5938016116; source/docs checks and CI passed |
 | O1/O2 | blocked on contract discovery | 0/3 | unscored | Coordinator freezes cohesive observation scope |
-| T2 | queued | 0/3 | unscored | Preserve service ownership order |
+| T2 | implementation launch prepared | 0/3 | unscored | Runs before O2 while R0 research continues |
 | Integrated increment | pending | 0/3 | unscored | Separate whole-feature assessment |
 
 Durable per-run records: `.state/orchestration/observability-runs.md`. Create each
 entry before launch; add run ID, confirmed settings, duration, results and limits.
+
+## R0 decision and frozen O1 contract
+
+Source discovery completed against installed stock `@deepseek-ai/*@0.2.2-rc.2`.
+Coordinator checked `dsh-api-session-controller/src/history/controller.ts:126`
+(newest-first assistant messages, truncation with no wait paging) and
+`src/state/controller.ts:164` (deduplicated pending kinds only). Full source notes
+are private `.state/orchestration/observability-contracts.md`, with no transcripts.
+
+Decisions:
+- Defer direct approval resolution/detail, current-operation and last-activity fields.
+  Stock RPC exposes no safe resolution handle, exact action or command progress.
+  Handoff is guest UI. Do not subscribe to a new owner event stream or widen RPCs.
+- Implement observation/cancel adapter only, not a claim of complete multi-harness
+  lifecycle support. Existing creation/submission and persisted session bindings are
+  unchanged. Future backends can implement the observation interface independently.
+- Compact becomes the default. Retain existing raw observation only via explicit
+  `format: "raw"` for compatibility/diagnostics, with untrusted labeling and existing
+  helper limits/auth filtering. Default format is `compact`; default maxMessages is
+  1 compact / 8 raw, explicit maximum remains 32. Raw is backend-specific by definition,
+  excluded from neutral guarantees and never requested by ordinary skill workflow.
+- Large stock stream data can still exceed the existing 512 KiB helper limit even
+  with one message. Fail safely; do not claim host projection fixes upstream framing.
+  Solving that requires a separate guest-side normalization design, not larger limits.
+
+O1 ownership: `src/orchestration/observation.cjs` (neutral result contract/validator),
+`src/orchestration/harness-adapter.cjs` (stock implementation),
+`tests/orchestration-observation.test.cjs`. No service edits until T2 releases them.
+
+Neutral module exports `validateObservation(value)` and `validateCancellation(value)`:
+return fresh picked/validated objects; invalid shapes throw fixed `guest_failed`.
+No stock type/RPC names in this module. Exact allowed result fields:
+
+```
+{
+  state: 'running'|'waiting'|'idle'|'unknown',
+  live: boolean|null,
+  cursor: nonnegative-safe-integer|null,
+  pendingActions: [{kind:'approval'|'question'|'other', detailAvailable:false,
+                    resolution:'guest-ui'}],
+  assistantText: string, // at most 16384 UTF-8 bytes
+  truncated: {text:boolean, records:boolean},
+  capabilities: {observation:true, pendingActionDetail:'kind-only',
+                 approvalResolution:false, cancellationRequest:boolean,
+                 rawObservation:boolean}
+}
+```
+
+Pending actions deduplicated, max three. No action IDs or reason fabricated. No
+success/completion flags. Unknown/malformed stock states map to unknown, null live
+and cursor where invalid; never claim idle from missing fields. Stock cursor -1
+maps null and caller omits afterSeq. Truncation must disclose source truncation and
+any local records/blocks/text bounds. Newest-first text order is documented, no full
+history/completeness promise. Skip non-text content and the whole stream/queue tree.
+A Unicode truncation must not split a code point. No recursive traversal.
+
+Stock factory: `createHarnessAdapter({rpc})` exports an object with `capabilities()`,
+`observe({conversationId},{cursor,timeoutMs,maxMessages})`,
+`observeRaw({conversationId},{cursor,timeoutMs,maxMessages})`,
+`requestCancel({conversationId})`. rpc(method,args) is an injected closure owned by
+service inside its verified withRunning call; it handles driver/options/signal.
+Adapter has no filesystem, driver, task journal or host mutation access. Compact
+observe uses only session/wait. Raw uses same RPC and returns bounded helper result
+unchanged, only when explicitly requested. Cancel uses only session/cancel and must
+validate stock `{accepted:true}` before returning:
+`{requested:true,acknowledged:true,cooperative:true,processTermination:'unknown'}`.
+Invalid cancel ack is fixed guest_failed. Adapter errors are fixed vocabulary;
+never forward dependency messages/stacks/causes/extra fields. Unknown capabilities
+fail unsupported, never imply another RPC or new authority.
+
+O2 service injects optional `createAdapter` factory (default stock factory). Pass
+conversationId from recorded sessionId and cursor from legacy afterSeq at the boundary.
+Preserve ownership/runtime checks before/after awaits and existing exclusive admission.
+Validate compact snapshot at service edge; raw remains explicit diagnostic envelope.
+Return `{taskId,untrusted:true,snapshot}` compact and existing `{taskId,untrusted:true,value}`
+raw. Cancel adds taskId to validated receipt. A minimal alternate fake adapter proves
+service observation/cancel do not branch on stock shapes. Capabilities are checked
+before invoking optional methods; no registry or persisted-schema migration.
