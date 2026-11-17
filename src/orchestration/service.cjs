@@ -41,6 +41,7 @@ const MESSAGES = Object.freeze({
   model_not_configured: "The requested provider or model is not configured.",
   reasoning_effort_invalid: "The requested reasoning effort is not supported.",
   journal_unavailable: "The orchestration task journal is unavailable. Explicit recovery is required.",
+  transfer_unavailable: "The transfer service is unavailable. Explicit recovery is required.",
   capacity: "The orchestration task journal capacity has been reached.",
   task_not_found: "The orchestration task was not found.",
   request_conflict: "The request ID was already used for a different request.",
@@ -57,8 +58,21 @@ function fixed(code) {
   return error;
 }
 
-function isServiceError(error) {
-  return Boolean(error && typeof error.code === "string" && Object.hasOwn(MESSAGES, error.code));
+// Dependency errors are untrusted objects. A matching fixed code identifies the
+// category, but its message, stack, cause and extra properties are never reused.
+function knownServiceError(error) {
+  let code;
+  try {
+    code = error && typeof error.code === "string" ? error.code : undefined;
+  } catch {
+    return null;
+  }
+  if (code === undefined || !Object.hasOwn(MESSAGES, code)) return null;
+  return fixed(code);
+}
+
+function isAbortError(error) {
+  return Boolean(error && (error.name === "AbortError" || error.code === "ABORT_ERR"));
 }
 
 function isPlainObject(value) {
@@ -267,24 +281,54 @@ function requestReceipt(task, request) {
   };
 }
 
-function taskView(task) {
+// alpi_tasks is a bounded recovery index, not a transcript. One latest-request
+// pointer per task keeps every handle recoverable at journal capacity while
+// omitting cwd, full request history, prompts, ownership tokens and fingerprints.
+function taskSummary(task) {
+  const last = task.requests[task.requests.length - 1];
   return {
     taskId: task.taskId,
     environmentId: task.environmentId,
     sessionId: task.sessionId,
-    cwd: task.cwd,
+    state: task.state,
     provider: task.provider,
     model: task.model,
     ...(task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort }),
-    state: task.state,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    requests: task.requests.map(request => ({
-      requestId: request.requestId,
-      status: request.status,
-      createdAt: request.createdAt,
-      updatedAt: request.updatedAt,
-    })),
+    requestCount: task.requests.length,
+    lastRequest: {
+      requestId: last.requestId,
+      status: last.status,
+      createdAt: last.createdAt,
+      updatedAt: last.updatedAt,
+    },
+  };
+}
+
+function transferPreview(value) {
+  if (!isPlainObject(value)
+    || typeof value.id !== "string" || !UUID.test(value.id)
+    || (value.direction !== "import" && value.direction !== "export")
+    || !text(value.destination, 8192) || !value.destination.startsWith("/")
+    || !Number.isSafeInteger(value.entries) || value.entries < 1
+    || !Number.isSafeInteger(value.bytes) || value.bytes < 0
+    || typeof value.collision !== "boolean") {
+    return null;
+  }
+  return value;
+}
+
+// Only verified transfer outcome metadata is returned. Journal records, source
+// identity, transactions and internal transfer fields stay on the host.
+function transferReceipt(direction, preview) {
+  return {
+    direction,
+    destination: preview.destination,
+    state: "complete",
+    entries: preview.entries,
+    bytes: preview.bytes,
+    ...(direction === "export" ? { untrusted: true } : {}),
   };
 }
 
@@ -372,10 +416,9 @@ class OrchestrationService {
     try {
       return await work();
     } catch (error) {
-      if (isServiceError(error)) throw error;
-      if (error && (error.name === "AbortError" || error.code === "ABORT_ERR")) {
-        throw fixed("aborted");
-      }
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error)) throw fixed("aborted");
       throw fixed("runtime_unavailable");
     }
   }
@@ -384,9 +427,9 @@ class OrchestrationService {
     try {
       return await work();
     } catch (error) {
-      if (isServiceError(error)) throw error;
-      if (error && (error.name === "AbortError" || error.code === "ABORT_ERR"
-        || error.code === "guest-aborted")) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || (error && error.code === "guest-aborted")) {
         throw fixed("aborted");
       }
       throw fixed("guest_failed");
@@ -479,7 +522,7 @@ class OrchestrationService {
   tasksSnapshot() {
     if (this.closed) throw fixed("closing");
     if (this.fault) return { fault: true, tasks: [] };
-    return { fault: false, tasks: this.tasks.map(taskView) };
+    return { fault: false, tasks: this.tasks.map(taskSummary) };
   }
 
   task(taskId) {
@@ -550,17 +593,19 @@ class OrchestrationService {
     try {
       call = validateCall(name, args);
     } catch (error) {
-      if (isServiceError(error)) throw error;
+      const known = knownServiceError(error);
+      if (known) throw known;
       throw fixed("invalid_arguments");
     }
     if (name === "alpi_status") return this.status();
     if (name === "alpi_tasks") return this.tasksSnapshot();
-    if (name === "alpi_import" || name === "alpi_export") throw fixed("unsupported");
     if (signal !== undefined
       && (!signal || typeof signal.aborted !== "boolean"
         || typeof signal.addEventListener !== "function")) {
       throw fixed("invalid_arguments");
     }
+    // A caller that is already aborted must not admit, preview or cancel work.
+    if (signal && signal.aborted) throw fixed("aborted");
     if (this.busy) throw fixed("busy");
 
     this.busy = true;
@@ -570,10 +615,9 @@ class OrchestrationService {
     try {
       return await this.runExclusive(() => this.execute(name, call, combined));
     } catch (error) {
-      if (isServiceError(error)) throw error;
-      if (error && (error.name === "AbortError" || error.code === "ABORT_ERR")) {
-        throw fixed("aborted");
-      }
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error)) throw fixed("aborted");
       throw fixed("operation_failed");
     } finally {
       this.controllers.delete(controller);
@@ -590,6 +634,8 @@ class OrchestrationService {
       case "alpi_send": return this.send(args, signal);
       case "alpi_wait": return this.wait(args, signal);
       case "alpi_cancel": return this.cancel(args, signal);
+      case "alpi_import": return this.transfer("import", args, signal);
+      case "alpi_export": return this.transfer("export", args, signal);
       default: throw fixed("unsupported");
     }
   }
@@ -861,6 +907,178 @@ class OrchestrationService {
         // processes terminated. alpi_stop is the verified whole-VM stop.
         return { taskId: task.taskId, acknowledged: true, cooperative: true };
       }, { signal }));
+  }
+
+  // FileTransfers.prepare*/execute() already acquire the coordinator queue for
+  // the environment. Wrapping them in another withRunning would deadlock.
+  async transfer(direction, args, signal) {
+    const runtime = this.runtime();
+    this.assertActive(runtime, signal);
+    const transfers = runtime.transfers;
+    if (!transfers || typeof transfers !== "object"
+      || typeof transfers.prepareImport !== "function"
+      || typeof transfers.prepareExport !== "function"
+      || typeof transfers.execute !== "function"
+      || typeof transfers.snapshot !== "function"
+      || typeof transfers.cancel !== "function") {
+      throw fixed("runtime_unavailable");
+    }
+    // Never clear or cancel a preview another UI action owns.
+    this.assertTransferIdle(transfers);
+
+    const owned = { planId: undefined, preparing: false, executed: false, settled: false };
+    const onAbort = () => { this.cancelOwnedTransfer(transfers, owned); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      this.assertActive(runtime, signal);
+      const preview = await this.prepareTransfer(transfers, direction, args, signal, owned);
+      if (preview.collision) {
+        this.cancelOwnedTransfer(transfers, owned);
+        throw fixed("operation_failed");
+      }
+      this.assertActive(runtime, signal);
+      if (signal.aborted) {
+        this.cancelOwnedTransfer(transfers, owned);
+        throw fixed("aborted");
+      }
+      this.assertTransferExecutable(transfers, owned);
+      await this.executeTransfer(transfers, owned, signal);
+      this.assertActive(runtime, signal);
+      if (signal.aborted) throw fixed("aborted");
+      return transferReceipt(direction, preview);
+    } catch (error) {
+      // A preview this request created is released on failure. An execute that
+      // already ran owns its own cleanup and partial-output journal record.
+      if (!owned.executed) this.cancelOwnedTransfer(transfers, owned);
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || signal.aborted) throw fixed("aborted");
+      throw fixed("operation_failed");
+    } finally {
+      owned.settled = true;
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  assertTransferIdle(transfers) {
+    let snapshot;
+    try {
+      snapshot = transfers.snapshot();
+    } catch {
+      throw fixed("operation_failed");
+    }
+    if (!isPlainObject(snapshot)) throw fixed("operation_failed");
+    if (snapshot.fault === true) throw fixed("transfer_unavailable");
+    if (transfers.active) throw fixed("busy");
+    if (snapshot.state === "preparing" || snapshot.state === "running"
+      || snapshot.state === "preview") {
+      throw fixed("busy");
+    }
+    const plans = transfers.plans;
+    if (plans && typeof plans.size === "number" && plans.size > 0) throw fixed("busy");
+  }
+
+  assertTransferExecutable(transfers, owned) {
+    if (transfers.active) throw fixed("busy");
+    const plans = transfers.plans;
+    if (!plans || typeof plans.has !== "function" || !plans.has(owned.planId)
+      || (typeof plans.size === "number" && plans.size !== 1)) {
+      throw fixed("operation_failed");
+    }
+    let snapshot;
+    try {
+      snapshot = transfers.snapshot();
+    } catch {
+      throw fixed("operation_failed");
+    }
+    if (!isPlainObject(snapshot)) throw fixed("operation_failed");
+    if (snapshot.fault === true) throw fixed("transfer_unavailable");
+    if (snapshot.state !== "preview") throw fixed("operation_failed");
+  }
+
+  // FileTransfers.cancel() clears every plan and aborts the active operation.
+  // It is therefore called only while this request still owns its plan/active
+  // transfer, never after settle and never for a pre-existing UI preview.
+  cancelOwnedTransfer(transfers, owned) {
+    if (owned.settled) return;
+    try {
+      const plans = transfers.plans;
+      const ownsPlan = Boolean(owned.planId && plans && typeof plans.has === "function"
+        && plans.has(owned.planId)
+        && (typeof plans.size !== "number" || plans.size === 1));
+      const ownsActive = Boolean(owned.planId && transfers.activeTransferId === owned.planId);
+      if (ownsPlan || ownsActive) {
+        transfers.cancel();
+        return;
+      }
+      if (!owned.planId && owned.preparing) {
+        // Admission refused pre-existing work, so an active preview or the one
+        // plan that appeared during prepare belongs to this request.
+        const planCount = plans && typeof plans.size === "number" ? plans.size : 0;
+        if (transfers.active || planCount === 1) transfers.cancel();
+      }
+    } catch {
+      // Keep the transfer journal and partial outputs untouched; the caller
+      // receives the original safe error.
+    }
+  }
+
+  async prepareTransfer(transfers, direction, args, signal, owned) {
+    if (signal.aborted) throw fixed("aborted");
+    owned.preparing = true;
+    let preview;
+    try {
+      preview = direction === "import"
+        ? await transfers.prepareImport(args.environmentId, args.source, args.guestParent, args.name)
+        : await transfers.prepareExport(args.environmentId, args.source, args.hostParent, args.name);
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || signal.aborted) throw fixed("aborted");
+      throw fixed("operation_failed");
+    } finally {
+      owned.preparing = false;
+    }
+    const valid = transferPreview(preview);
+    if (valid === null) {
+      if (preview && typeof preview.id === "string") owned.planId = preview.id;
+      else {
+        const plans = transfers.plans;
+        if (plans && typeof plans.size === "number" && plans.size === 1
+          && typeof plans.keys === "function") owned.planId = [...plans.keys()][0];
+      }
+      this.cancelOwnedTransfer(transfers, owned);
+      throw fixed("operation_failed");
+    }
+    owned.planId = valid.id;
+    if (signal.aborted) {
+      this.cancelOwnedTransfer(transfers, owned);
+      throw fixed("aborted");
+    }
+    return valid;
+  }
+
+  async executeTransfer(transfers, owned, signal) {
+    if (signal.aborted) {
+      this.cancelOwnedTransfer(transfers, owned);
+      throw fixed("aborted");
+    }
+    owned.executed = true;
+    let snapshot;
+    try {
+      snapshot = await transfers.execute(owned.planId);
+    } catch (error) {
+      const known = knownServiceError(error);
+      if (known) throw known;
+      if (isAbortError(error) || signal.aborted) throw fixed("aborted");
+      throw fixed("operation_failed");
+    }
+    if (!isPlainObject(snapshot)) throw fixed("operation_failed");
+    // execute() reports its outcome in the snapshot and often does not throw.
+    // Anything other than a complete state is a failure, never a receipt.
+    if (snapshot.state === "cancelled") throw fixed("aborted");
+    if (snapshot.state !== "complete") throw fixed("operation_failed");
+    return snapshot;
   }
 
   async close() {
