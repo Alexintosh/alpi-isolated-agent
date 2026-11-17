@@ -790,3 +790,24 @@ test("the neutral contract module contains no stock method or record names", () 
     assert.equal(source.includes(forbidden), false, forbidden);
   }
 });
+
+test("missing or invalid active cannot classify an otherwise valid sampled state", async () => {
+  for (const active of [undefined, null, 'unknown', 0, {}, []]) {
+    for (const running of [false, true]) {
+      const value = idleWait();
+      if (active === undefined) delete value.state.active;
+      else value.state.active = active;
+      value.state.running = running;
+      const result = await adapterReturning(value).adapter.observe({conversationId: 's'}, {});
+      assert.equal(result.state, 'unknown');
+      assert.equal(result.live, null);
+      assert.equal(result.cursor, 50);
+      assert.deepEqual(result.pendingActions, []);
+    }
+  }
+  for (const active of [true, false]) {
+    const result = await adapterReturning(idleWait({active})).adapter.observe({conversationId: 's'}, {});
+    assert.equal(result.state, 'idle');
+    assert.equal(result.live, active);
+  }
+});

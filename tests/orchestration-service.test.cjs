@@ -2245,3 +2245,19 @@ test("a maximum-capacity journal yields a bounded summary with every task handle
   assert.equal(summary.tasks[0].lastRequest.requestId, requestId(63));
   assert.equal(summary.tasks[255].lastRequest.requestId, requestId(255 * 64 + 63));
 });
+
+test("missing or invalid active remains unknown through compact service dispatch", async t => {
+  for (const active of [undefined, 'unknown', null]) {
+    const value = stockWait();
+    if (active === undefined) delete value.state.active;
+    else value.state.active = active;
+    const h = makeHarness(t, {guestOptions: {waitResult: value}});
+    const taskId = uuid();
+    await h.service.dispatch('alpi_delegate', delegateArgs(taskId));
+    const result = await h.service.dispatch('alpi_wait', {taskId});
+    assert.equal(result.snapshot.state, 'unknown');
+    assert.equal(result.snapshot.live, null);
+    assert.equal(result.snapshot.cursor, 42);
+    assert.deepEqual(result.snapshot.pendingActions, []);
+  }
+});

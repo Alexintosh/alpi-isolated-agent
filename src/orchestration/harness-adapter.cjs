@@ -284,6 +284,7 @@ function project(value, maxMessages, capabilities) {
   if (state === null
     || typeof value.reason !== "string"
     || !WAIT_REASONS.has(value.reason)
+    || typeof state.active !== "boolean"
     || typeof state.running !== "boolean") {
     return unknownSnapshot(cursor, live, capabilities);
   }
