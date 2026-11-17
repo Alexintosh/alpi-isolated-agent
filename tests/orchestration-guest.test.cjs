@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
-const { execFile } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const { executeGuest, harnessRpc } = require("../src/orchestration/guest.cjs");
 
@@ -16,6 +16,38 @@ const COOKIE = "dsh-auth-synthetic=v1.eyJhIjoxfQ.signature";
 
 const quote = value => `'${value.replace(/'/g, `'\\''`)}'`;
 const decode = value => Buffer.from(value, "base64").toString("utf8");
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function waitForFile(file, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await delay(10);
+  }
+  throw new Error(`fixture file was not created: ${file}`);
+}
+
+function waitForClose(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("the helper did not settle"));
+    }, timeoutMs);
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.removeListener("close", onClose);
+    };
+    child.once("close", onClose);
+  });
+}
 const hasCode = code => error => {
   assert.equal(error.code, code);
   return true;
@@ -76,6 +108,17 @@ function execPayload(f, command, extra = {}) {
     root: false,
     timeoutMs: 10000,
     dependencies: f.dependencies,
+    ...extra,
+  };
+}
+
+function rpcPayload(f, origin, method, args, extra = {}) {
+  return {
+    mode: "rpc",
+    method,
+    args,
+    timeoutMs: 5000,
+    dependencies: { ...f.dependencies, origin },
     ...extra,
   };
 }
@@ -464,6 +507,65 @@ test("the helper does not hang when a descendant keeps the output pipe open", as
   assert(Date.now() - started < 3000);
 });
 
+test("executeGuest aborts an actual helper and kills its command group before the deadline", async t => {
+  const f = makeFixture(t);
+  const ready = path.join(f.work, "ready");
+  const marker = path.join(f.work, "late-marker");
+  const command = `printf ready > ${quote(ready)}; sleep 0.8; printf late > ${quote(marker)}`;
+  const controller = new AbortController();
+  // Attach the rejection handler immediately so a fast helper failure cannot
+  // surface as an unhandled rejection while the fixture waits for readiness.
+  const run = executeGuest(
+    makeGuestDriver(f),
+    { ownershipToken: "synthetic-token", signal: controller.signal },
+    { command, cwd: f.work, timeoutMs: 400 },
+  ).then(
+    value => ({ ok: true, value }),
+    error => ({ ok: false, error }),
+  );
+
+  await waitForFile(ready, 2000);
+  assert.equal(fs.existsSync(ready), true);
+  controller.abort();
+  const outcome = await run;
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error.code, "guest-aborted");
+  // The shell would write the marker after 0.8 s, beyond the original 400 ms
+  // command deadline, unless the helper killed its owned group on termination.
+  await delay(1200);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  test(`the helper kills its command group and settles on ${signal}`, async t => {
+    const f = makeFixture(t);
+    const ready = path.join(f.work, "ready");
+    const marker = path.join(f.work, "late-marker");
+    const command = `printf ready > ${quote(ready)}; sleep 0.8; printf late > ${quote(marker)}`;
+    const encoded = Buffer.from(JSON.stringify(execPayload(f, command, { timeoutMs: 400 })), "utf8")
+      .toString("base64");
+    const child = spawn(process.execPath, ["-e", HELPER_SOURCE, encoded], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.resume();
+    child.stderr.resume();
+    const closed = waitForClose(child, 4000);
+    try {
+      await waitForFile(ready, 2000);
+      child.kill(signal);
+      await closed;
+      // The helper re-raises the signal with the default disposition instead of
+      // exiting as a normal success.
+      assert.equal(child.signalCode, signal);
+      assert.equal(child.exitCode, null);
+      await delay(1200);
+      assert.equal(fs.existsSync(marker), false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  });
+}
+
 test("the helper returns a fixed error when the guest command cannot start", async t => {
   const f = makeFixture(t);
   const envelope = await runHelper(execPayload(f, "true", {
@@ -691,7 +793,7 @@ test("harnessRpc bounds the RPC body before parsing and reports oversize", async
   );
 });
 
-test("harnessRpc maps a stock rejection to a fixed error with a bounded remote code", async t => {
+test("harnessRpc maps a stock rejection to a fixed error without forwarding a remote code", async t => {
   const f = makeFixture(t);
   const server = await startServer(t, exchangeThen((request, response) => {
     const body = JSON.parse(request.body);
@@ -715,13 +817,93 @@ test("harnessRpc maps a stock rejection to a fixed error with a bounded remote c
     harnessRpc(makeGuestDriver(f), { ownershipToken: "t" }, "session/state", { sessionId: "s" }),
     error => {
       assert.equal(error.code, "guest-rpc-rejected");
-      assert.equal(error.remoteCode, "session/not-found");
+      assert.equal(Object.hasOwn(error, "remoteCode"), false);
       assert.equal(error.message.includes(TOKEN), false);
       assert.equal(error.message.includes(COOKIE), false);
       assert.equal(error.message.includes("raw"), false);
       return true;
     },
   );
+});
+
+test("the helper rejects a nested success value that reflects the launch token", async t => {
+  const f = makeFixture(t);
+  const server = await startServer(t, exchangeThen((request, response) => {
+    const body = JSON.parse(request.body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      type: "server-response",
+      rpcId: body.rpcId,
+      result: { ok: true, value: { nested: [{ deep: { token: TOKEN } }] } },
+    }));
+  }));
+  fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+  const envelope = await runHelper(rpcPayload(f, server.origin, "session/state", { sessionId: "s" }));
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, "guest-rpc-reflection");
+  assert.equal(JSON.stringify(envelope).includes(TOKEN), false);
+});
+
+test("the helper rejects success values that reflect the cookie value or full cookie header", async t => {
+  const f = makeFixture(t);
+  const cookieValue = COOKIE.slice(COOKIE.indexOf("=") + 1);
+  for (const reflected of [
+    { kind: "cookie-value", value: { note: cookieValue } },
+    { kind: "cookie-header", value: { [COOKIE]: "present" } },
+    { kind: "cookie-header-string", value: { header: COOKIE } },
+  ]) {
+    const server = await startServer(t, exchangeThen((request, response) => {
+      const body = JSON.parse(request.body);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        type: "server-response",
+        rpcId: body.rpcId,
+        result: { ok: true, value: reflected.value },
+      }));
+    }));
+    fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+    const envelope = await runHelper(rpcPayload(f, server.origin, "session/state", { sessionId: "s" }));
+    assert.equal(envelope.ok, false, reflected.kind);
+    assert.equal(envelope.error.code, "guest-rpc-reflection", reflected.kind);
+    assert.equal(JSON.stringify(envelope).includes(cookieValue), false, reflected.kind);
+  }
+});
+
+test("the helper rejects a success value reflecting auth at bounded deep nesting", async t => {
+  const f = makeFixture(t);
+  const depth = 5000;
+  const nested = `${"[".repeat(depth)}${JSON.stringify(TOKEN)}${"]".repeat(depth)}`;
+  const server = await startServer(t, exchangeThen((request, response) => {
+    const body = JSON.parse(request.body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(`{"type":"server-response","rpcId":${JSON.stringify(body.rpcId)},`
+      + `"result":{"ok":true,"value":${nested}}}`);
+  }));
+  fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+  const envelope = await runHelper(rpcPayload(f, server.origin, "session/state", { sessionId: "s" }));
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, "guest-rpc-reflection");
+  assert.equal(JSON.stringify(envelope).includes(TOKEN), false);
+});
+
+test("the helper does not forward a remote rejection code that embeds the launch token", async t => {
+  const f = makeFixture(t);
+  const reflectedCode = `${TOKEN}/x`;
+  const server = await startServer(t, exchangeThen((request, response) => {
+    const body = JSON.parse(request.body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      type: "server-response",
+      rpcId: body.rpcId,
+      result: { ok: false, error: { code: reflectedCode, message: "rejected" } },
+    }));
+  }));
+  fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+  const envelope = await runHelper(rpcPayload(f, server.origin, "session/state", { sessionId: "s" }));
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, "guest-rpc-rejected");
+  assert.equal(Object.hasOwn(envelope.error, "remoteCode"), false);
+  assert.equal(JSON.stringify(envelope).includes(TOKEN), false);
 });
 
 test("harnessRpc rejects invalid launch origins and missing launch files", async t => {
@@ -831,6 +1013,165 @@ test("the helper enforces the RPC method allowlist and argument bounds", async t
   });
   assert.equal(extra.ok, false);
   assert.equal(extra.error.code, "guest-args-invalid");
+});
+
+test("wait timeout validation matches the broker range in the host and helper", async t => {
+  const f = makeFixture(t);
+  for (const timeoutMs of [0, -1, 20001, 600000, 1.5, "1"]) {
+    await assert.rejects(
+      harnessRpc(makeGuestDriver(f), { ownershipToken: "t" }, "session/wait", { sessionId: "s", timeoutMs }),
+      hasCode("guest-args-invalid"),
+    );
+    const envelope = await runHelper({
+      mode: "rpc",
+      method: "session/wait",
+      args: { sessionId: "s", timeoutMs },
+      timeoutMs: 1000,
+      dependencies: f.dependencies,
+    });
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.error.code, "guest-args-invalid");
+  }
+
+  for (const timeoutMs of [1, 20000]) {
+    const server = await startServer(t, exchangeThen((request, response) => {
+      const body = JSON.parse(request.body);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        type: "server-response",
+        rpcId: body.rpcId,
+        result: { ok: true, value: body.payload.args.request },
+      }));
+    }));
+    fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+    f.origin = server.origin;
+    const hostValue = await harnessRpc(
+      makeGuestDriver(f), { ownershipToken: "t" }, "session/wait", { sessionId: "s", timeoutMs },
+    );
+    assert.equal(hostValue.timeoutMs, timeoutMs);
+    const envelope = await runHelper(rpcPayload(f, server.origin, "session/wait", { sessionId: "s", timeoutMs }));
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.value.timeoutMs, timeoutMs);
+  }
+
+  const server = await startServer(t, exchangeThen((request, response) => {
+    const body = JSON.parse(request.body);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      type: "server-response",
+      rpcId: body.rpcId,
+      result: { ok: true, value: body.payload.args.request },
+    }));
+  }));
+  fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+  f.origin = server.origin;
+  const omittedHost = await harnessRpc(
+    makeGuestDriver(f), { ownershipToken: "t" }, "session/wait", { sessionId: "s" },
+  );
+  assert.equal(omittedHost.timeoutMs, 1000);
+  const omittedHelper = await runHelper(rpcPayload(f, server.origin, "session/wait", { sessionId: "s" }));
+  assert.equal(omittedHelper.ok, true);
+  assert.equal(omittedHelper.value.timeoutMs, 1000);
+});
+
+test("host and helper agree on positive arguments for all six RPC methods", async t => {
+  const f = makeFixture(t);
+  const cases = [
+    { method: "session/create", args: { cwd: "/home/user/workspace", sessionId: "synthetic" } },
+    { method: "session/selectModel", args: { sessionId: "s", provider: "p", model: "m", reasoningEffort: "high" } },
+    {
+      method: "session/prompt",
+      args: {
+        sessionId: "s",
+        requestId: "r",
+        mode: "queue",
+        content: [{ type: "text", text: "hello" }],
+        clientTimeZone: "UTC",
+      },
+    },
+    { method: "session/wait", args: { sessionId: "s", timeoutMs: 1, afterSeq: 0, maxMessages: 1 } },
+    { method: "session/cancel", args: { sessionId: "s" } },
+    { method: "session/state", args: { sessionId: "s" } },
+  ];
+
+  for (const { method, args } of cases) {
+    await t.test(method, async t => {
+      const server = await startServer(t, exchangeThen((request, response) => {
+        const body = JSON.parse(request.body);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          type: "server-response",
+          rpcId: body.rpcId,
+          result: { ok: true, value: { method: body.method, args: body.payload.args.request } },
+        }));
+      }));
+      fs.writeFileSync(f.launchFile, `${server.origin}/?token=${TOKEN}\n`);
+      f.origin = server.origin;
+      const hostValue = await harnessRpc(makeGuestDriver(f), { ownershipToken: "t" }, method, args);
+      assert.deepEqual(hostValue, { method, args });
+      const envelope = await runHelper(rpcPayload(f, server.origin, method, args));
+      assert.equal(envelope.ok, true);
+      assert.deepEqual(envelope.value, { method, args });
+    });
+  }
+});
+
+test("host and helper reject malformed arguments for all six RPC methods", async t => {
+  const f = makeFixture(t);
+  const cases = [
+    { method: "session/create", args: { cwd: "relative" } },
+    { method: "session/create", args: { cwd: "/x", extra: true } },
+    { method: "session/selectModel", args: { sessionId: "s", provider: "", model: "m" } },
+    { method: "session/selectModel", args: { sessionId: "s", provider: "p" } },
+    { method: "session/prompt", args: { sessionId: "s", requestId: "r", mode: "invalid", content: [] } },
+    {
+      method: "session/prompt",
+      args: { sessionId: "s", requestId: "r", mode: "queue", content: [{ type: "text", text: 1 }] },
+    },
+    { method: "session/wait", args: { sessionId: "s", timeoutMs: 0 } },
+    { method: "session/wait", args: { sessionId: "s", timeoutMs: 20001 } },
+    { method: "session/wait", args: { sessionId: "s", maxMessages: 0 } },
+    { method: "session/cancel", args: { sessionId: "" } },
+    { method: "session/state", args: { sessionId: "s", extra: true } },
+    { method: "session/state", args: null },
+    { method: "session/state", args: [] },
+  ];
+
+  for (const { method, args } of cases) {
+    await t.test(`${method} ${JSON.stringify(args)}`, async t => {
+      const driver = makeGuestDriver(f);
+      await assert.rejects(
+        harnessRpc(driver, { ownershipToken: "t" }, method, args),
+        hasCode("guest-args-invalid"),
+      );
+      assert.equal(driver.calls.length, 0);
+      const envelope = await runHelper({
+        mode: "rpc",
+        method,
+        args,
+        timeoutMs: 1000,
+        dependencies: f.dependencies,
+      });
+      assert.equal(envelope.ok, false);
+      assert.equal(envelope.error.code, "guest-args-invalid");
+    });
+  }
+
+  const driver = makeGuestDriver(f);
+  await assert.rejects(
+    harnessRpc(driver, { ownershipToken: "t" }, "session/list", {}),
+    hasCode("guest-method-invalid"),
+  );
+  assert.equal(driver.calls.length, 0);
+  const envelope = await runHelper({
+    mode: "rpc",
+    method: "session/list",
+    args: {},
+    timeoutMs: 1000,
+    dependencies: f.dependencies,
+  });
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, "guest-method-invalid");
 });
 
 test("host exports never accept arbitrary endpoints", async t => {

@@ -19,6 +19,11 @@ const MAX_COMMAND_TIMEOUT_MS = 95000;
 const MAX_DEADLINE_MS = 100000;
 const HOST_GRACE_MS = 3000;
 const RPC_TIMEOUT_MS = 90000;
+// The broker exposes a 1..20000 ms wait window. When a caller omits the wait
+// timeout, use the broker default (1000 ms) instead of the stock 30 second
+// default so the request stays inside the documented budget.
+const MAX_WAIT_TIMEOUT_MS = 20000;
+const DEFAULT_WAIT_TIMEOUT_MS = 1000;
 
 const RPC_METHODS = new Set([
   "session/create",
@@ -56,6 +61,7 @@ const HELPER_CODES = new Set([
   "guest-rpc-oversize",
   "guest-rpc-timeout",
   "guest-rpc-rejected",
+  "guest-rpc-reflection",
   "guest-rpc-failed",
   "guest-output-oversize",
 ]);
@@ -85,6 +91,7 @@ const MESSAGES = Object.freeze({
   "guest-rpc-invalid": "The guest Harness returned an invalid response.",
   "guest-rpc-oversize": "The guest Harness response exceeded the size limit.",
   "guest-rpc-rejected": "The guest Harness rejected the request.",
+  "guest-rpc-reflection": "The guest Harness response reflected authentication material.",
   "guest-launch-invalid": "The guest Harness launch information is invalid.",
   "guest-launch-unavailable": "The guest Harness launch information is unavailable.",
   "guest-config-invalid": "The guest network configuration is invalid.",
@@ -93,7 +100,6 @@ const MESSAGES = Object.freeze({
   "guest-request-invalid": "The guest orchestration request is invalid.",
 });
 
-const REMOTE_CODE_PATTERN = /^[a-z][a-z0-9-]{0,31}\/[a-z][a-z0-9-]{0,31}$/;
 const CONTROL_PATTERN = /[\x00-\x1f\x7f]/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -122,21 +128,13 @@ function safeError(code) {
 // message, stack or cause may contain raw guest or transport data.
 function knownError(error) {
   let code;
-  let remoteCode;
   try {
     code = error && typeof error.code === "string" ? error.code : undefined;
-    remoteCode = error && error.remoteCode;
   } catch {
     return undefined;
   }
   if (code === undefined || (!HOST_CODES.has(code) && !HELPER_CODES.has(code))) return undefined;
-  const safe = safeError(code);
-  if (code === "guest-rpc-rejected"
-    && typeof remoteCode === "string"
-    && REMOTE_CODE_PATTERN.test(remoteCode)) {
-    safe.remoteCode = remoteCode;
-  }
-  return safe;
+  return safeError(code);
 }
 
 function quoteShellArgument(value) {
@@ -249,7 +247,9 @@ function validateRpcArgs(method, args) {
     case "session/wait":
       return isIdentifier(args.sessionId)
         && (args.timeoutMs === undefined
-          || (Number.isSafeInteger(args.timeoutMs) && args.timeoutMs >= 0 && args.timeoutMs <= 600000))
+          || (Number.isSafeInteger(args.timeoutMs)
+            && args.timeoutMs >= 1
+            && args.timeoutMs <= MAX_WAIT_TIMEOUT_MS))
         && (args.afterSeq === undefined
           || (Number.isSafeInteger(args.afterSeq) && args.afterSeq >= 0))
         && (args.maxMessages === undefined
@@ -260,6 +260,15 @@ function validateRpcArgs(method, args) {
     default:
       return false;
   }
+}
+
+// Match the helper's normalization: an omitted wait timeout becomes the broker
+// default, never the stock 30 second default.
+function normalizeRpcArgs(method, args) {
+  if (method === "session/wait" && args.timeoutMs === undefined) {
+    return { ...args, timeoutMs: DEFAULT_WAIT_TIMEOUT_MS };
+  }
+  return args;
 }
 
 function buildScript(payload) {
@@ -340,13 +349,10 @@ function parseEnvelope(stdout) {
     const code = typeof reported.code === "string" && HELPER_CODES.has(reported.code)
       ? reported.code
       : "guest-output-invalid";
-    const error = safeError(code);
-    if (code === "guest-rpc-rejected"
-      && typeof reported.remoteCode === "string"
-      && REMOTE_CODE_PATTERN.test(reported.remoteCode)) {
-      error.remoteCode = reported.remoteCode;
-    }
-    throw error;
+    // Remote rejection codes are never forwarded. The helper emits only fixed
+    // codes so a hostile server cannot reflect authentication material through
+    // a syntactically valid code.
+    throw safeError(code);
   }
   return envelope;
 }
@@ -407,8 +413,10 @@ async function runGuest(driver, options, payload, deadlineMs, root) {
       ]);
     } catch (error) {
       if (deadline.callerAborted()) throw safeError("guest-aborted");
-      // Cancelling the host transport cannot guarantee termination of a hostile
-      // guest process. The caller receives a bounded timeout result and must
+      // Cancelling the host transport asks the driver to stop the helper. When
+      // the driver delivers SIGTERM/SIGINT/SIGHUP, the helper cooperatively kills
+      // its owned command group. SIGKILL, a replaced helper or a hostile guest
+      // descendant can escape; the caller receives a bounded result and must
       // separately verify guest state when that distinction matters.
       if (deadline.expired()) return { envelope: null, expired: true };
       const known = knownError(error);
@@ -476,6 +484,8 @@ async function executeGuest(driver, options, request = {}) {
  * @param options - `{ ownershipToken, signal? }` for the owned launch.
  * @param method - one of the fixed session methods.
  * @param args - validated request object, wrapped as `{ request: args }`.
+ *   `session/wait` accepts `timeoutMs` from 1 to 20000 ms; when omitted, the
+ *   broker default of 1000 ms is used instead of the stock 30 second default.
  * @returns parsed stock Harness result value. The value is guest-derived and
  *   remains untrusted data; it is not a host-authoritative fact.
  */
@@ -486,16 +496,17 @@ async function harnessRpc(driver, options, method, args) {
     throw safeError("guest-method-invalid");
   }
   if (!validateRpcArgs(method, args)) throw safeError("guest-args-invalid");
+  const rpcArgs = normalizeRpcArgs(method, args);
   let serialized;
   try {
-    serialized = JSON.stringify(args);
+    serialized = JSON.stringify(rpcArgs);
   } catch {
     throw safeError("guest-args-invalid");
   }
   if (Buffer.byteLength(serialized, "utf8") > MAX_ARGS_BYTES) {
     throw safeError("guest-args-invalid");
   }
-  const payload = { mode: "rpc", method, args, timeoutMs: RPC_TIMEOUT_MS };
+  const payload = { mode: "rpc", method, args: rpcArgs, timeoutMs: RPC_TIMEOUT_MS };
   const deadlineMs = Math.min(RPC_TIMEOUT_MS + HOST_GRACE_MS, MAX_DEADLINE_MS);
   const run = await runGuest(driver, options, payload, deadlineMs, false);
   if (run.expired) throw safeError("guest-rpc-timeout");

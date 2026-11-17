@@ -33,6 +33,12 @@ const MAX_REQUEST_ARG_CHARS = 200000;
 const MAX_TIMEOUT_MS = 100000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30000;
 const DEFAULT_RPC_TIMEOUT_MS = 90000;
+// The orchestration broker exposes a bounded wait window. An omitted wait
+// timeout uses the broker default rather than the stock 30 second default so
+// every accepted wait stays inside the documented 1..20000 ms range.
+const MAX_WAIT_TIMEOUT_MS = 20000;
+const DEFAULT_WAIT_TIMEOUT_MS = 1000;
+const TERMINATION_SIGNALS = Object.freeze(["SIGTERM", "SIGINT", "SIGHUP"]);
 
 const RPC_METHODS = new Set([
   "session/create",
@@ -68,11 +74,11 @@ const SAFE_CODES = new Set([
   "guest-rpc-oversize",
   "guest-rpc-timeout",
   "guest-rpc-rejected",
+  "guest-rpc-reflection",
   "guest-rpc-failed",
   "guest-output-oversize",
 ]);
 
-const REMOTE_CODE_PATTERN = /^[a-z][a-z0-9-]{0,31}\/[a-z][a-z0-9-]{0,31}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,256}$/;
 const COOKIE_NAME_PATTERN = /^dsh-auth-[A-Za-z0-9_-]+$/;
 const COOKIE_VALUE_PATTERN = /^v[12]\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
@@ -119,10 +125,9 @@ function isProxyUrl(value) {
   }
 }
 
-function fail(code, remoteCode) {
+function fail(code) {
   const error = new Error(code);
   error.code = code;
-  if (remoteCode !== undefined) error.remoteCode = remoteCode;
   return error;
 }
 
@@ -165,13 +170,11 @@ function emit(envelope) {
   process.stdout.write(text);
 }
 
-function writeError(code, remoteCode, fallback) {
+function writeError(code, fallback) {
   const safe = SAFE_CODES.has(code) ? code : fallback;
-  const error = { code: safe };
-  if (safe === "guest-rpc-rejected" && typeof remoteCode === "string" && REMOTE_CODE_PATTERN.test(remoteCode)) {
-    error.remoteCode = remoteCode;
-  }
-  emit({ ok: false, error });
+  // Remote rejection codes are not forwarded: the syntax pattern only proves
+  // shape, not that a hostile server did not embed authentication material.
+  emit({ ok: false, error: { code: safe } });
 }
 
 function requireAbsolute(value) {
@@ -282,7 +285,9 @@ function validateRpcArgs(method, args) {
     case "session/wait":
       return isIdentifier(args.sessionId)
         && (args.timeoutMs === undefined
-          || (Number.isSafeInteger(args.timeoutMs) && args.timeoutMs >= 0 && args.timeoutMs <= 600000))
+          || (Number.isSafeInteger(args.timeoutMs)
+            && args.timeoutMs >= 1
+            && args.timeoutMs <= MAX_WAIT_TIMEOUT_MS))
         && (args.afterSeq === undefined
           || (Number.isSafeInteger(args.afterSeq) && args.afterSeq >= 0))
         && (args.maxMessages === undefined
@@ -293,6 +298,16 @@ function validateRpcArgs(method, args) {
     default:
       return false;
   }
+}
+
+// Normalize the only optional value whose stock default exceeds the supported
+// broker budget. The host adapter performs the same normalization; the helper
+// repeats it because it cannot trust its caller.
+function normalizeRpcArgs(method, args) {
+  if (method === "session/wait" && args.timeoutMs === undefined) {
+    return { ...args, timeoutMs: DEFAULT_WAIT_TIMEOUT_MS };
+  }
+  return args;
 }
 
 function buildEnvironment(dependencies, root) {
@@ -360,25 +375,6 @@ function buildEnvironment(dependencies, root) {
 function executeCommand(command, cwd, env, timeoutMs) {
   return new Promise((resolve, reject) => {
     let child;
-    try {
-      child = spawn("/bin/sh", ["-c", command], {
-        cwd,
-        env,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch {
-      reject(fail("guest-command-failed"));
-      return;
-    }
-    if (!child.pid || !child.stdout || !child.stderr) {
-      child.on("error", () => {});
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      reject(fail("guest-command-failed"));
-      return;
-    }
-
     const stdoutChunks = [];
     const stderrChunks = [];
     let stdoutBytes = 0;
@@ -401,23 +397,76 @@ function executeCommand(command, cwd, env, timeoutMs) {
       clearTimeout(killTimer);
     };
     const killGroup = signal => {
+      if (!child || !child.pid) return;
       // A descendant that deliberately creates its own session can escape this
       // process group. Guest root remains untrusted; host transport cancellation
       // cannot guarantee termination of a hostile guest process.
       try { process.kill(-child.pid, signal); } catch { /* already gone */ }
       try { child.kill(signal); } catch { /* already gone */ }
     };
+    const destroyPipes = () => {
+      try { child?.stdout?.destroy(); } catch { /* already closed */ }
+      try { child?.stderr?.destroy(); } catch { /* already closed */ }
+    };
+    const removeSignalHandlers = () => {
+      for (const signal of TERMINATION_SIGNALS) process.removeListener(signal, onSignal);
+    };
+    // The helper owns the command's process group. A termination signal sent to
+    // the helper (for example when the host aborts its driver) must still kill
+    // that group, release inherited pipes and clear its own timers. Re-raise the
+    // signal with the default disposition afterwards so the helper is reported
+    // as signal-terminated rather than as a normal success. This cleanup is
+    // cooperative: it runs only when SIGTERM/SIGINT/SIGHUP is actually delivered
+    // to this helper. SIGKILL, a replaced helper or a descendant that creates its
+    // own session can escape; host cancellation alone cannot guarantee guest
+    // termination.
+    const onSignal = signal => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      killGroup("SIGKILL");
+      destroyPipes();
+      removeSignalHandlers();
+      try {
+        process.kill(process.pid, signal);
+      } catch {
+        process.exit(1);
+      }
+    };
+    for (const signal of TERMINATION_SIGNALS) process.on(signal, onSignal);
+
+    try {
+      child = spawn("/bin/sh", ["-c", command], {
+        cwd,
+        env,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      removeSignalHandlers();
+      reject(fail("guest-command-failed"));
+      return;
+    }
+    if (!child.pid || !child.stdout || !child.stderr) {
+      removeSignalHandlers();
+      child.on("error", () => {});
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      reject(fail("guest-command-failed"));
+      return;
+    }
+
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimers();
+      removeSignalHandlers();
       // A bounded command owns its process group. Kill any remaining members so
       // descendants cannot be orphaned and inherited pipes cannot block close.
       killGroup("SIGKILL");
       const stdout = Buffer.concat(stdoutChunks).subarray(0, MAX_STREAM_BYTES);
       const stderr = Buffer.concat(stderrChunks).subarray(0, MAX_STREAM_BYTES);
-      child.stdout.destroy();
-      child.stderr.destroy();
+      destroyPipes();
       resolve({
         stdout,
         stderr,
@@ -431,9 +480,9 @@ function executeCommand(command, cwd, env, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimers();
+      removeSignalHandlers();
       killGroup("SIGKILL");
-      child.stdout.destroy();
-      child.stderr.destroy();
+      destroyPipes();
       reject(fail("guest-command-failed"));
     };
     const capture = (chunk, chunks, currentBytes, limit) => {
@@ -515,7 +564,6 @@ async function runExec(payload, dependencies) {
   } catch (error) {
     writeError(
       error && typeof error.code === "string" ? error.code : "guest-command-failed",
-      undefined,
       "guest-command-failed",
     );
   }
@@ -644,7 +692,9 @@ async function exchange(dependencies, timeoutMs) {
   if (response.status !== 303 || response.headers.location !== "./") throw fail("guest-rpc-http");
   const cookie = cookieFrom(response.headers);
   if (!cookie) throw fail("guest-rpc-auth");
-  return cookie;
+  // Keep both active authentication values inside this operation so the
+  // success value can be checked before it is emitted.
+  return { token, cookie };
 }
 
 async function callRpc(method, args, cookie, dependencies, timeoutMs) {
@@ -690,13 +740,40 @@ async function callRpc(method, args, cookie, dependencies, timeoutMs) {
     throw fail("guest-rpc-invalid");
   }
   if (parsed.result.ok === true) return parsed.result.value;
-  const remote = parsed.result.error;
-  const remoteCode = isPlainObject(remote)
-    && typeof remote.code === "string"
-    && REMOTE_CODE_PATTERN.test(remote.code)
-    ? remote.code
-    : undefined;
-  throw fail("guest-rpc-rejected", remoteCode);
+  // Do not forward a remote code. Its shape is bounded, but it may still be a
+  // hostile server's literal copy of an active token or cookie value.
+  throw fail("guest-rpc-rejected");
+}
+
+function cookieValue(cookie) {
+  const separator = cookie.indexOf("=");
+  return separator >= 0 ? cookie.slice(separator + 1) : cookie;
+}
+
+// Scan the parsed success value iteratively. Parsed JSON has no cycles, and an
+// explicit stack avoids a recursion limit on deeply nested but bounded bodies.
+// Only the active launch token and cookie are checked; unrelated guest strings
+// remain untrusted data, not a reason to reject ordinary output.
+function containsActiveAuth(value, secrets) {
+  const stack = [value];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (typeof current === "string") {
+      if (secrets.some(secret => current.includes(secret))) return true;
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    if (isPlainObject(current)) {
+      for (const [key, item] of Object.entries(current)) {
+        if (secrets.some(secret => key.includes(secret))) return true;
+        stack.push(item);
+      }
+    }
+  }
+  return false;
 }
 
 async function runRpc(payload, dependencies) {
@@ -705,9 +782,10 @@ async function runRpc(payload, dependencies) {
     if (typeof method !== "string" || !RPC_METHODS.has(method)) throw fail("guest-method-invalid");
     const args = payload.args;
     if (!validateRpcArgs(method, args)) throw fail("guest-args-invalid");
+    const rpcArgs = normalizeRpcArgs(method, args);
     let serialized;
     try {
-      serialized = JSON.stringify(args);
+      serialized = JSON.stringify(rpcArgs);
     } catch {
       throw fail("guest-args-invalid");
     }
@@ -719,13 +797,15 @@ async function runRpc(payload, dependencies) {
       if (value <= 0) throw fail("guest-rpc-timeout");
       return value;
     };
-    const cookie = await exchange(dependencies, remaining());
-    const value = await callRpc(method, args, cookie, dependencies, remaining());
+    const auth = await exchange(dependencies, remaining());
+    const value = await callRpc(method, rpcArgs, auth.cookie, dependencies, remaining());
+    if (containsActiveAuth(value, [auth.token, cookieValue(auth.cookie), auth.cookie])) {
+      throw fail("guest-rpc-reflection");
+    }
     emit({ ok: true, value });
   } catch (error) {
     writeError(
       error && typeof error.code === "string" ? error.code : "guest-rpc-failed",
-      error && error.remoteCode,
       "guest-rpc-failed",
     );
   }
@@ -754,7 +834,6 @@ async function main() {
 main().catch(error => {
   writeError(
     error && typeof error.code === "string" ? error.code : "guest-request-invalid",
-    error && error.remoteCode,
     "guest-request-invalid",
   );
 });
