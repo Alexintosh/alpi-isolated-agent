@@ -97,6 +97,12 @@ function toolResult(value) {
   return { content: [{ type: "text", text }], isError: false };
 }
 
+const TRANSFER_ERRORS = Object.freeze({
+  transfer_path_refused: "The selected path is not permitted for transfer.",
+  transfer_collision: "The transfer destination already exists.",
+  transfer_preview_failed: "Preview unavailable. Check paths, permissions and file types.",
+});
+
 // Broker failures are mapped to a small fixed vocabulary. Upstream messages,
 // codes and bodies are never surfaced or logged.
 function toolFailure(error) {
@@ -113,6 +119,9 @@ function toolFailure(error) {
   }
   if (code === "EPROTO" || code === "EMSGSIZE") {
     return toolError("invalid_response", "The Alpi broker returned an invalid response.");
+  }
+  if (typeof code === "string" && Object.hasOwn(TRANSFER_ERRORS, code)) {
+    return toolError(code, TRANSFER_ERRORS[code]);
   }
   return toolError("request_failed", "The Alpi request failed.");
 }

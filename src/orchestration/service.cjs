@@ -42,6 +42,9 @@ const MESSAGES = Object.freeze({
   reasoning_effort_invalid: "The requested reasoning effort is not supported.",
   journal_unavailable: "The orchestration task journal is unavailable. Explicit recovery is required.",
   transfer_unavailable: "The transfer service is unavailable. Explicit recovery is required.",
+  transfer_path_refused: "The selected path is not permitted for transfer.",
+  transfer_collision: "The transfer destination already exists.",
+  transfer_preview_failed: "Preview unavailable. Check paths, permissions and file types.",
   capacity: "The orchestration task journal capacity has been reached.",
   task_not_found: "The orchestration task was not found.",
   request_conflict: "The request ID was already used for a different request.",
@@ -320,14 +323,28 @@ function taskSummary(task) {
   };
 }
 
-function transferPreview(value) {
+// file-stream.py nests the verified source basename as one directory entry in
+// the destination container. A receipt's contentRoot must therefore be exactly
+// one valid path component below the reported container: not the container
+// itself, not a deeper path, and never a caller- or guest-supplied string.
+function transferContentRoot(destination, contentRoot) {
+  if (typeof contentRoot !== "string" || contentRoot.length > 8192 || CONTROL.test(contentRoot)) return false;
+  if (!contentRoot.startsWith(destination + "/")) return false;
+  const name = contentRoot.slice(destination.length + 1);
+  return text(name, 255)
+    && name !== "." && name !== ".."
+    && !name.includes("/") && !name.includes("\\");
+}
+
+function transferPreview(value, direction) {
   if (!isPlainObject(value)
     || typeof value.id !== "string" || !UUID.test(value.id)
-    || (value.direction !== "import" && value.direction !== "export")
+    || value.direction !== direction
     || !text(value.destination, 8192) || !value.destination.startsWith("/")
     || !Number.isSafeInteger(value.entries) || value.entries < 1
     || !Number.isSafeInteger(value.bytes) || value.bytes < 0
-    || typeof value.collision !== "boolean") {
+    || typeof value.collision !== "boolean"
+    || !transferContentRoot(value.destination, value.contentRoot)) {
     return null;
   }
   return value;
@@ -339,6 +356,7 @@ function transferReceipt(direction, preview) {
   return {
     direction,
     destination: preview.destination,
+    contentRoot: preview.contentRoot,
     state: "complete",
     entries: preview.entries,
     bytes: preview.bytes,
@@ -964,7 +982,7 @@ class OrchestrationService {
       const preview = await this.prepareTransfer(transfers, direction, args, signal, owned);
       if (preview.collision) {
         this.cancelOwnedTransfer(transfers, owned);
-        throw fixed("operation_failed");
+        throw fixed("transfer_collision");
       }
       this.assertActive(runtime, signal);
       if (signal.aborted) {
@@ -980,9 +998,12 @@ class OrchestrationService {
       // A preview this request created is released on failure. An execute that
       // already ran owns its own cleanup and partial-output journal record.
       if (!owned.executed) this.cancelOwnedTransfer(transfers, owned);
+      // Caller cancellation stays authoritative over any typed transfer failure
+      // that raced it; the operation did not complete.
+      if (signal.aborted) throw fixed("aborted");
       const known = knownServiceError(error);
       if (known) throw known;
-      if (isAbortError(error) || signal.aborted) throw fixed("aborted");
+      if (isAbortError(error)) throw fixed("aborted");
       throw fixed("operation_failed");
     } finally {
       owned.settled = true;
@@ -1069,7 +1090,7 @@ class OrchestrationService {
     } finally {
       owned.preparing = false;
     }
-    const valid = transferPreview(preview);
+    const valid = transferPreview(preview, direction);
     if (valid === null) {
       if (preview && typeof preview.id === "string") owned.planId = preview.id;
       else {
@@ -1078,7 +1099,7 @@ class OrchestrationService {
           && typeof plans.keys === "function") owned.planId = [...plans.keys()][0];
       }
       this.cancelOwnedTransfer(transfers, owned);
-      throw fixed("operation_failed");
+      throw fixed("transfer_preview_failed");
     }
     owned.planId = valid.id;
     if (signal.aborted) {

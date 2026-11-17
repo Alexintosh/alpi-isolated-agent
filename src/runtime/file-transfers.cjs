@@ -13,10 +13,20 @@ const quote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 const inside = (target, root) => target === root || target.startsWith(root + path.sep);
 const hostComparable = value => process.platform === 'darwin' ? value.normalize('NFC').toLowerCase() : value;
 const hostInside = (target, root) => inside(hostComparable(target), hostComparable(root));
+// Path refusals are produced only by this module. The private marker lets the
+// preview wrapper carry this one fixed category forward without trusting a
+// dependency-supplied code or reusing its message.
+const REFUSAL = Symbol('transfer path refusal');
+function refusal(message) {
+  const error = new Error(message);
+  error.code = 'transfer_path_refused';
+  Object.defineProperty(error, REFUSAL, { value: true });
+  return error;
+}
 function guestPath(value) {
   if (typeof value !== 'string' || value.length > 4096 || !value.startsWith('/home/user/workspace') ||
       !inside(value, '/home/user/workspace') || path.posix.normalize(value) !== value || /[\x00-\x1f\x7f\\]/.test(value))
-    throw new Error('Choose a path inside the guest workspace.');
+    throw refusal('Choose a path inside the guest workspace.');
   return value;
 }
 function folderName(value) {
@@ -68,7 +78,7 @@ class FileTransfers extends EventEmitter {
       try { return [root, fs.realpathSync(root)]; } catch { return [root]; }
     });
     if (roots.some(root => hostInside(canonical, root) || (importing && info.isDirectory() && hostInside(root, canonical))))
-      throw new Error('This path contains private data managed by the host.');
+      throw refusal('This path contains private data managed by the host.');
     return canonical;
   }
   local(mode, target, signal, plan) {
@@ -91,7 +101,17 @@ class FileTransfers extends EventEmitter {
     const controller = new AbortController(); this.active = controller;
     this.plans.clear(); this.status = { state: 'preparing' }; this.emit('change', this.snapshot());
     try { return await operation(controller.signal); }
-    catch { this.publish({ state: controller.signal.aborted ? 'cancelled' : 'error' }); throw new Error('Preview unavailable. Check paths, permissions and file types.'); }
+    catch (error) {
+      this.publish({ state: controller.signal.aborted ? 'cancelled' : 'error' });
+      // Only this module's own refusal category survives. Unknown failures and
+      // arbitrary dependency codes become one fixed, safe preview category.
+      let refused = false;
+      try { refused = Boolean(error && error[REFUSAL] === true); } catch { refused = false; }
+      if (refused) throw error;
+      const failure = new Error('Preview unavailable. Check paths, permissions and file types.');
+      failure.code = 'transfer_preview_failed';
+      throw failure;
+    }
     finally { this.active = undefined; }
   }
   async importPlan(environmentId, source, guestParent, name, signal) {
@@ -106,14 +126,18 @@ class FileTransfers extends EventEmitter {
       return result.trim() === 'yes';
     }, { signal });
     const info = fs.statSync(source);
+    // file-stream.py nests the canonical source basename inside the destination
+    // container in both directions. Derive contentRoot from that verified path,
+    // never from the caller's raw string.
     return this.plan({ direction: 'import', environmentId, source, destination, collision, entries: summary.entries,
-      bytes: summary.bytes, sourceIdentity: `${info.dev}:${info.ino}` });
+      bytes: summary.bytes, contentRoot: destination + '/' + path.basename(source),
+      sourceIdentity: `${info.dev}:${info.ino}` });
   }
   async exportPlan(environmentId, source, hostParent, name, signal) {
     source = guestPath(source); hostParent = this.hostPath(hostParent);
     if (!fs.statSync(hostParent).isDirectory()) throw new Error('Choose a destination folder.');
     const destination = path.join(hostParent, folderName(name));
-    if (this.protectedPaths.some(root => hostInside(destination, root))) throw new Error('Reserved destination.');
+    if (this.protectedPaths.some(root => hostInside(destination, root))) throw refusal('Reserved destination.');
     const summary = await this.coordinator.withRunning(environmentId, async (driver, options) => {
       await this.install(driver, options);
       return smallOutput(await this.remote(driver, 'scan', source, options));
@@ -121,7 +145,8 @@ class FileTransfers extends EventEmitter {
     if (!validSummary(summary, 'summary')) throw new Error('The guest source cannot be transferred.');
     let collision = false;
     try { fs.lstatSync(destination); collision = true; } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    return this.plan({ direction: 'export', environmentId, source, destination, collision, entries: summary.entries, bytes: summary.bytes });
+    return this.plan({ direction: 'export', environmentId, source, destination, collision, entries: summary.entries,
+      bytes: summary.bytes, contentRoot: destination + '/' + path.posix.basename(source) });
   }
   plan(value) {
     // A plan is a local picker capability; renderer cannot substitute host paths
@@ -227,7 +252,7 @@ class FileTransfers extends EventEmitter {
         const parent=this.hostPath(path.dirname(record.destination)),info=fs.statSync(parent);
         if(`${info.dev}:${info.ino}`!==record.parentIdentity || this.hostPath(parent)!==path.dirname(record.destination))
           throw new Error('Export parent changed. Files were preserved.');
-        if(this.protectedPaths.some(root=>hostInside(record.destination,root)))throw new Error('Reserved export destination.');
+        if(this.protectedPaths.some(root=>hostInside(record.destination,root)))throw refusal('Reserved export destination.');
         await discard(this.local('discard',record.destination,AbortSignal.timeout(5000),record));
       }else{
         guestPath(record.destination);

@@ -153,7 +153,8 @@ class FakeTransfers {
   addUiPreview(id = "ui-preview") {
     const plan = {
       id, environmentId: "env-1", direction: "import", source: "/tmp/ui",
-      destination: "/home/user/workspace/ui", collision: false, entries: 1, bytes: 1,
+      destination: "/home/user/workspace/ui", contentRoot: "/home/user/workspace/ui/ui",
+      collision: false, entries: 1, bytes: 1,
       expiresAt: Date.now() + 60000,
     };
     this.plans.set(id, plan);
@@ -179,24 +180,30 @@ class FakeTransfers {
     this.plans.clear();
     this.publish({ state: "preparing" });
     try {
-      if (this.options.prepareError) throw this.options.prepareError;
       if (this.coordinator) {
         this.calls.withRunning += 1;
         await this.coordinator.withRunning(args.environmentId, async () => {}, {});
       }
       if (this.options.prepareEntered) this.options.prepareEntered.resolve();
       if (this.options.prepareGate) await this.options.prepareGate.promise;
+      if (this.options.prepareError) throw this.options.prepareError;
       if (controller.signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
       const id = randomUUID();
       const destination = direction === "import"
         ? `${args.guestParent}/${args.name}`
         : `${args.hostParent}/${args.name}`;
+      const sourceName = args.source.split(/[\\/]/).filter(Boolean).at(-1);
       const plan = {
         id,
         environmentId: args.environmentId,
-        direction,
+        direction: this.options.previewDirection ?? direction,
         source: args.source,
         destination,
+        // Mirrors the real manager: the verified source basename becomes one
+        // child entry inside the destination container.
+        ...(this.options.omitContentRoot
+          ? {}
+          : { contentRoot: this.options.contentRoot ?? `${destination}/${sourceName}` }),
         collision: this.options.collision === true,
         entries: this.options.entries ?? 2,
         bytes: this.options.bytes ?? 10,
@@ -1177,12 +1184,13 @@ test("successful import and export return only verified receipt metadata", async
   assert.deepEqual(imported, {
     direction: "import",
     destination: "/home/user/workspace/copy",
+    contentRoot: "/home/user/workspace/copy/source",
     state: "complete",
     entries: 3,
     bytes: 42,
   });
   assert.deepEqual(Object.keys(imported).sort(),
-    ["bytes", "destination", "direction", "entries", "state"]);
+    ["bytes", "contentRoot", "destination", "direction", "entries", "state"]);
   assert.equal(importFake.plans.size, 0);
   assert.equal(importFake.active, undefined);
   // FileTransfers acquires the coordinator queue itself for prepare and execute.
@@ -1201,6 +1209,7 @@ test("successful import and export return only verified receipt metadata", async
   assert.deepEqual(exported, {
     direction: "export",
     destination: "/tmp/host/copy",
+    contentRoot: "/tmp/host/copy/copy",
     state: "complete",
     entries: 1,
     bytes: 5,
@@ -1215,7 +1224,7 @@ test("transfer collisions and non-complete snapshots are never receipts", async 
   const collisionHarness = makeHarness(t, { transfers: collisionFake });
   await assert.rejects(
     collisionHarness.service.dispatch("alpi_import", importArgs()),
-    error => error.code === "operation_failed",
+    error => error.code === "transfer_collision",
   );
   assert.equal(collisionFake.calls.execute.length, 0);
   assert.equal(collisionFake.calls.cancel, 1);
@@ -1356,6 +1365,29 @@ test("abort between preview and execute releases the owned preview", async t => 
   );
   assert.equal(fake.calls.execute.length, 0);
   assert.equal(fake.calls.cancel, 1);
+  assert.equal(fake.plans.size, 0);
+  assert.equal(fake.active, undefined);
+});
+
+test("caller cancellation stays authoritative over a typed failure that races it", async t => {
+  const gate = deferred();
+  const entered = deferred();
+  const fake = new FakeTransfers({
+    prepareGate: gate.promise,
+    prepareEntered: entered,
+    prepareError: canaryError("transfer_path_refused"),
+  });
+  const h = makeHarness(t, { transfers: fake });
+  const controller = new AbortController();
+  const pending = h.service.dispatch("alpi_import", importArgs(), { signal: controller.signal });
+  await entered.promise;
+  controller.abort();
+  gate.resolve();
+  await assert.rejects(pending, error => {
+    assertSanitized(error, "aborted");
+    return true;
+  });
+  assert.equal(fake.calls.execute.length, 0);
   assert.equal(fake.plans.size, 0);
   assert.equal(fake.active, undefined);
 });
@@ -1527,6 +1559,7 @@ test("the real transfer execute/commit returns a receipt and removes only its ow
   assert.deepEqual(receipt, {
     direction: "import",
     destination: "/home/user/workspace/copy",
+    contentRoot: `/home/user/workspace/copy/${path.basename(source)}`,
     state: "complete",
     entries: 1,
     bytes: 5,
@@ -1537,6 +1570,170 @@ test("the real transfer execute/commit returns a receipt and removes only its ow
   assert.equal(transfers.plans.size, 0);
   assert.equal(transfers.active, undefined);
   assert.equal(transfers.status.state, "complete");
+});
+
+test("malformed preview metadata is refused with no receipt, execute or stale plan", async t => {
+  const cases = [
+    { omitContentRoot: true },
+    { contentRoot: "/home/user/workspace/copy" },
+    { contentRoot: "/home/user/workspace/copy/nested/child" },
+    { contentRoot: "/home/user/workspace/copy/../escape" },
+    { contentRoot: "/home/user/workspace/other/child" },
+    { contentRoot: "/home/user/workspace/copy/" },
+    { contentRoot: "/home/user/workspace/copy/." },
+    { contentRoot: "/home/user/workspace/copy/.." },
+    { contentRoot: "/home/user/workspace/copy/a\\b" },
+    { contentRoot: "/home/user/workspace/copy/bad\u0001name" },
+    { contentRoot: 42 },
+  ];
+  for (const options of cases) {
+    const fake = new FakeTransfers(options);
+    const h = makeHarness(t, { transfers: fake });
+    await assert.rejects(
+      h.service.dispatch("alpi_import", importArgs()),
+      error => error.code === "transfer_preview_failed",
+      JSON.stringify(options),
+    );
+    assert.equal(fake.calls.execute.length, 0, JSON.stringify(options));
+    assert.equal(fake.calls.cancel, 1, JSON.stringify(options));
+    assert.equal(fake.plans.size, 0, JSON.stringify(options));
+    assert.equal(fake.active, undefined, JSON.stringify(options));
+  }
+
+  const exportFake = new FakeTransfers({ contentRoot: "/tmp/host/copy/nested/copy" });
+  const exportHarness = makeHarness(t, { transfers: exportFake });
+  await assert.rejects(
+    exportHarness.service.dispatch("alpi_export", exportArgs()),
+    error => error.code === "transfer_preview_failed",
+  );
+  assert.equal(exportFake.calls.execute.length, 0);
+  assert.equal(exportFake.plans.size, 0);
+
+  // A preview that claims the other direction is refused, not turned into a
+  // receipt with the wrong untrusted/guest semantics.
+  const wrongDirection = new FakeTransfers({ previewDirection: "export" });
+  const wrongHarness = makeHarness(t, { transfers: wrongDirection });
+  await assert.rejects(
+    wrongHarness.service.dispatch("alpi_import", importArgs()),
+    error => error.code === "transfer_preview_failed",
+  );
+  assert.equal(wrongDirection.calls.execute.length, 0);
+  assert.equal(wrongDirection.plans.size, 0);
+});
+
+test("typed transfer failures are rebuilt as fresh fixed errors, unknown codes are not", async t => {
+  for (const code of ["transfer_path_refused", "transfer_collision", "transfer_preview_failed"]) {
+    const fake = new FakeTransfers();
+    const h = makeHarness(t, { transfers: fake });
+    fake.execute = async () => { fake.plans.clear(); throw canaryError(code); };
+    await assert.rejects(
+      h.service.dispatch("alpi_export", exportArgs()),
+      error => { assertSanitized(error, code); return true; },
+      code,
+    );
+    assert.equal(fake.calls.recover, 0, code);
+    assert.equal(fake.plans.size, 0, code);
+  }
+
+  // An arbitrary dependency-supplied code is never promoted to a safe category.
+  const fake = new FakeTransfers();
+  const h = makeHarness(t, { transfers: fake });
+  fake.execute = async () => { fake.plans.clear(); throw canaryError("transfer_unknown_guess"); };
+  await assert.rejects(
+    h.service.dispatch("alpi_export", exportArgs()),
+    error => { assertSanitized(error, "operation_failed"); return true; },
+  );
+});
+
+test("the real manager reports a directory export contentRoot inside the host container", async t => {
+  const h = makeHarness(t);
+  const hostParent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alpi-transfer-export-")));
+  t.after(() => fs.rmSync(hostParent, { recursive: true, force: true }));
+  const { transfers } = makeRealTransfers(h);
+  transfers.local = mode => {
+    if (mode === "receive") {
+      return syntheticChannel([
+        `${JSON.stringify({ type: "complete", entries: 2, bytes: 9 })}\n`,
+      ]);
+    }
+    if (mode === "commit") return syntheticChannel([JSON.stringify({ type: "committed" })]);
+    throw new Error("unexpected local mode");
+  };
+  transfers.remote = (driver, mode, target, options, plan) => {
+    if (mode === "scan") return scanSummary(2, 9);
+    if (mode === "send") return syntheticChannel([]);
+    throw new Error("unexpected remote mode");
+  };
+
+  const receipt = await h.open().dispatch("alpi_export",
+    exportArgs({ source: "/home/user/workspace/my project", hostParent }));
+  assert.deepEqual(receipt, {
+    direction: "export",
+    destination: path.join(hostParent, "copy"),
+    contentRoot: path.join(hostParent, "copy", "my project"),
+    state: "complete",
+    entries: 2,
+    bytes: 9,
+    untrusted: true,
+  });
+  assert.equal(transfers.plans.size, 0);
+  assert.equal(transfers.active, undefined);
+});
+
+test("the real manager refuses protected import sources as transfer_path_refused", async t => {
+  const h = makeHarness(t);
+  const { transfers } = makeRealTransfers(h);
+  const protectedSource = path.join(h.root, "private-source");
+  fs.mkdirSync(protectedSource);
+  await assert.rejects(
+    h.open().dispatch("alpi_import", importArgs({ source: protectedSource })),
+    error => { assertSanitized(error, "transfer_path_refused"); return true; },
+  );
+  assert.equal(transfers.plans.size, 0);
+  assert.equal(transfers.active, undefined);
+  assert.equal(transfers.calls?.execute?.length ?? 0, 0);
+});
+
+test("cancelling a real transfer execute yields no receipt and keeps only older journal records", async t => {
+  const h = makeHarness(t);
+  const older = transferJournalRecord();
+  seedTransferJournal(h, [older]);
+  const source = transferSource(t);
+  const { transfers } = makeRealTransfers(h);
+  const gate = deferred();
+  const entered = deferred();
+  transfers.local = mode => {
+    if (mode === "scan") return scanSummary();
+    if (mode === "send") return syntheticChannel(["hello"]);
+    if (mode === "discard") return syntheticChannel([JSON.stringify({ type: "discarded" })]);
+    throw new Error("unexpected local mode");
+  };
+  transfers.remote = (driver, mode, target, options, plan) => {
+    if (mode === "receive") {
+      entered.resolve();
+      const channel = syntheticChannel([]);
+      channel.output = (async function* () {
+        await gate.promise;
+        yield Buffer.from(`${JSON.stringify({ type: "complete", entries: plan.entries, bytes: plan.bytes })}\n`);
+      })();
+      return channel;
+    }
+    if (mode === "discard") return syntheticChannel([JSON.stringify({ type: "discarded" })]);
+    throw new Error("unexpected remote mode");
+  };
+
+  const controller = new AbortController();
+  const pending = h.open().dispatch("alpi_import", importArgs({ source }), { signal: controller.signal });
+  await entered.promise;
+  controller.abort();
+  gate.resolve();
+  await assert.rejects(pending, error => error.code === "aborted");
+  const journal = transferJournal(h);
+  assert.equal(journal.operations.length, 1);
+  assert.equal(journal.operations[0].id, older.id);
+  assert.equal(transfers.plans.size, 0);
+  assert.equal(transfers.active, undefined);
+  assert.equal(transfers.status.state, "cancelled");
 });
 
 test("known dependency errors are rebuilt as fresh safe errors", async t => {

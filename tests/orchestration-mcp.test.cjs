@@ -1717,3 +1717,38 @@ test("text limits use schema characters with an explicit UTF-8 byte bound", () =
   assert.equal([..."😀".repeat(32768)].length, 32768);
   assert.equal("😀".repeat(32768).length, 65536);
 });
+
+
+test("fixed transfer categories survive Unix transport and MCP without dependency messages", async (t) => {
+  const expected = {
+    transfer_path_refused: "The selected path is not permitted for transfer.",
+    transfer_collision: "The transfer destination already exists.",
+    transfer_preview_failed: "Preview unavailable. Check paths, permissions and file types.",
+    transfer_unknown: "The Alpi request failed.",
+  };
+  let currentCode;
+  const socketPath = socketIn(privateDir(t));
+  const server = await startServer({ socketPath, dispatch: () => {
+    throw Object.assign(new Error("PRIVATE-TRANSFER-CANARY"), {
+      code: currentCode, cause: new Error("PRIVATE-TRANSFER-CANARY"),
+    });
+  }});
+  t.after(() => server.close());
+  const f = spawnFacade(t, socketPath);
+  await initialize(f);
+  let id = 100;
+  for (const [code, message] of Object.entries(expected)) {
+    currentCode = code;
+    f.send(request(++id, "tools/call", {name: "alpi_import", arguments: {
+      environmentId: "test", source: "/synthetic/source", guestParent: "/home/user/workspace", name: "copy",
+    }}));
+    const response = JSON.parse(await f.out.next());
+    assert.equal(response.id, id);
+    assert.equal(response.result.isError, true);
+    assert.deepEqual(JSON.parse(response.result.content[0].text), {
+      code: code === "transfer_unknown" ? "request_failed" : code, message,
+    });
+    assert.equal(JSON.stringify(response).includes("PRIVATE-TRANSFER-CANARY"), false);
+  }
+  assert.equal(f.stderr(), "");
+});
