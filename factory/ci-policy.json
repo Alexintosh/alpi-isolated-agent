@@ -4,7 +4,7 @@
   "checks": [
     {
       "id": "portable",
-      "minimumTests": 202,
+      "minimumTests": 276,
       "files": [
         "tests/atomic-json.test.cjs",
         "tests/coordinator.test.cjs",
@@ -25,7 +25,10 @@
         "tests/secret-controls.test.cjs",
         "tests/model-relay.test.cjs",
         "tests/model-git-controls.test.cjs",
-        "tests/guest-artifacts.test.cjs"
+        "tests/guest-artifacts.test.cjs",
+        "tests/orchestration-transport.test.cjs",
+        "tests/orchestration-guest.test.cjs",
+        "tests/orchestration-mcp.test.cjs"
       ]
     },
     {

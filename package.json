@@ -11,7 +11,7 @@
     "test": "node --test tests/*.test.cjs",
     "test:ui-dom": "env -u ELECTRON_RUN_AS_NODE electron tests/model-git-dom.cjs",
     "package:mac": "node scripts/package-personal-app.cjs",
-    "test:portable": "node --test tests/atomic-json.test.cjs tests/coordinator.test.cjs tests/environment-management.test.cjs tests/model-catalog.test.cjs tests/secret-vault.test.cjs tests/secret-redactor.test.cjs tests/network-policy.test.cjs tests/network-presentation.test.cjs tests/git-catalog.test.cjs tests/diagnostics.test.cjs tests/welcome-screen.test.cjs tests/environment-management-ui.test.cjs tests/ui-control-polish.test.cjs tests/secret-scope.test.cjs tests/secret-catalog.test.cjs tests/secret-bridge.test.cjs tests/secret-controls.test.cjs tests/model-relay.test.cjs tests/model-git-controls.test.cjs tests/guest-artifacts.test.cjs",
+    "test:portable": "node --test tests/atomic-json.test.cjs tests/coordinator.test.cjs tests/environment-management.test.cjs tests/model-catalog.test.cjs tests/secret-vault.test.cjs tests/secret-redactor.test.cjs tests/network-policy.test.cjs tests/network-presentation.test.cjs tests/git-catalog.test.cjs tests/diagnostics.test.cjs tests/welcome-screen.test.cjs tests/environment-management-ui.test.cjs tests/ui-control-polish.test.cjs tests/secret-scope.test.cjs tests/secret-catalog.test.cjs tests/secret-bridge.test.cjs tests/secret-controls.test.cjs tests/model-relay.test.cjs tests/model-git-controls.test.cjs tests/guest-artifacts.test.cjs tests/orchestration-transport.test.cjs tests/orchestration-guest.test.cjs tests/orchestration-mcp.test.cjs",
     "notices": "node scripts/collect-notices.cjs",
     "package:dmg": "node scripts/package-dmg.cjs"
   },
