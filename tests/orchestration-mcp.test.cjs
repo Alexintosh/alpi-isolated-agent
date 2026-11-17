@@ -8,7 +8,7 @@ const { randomBytes, randomUUID } = require("node:crypto");
 const { PassThrough, Writable } = require("node:stream");
 const vm = require("node:vm");
 const { startServer } = require("../src/orchestration/transport.cjs");
-const { TOOLS } = require("../src/orchestration/tools.cjs");
+const { TOOLS, validateCall } = require("../src/orchestration/tools.cjs");
 const { createMcpServer } = require("../src/orchestration/mcp.cjs");
 
 const TMP_ROOT = fs.realpathSync(os.tmpdir());
@@ -16,6 +16,11 @@ const MCP_SOURCE = path.join(__dirname, "../src/orchestration/mcp.cjs");
 const MAX_LINE_BYTES = 1024 * 1024;
 const WRITE_STALL_MS = 30000;
 const CALL_TIMEOUT_MS = 180000;
+const INITIALIZE_PARAMS = {
+  protocolVersion: "2025-06-18",
+  capabilities: {},
+  clientInfo: { name: "synthetic-test", version: "1.0.0" },
+};
 
 function privateDir(t) {
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, "am-"));
@@ -139,9 +144,8 @@ function waitExit(child, timeoutMs = 5000) {
 async function initialize(f, protocolVersion = "2025-06-18") {
   f.send(
     request("init", "initialize", {
+      ...INITIALIZE_PARAMS,
       protocolVersion,
-      capabilities: {},
-      clientInfo: { name: "synthetic-test", version: "1.0.0" },
     }),
   );
   const response = JSON.parse(await f.out.next());
@@ -170,7 +174,7 @@ function runCli(args) {
 
 // Loads the facade with an injected timer so stall and call deadlines can be
 // exercised without production test knobs.
-function loadFacade({ setTimeoutFn = setTimeout } = {}) {
+function loadFacade({ setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
   const source = fs.readFileSync(MCP_SOURCE, "utf8");
   const module = { exports: {} };
   const sandbox = {
@@ -182,7 +186,8 @@ function loadFacade({ setTimeoutFn = setTimeout } = {}) {
       return require(specifier);
     },
     setTimeout: setTimeoutFn,
-    clearTimeout,
+    clearTimeout: clearTimeoutFn,
+    setImmediate,
     Buffer,
     process,
     TextDecoder,
@@ -337,14 +342,18 @@ test("tools/call validates and forwards only the tool name and arguments", async
   f.send(request(13, "tools/call", { name: "alpi_status" }));
   response = JSON.parse(await f.out.next());
   assert.equal(response.id, 13);
-  assert.equal(response.error.code, -32602);
+  assert.equal(response.result.isError, false);
+  assert.deepEqual(JSON.parse(response.result.content[0].text), {
+    method: "alpi_status",
+    params: {},
+  });
 
   f.send(request(14, "tools/call", { name: "alpi_status", arguments: [], extra: true }));
   response = JSON.parse(await f.out.next());
   assert.equal(response.id, 14);
   assert.equal(response.error.code, -32602);
 
-  assert.equal(seen.length, before, "invalid calls must not reach the broker");
+  assert.equal(seen.length, before + 1, "invalid calls must not reach the broker");
 
   f.send(
     request(15, "tools/call", {
@@ -715,7 +724,7 @@ test("tool results are bounded and unserializable values fail safely", async () 
     return 1n;
   };
   const facade = createMcpServer({ input, output, call });
-  input.write(frame(request("init", "initialize", { protocolVersion: "2025-06-18" })));
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
   assert.equal(JSON.parse(await out.next()).id, "init");
   input.write(frame(notification("notifications/initialized")));
 
@@ -778,7 +787,7 @@ test("a stalled stdout reader is terminated at the write deadline", async () => 
       );
     });
   const facade = facadeModule.createMcpServer({ input, output, call });
-  input.write(frame(request("init", "initialize", { protocolVersion: "2025-06-18" })));
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
   input.write(frame(notification("notifications/initialized")));
   input.write(
     frame(request(70, "tools/call", { name: "alpi_wait", arguments: { taskId: randomUUID() } })),
@@ -804,7 +813,7 @@ test("the output queue is bounded at 16 MiB and drops blocked output", async () 
   const payload = "x".repeat(4 * 1024 * 1024 - 4096);
   const call = () => payload;
   const facade = facadeModule.createMcpServer({ input, output, call });
-  input.write(frame(request("init", "initialize", { protocolVersion: "2025-06-18" })));
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
   input.write(frame(notification("notifications/initialized")));
   for (let id = 1; id <= 6; id += 1) {
     input.write(frame(request(id, "tools/call", { name: "alpi_status", arguments: {} })));
@@ -840,7 +849,7 @@ test("an unresponsive call times out at its bound and aborts the broker signal",
       );
     });
   const facade = facadeModule.createMcpServer({ input, output, call });
-  input.write(frame(request("init", "initialize", { protocolVersion: "2025-06-18" })));
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
   assert.equal(JSON.parse(await out.next()).id, "init");
   input.write(frame(notification("notifications/initialized")));
   input.write(
@@ -858,4 +867,487 @@ test("an unresponsive call times out at its bound and aborts the broker signal",
 
   input.end();
   assert.equal(await facade.done, 0);
+});
+
+test("valid omitted arguments, request metadata and list metadata are accepted", async (t) => {
+  const dir = privateDir(t);
+  const socketPath = socketIn(dir);
+  const seen = [];
+  const server = await startServer({
+    socketPath,
+    dispatch: (method, params) => {
+      seen.push({ method, params });
+      return { method, params };
+    },
+  });
+  t.after(() => server.close());
+  const f = spawnFacade(t, socketPath);
+  await initialize(f);
+
+  f.send(request(100, "tools/list", { _meta: {} }));
+  let response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 100);
+  assert.deepEqual(response.result.tools, TOOLS);
+
+  // CallToolRequest.arguments is optional for zero-argument tools.
+  f.send(request(101, "tools/call", { name: "alpi_status" }));
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 101);
+  assert.equal(response.result.isError, false);
+  assert.deepEqual(JSON.parse(response.result.content[0].text), {
+    method: "alpi_status",
+    params: {},
+  });
+
+  // Request metadata is accepted and never forwarded as broker arguments.
+  f.send(
+    request(102, "tools/call", {
+      name: "alpi_status",
+      arguments: {},
+      _meta: { progressToken: "p" },
+    }),
+  );
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 102);
+  assert.equal(response.result.isError, false);
+  assert.deepEqual(JSON.parse(response.result.content[0].text), {
+    method: "alpi_status",
+    params: {},
+  });
+
+  // Required tool fields are still enforced after normalization.
+  f.send(request(103, "tools/call", { name: "alpi_exec" }));
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 103);
+  assert.equal(response.error.code, -32602);
+
+  f.send(
+    request(104, "tools/call", {
+      name: "alpi_exec",
+      arguments: { environmentId: "env-1" },
+      _meta: {},
+    }),
+  );
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 104);
+  assert.equal(response.error.code, -32602);
+
+  // Malformed metadata and arbitrary extra params are rejected.
+  f.send(request(105, "tools/call", { name: "alpi_status", arguments: {}, _meta: [] }));
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 105);
+  assert.equal(response.error.code, -32602);
+
+  f.send(request(106, "tools/list", { _meta: "not-an-object" }));
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 106);
+  assert.equal(response.error.code, -32602);
+
+  f.send(request(107, "tools/list", { _meta: {}, cursor: "next" }));
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 107);
+  assert.equal(response.error.code, -32602);
+
+  f.send(request(108, "tools/call", { name: "alpi_status", arguments: {}, extra: true }));
+  response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 108);
+  assert.equal(response.error.code, -32602);
+
+  assert.deepEqual(
+    seen.map((entry) => entry.method),
+    ["alpi_status", "alpi_status"],
+    "only the two valid calls may reach the broker",
+  );
+  assert.equal(f.stderr(), "");
+});
+
+test("initialize requires a capabilities object and clientInfo name/version", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const out = makeReader(output);
+  const facade = createMcpServer({ input, output, call: () => ({}) });
+  const invalid = [
+    {},
+    { protocolVersion: "2025-06-18" },
+    { protocolVersion: "2025-06-18", capabilities: {} },
+    { protocolVersion: "2025-06-18", capabilities: [], clientInfo: { name: "n", version: "v" } },
+    { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "", version: "v" } },
+    { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "n" } },
+    { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "n", version: 7 } },
+    {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "n".repeat(129), version: "v" },
+    },
+  ];
+  for (let index = 0; index < invalid.length; index += 1) {
+    input.write(frame(request(index, "initialize", invalid[index])));
+    const response = JSON.parse(await out.next());
+    assert.equal(response.id, index);
+    assert.equal(response.error.code, -32602);
+  }
+
+  // Optional spec fields are allowed, and an unsupported version still
+  // negotiates the single supported version.
+  input.write(
+    frame(
+      request("valid", "initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: { roots: { listChanged: true } },
+        clientInfo: { name: "synthetic-test", version: "1.0.0", title: "optional" },
+        _meta: { progressToken: 1 },
+      }),
+    ),
+  );
+  const response = JSON.parse(await out.next());
+  assert.equal(response.id, "valid");
+  assert.equal(response.result.protocolVersion, "2025-06-18");
+  input.write(frame(notification("notifications/initialized")));
+  input.end();
+  assert.equal(await facade.done, 0);
+});
+
+test("deferred dispatch is skipped after same-chunk cancellation", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const out = makeReader(output);
+  const dispatches = [];
+  const call = (name, params, { signal }) => {
+    dispatches.push({ name, params, aborted: signal.aborted });
+    if (name === "alpi_status") return { ok: true };
+    return new Promise((resolve) => {
+      signal.addEventListener("abort", () => resolve({ aborted: true }), { once: true });
+    });
+  };
+  const timers = new Set();
+  const facadeModule = loadFacade({
+    setTimeoutFn: (fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      timers.add(timer);
+      return timer;
+    },
+    clearTimeoutFn: (timer) => {
+      timers.delete(timer);
+      clearTimeout(timer);
+    },
+  });
+  const facade = facadeModule.createMcpServer({ input, output, call });
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+  assert.equal(JSON.parse(await out.next()).id, "init");
+  input.write(frame(notification("notifications/initialized")));
+
+  input.write(
+    frame(
+      request("c", "tools/call", {
+        name: "alpi_wait",
+        arguments: { taskId: randomUUID() },
+      }),
+    ) +
+      frame(notification("notifications/cancelled", { requestId: "c" })) +
+      frame(request("d", "tools/call", { name: "alpi_status" })),
+  );
+  const response = JSON.parse(await out.next());
+  assert.equal(response.id, "d");
+  assert.equal(response.result.isError, false);
+  assert.deepEqual(
+    dispatches.map((entry) => entry.name),
+    ["alpi_status"],
+    "the cancelled call must never invoke the callback",
+  );
+  assert.equal(dispatches[0].aborted, false);
+
+  input.end();
+  assert.equal(await facade.done, 0);
+  assert.equal(timers.size, 0, "cancelled call timers must be cleared");
+});
+
+test("synchronous close prevents a deferred dispatch", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let dispatches = 0;
+  const call = () => {
+    dispatches += 1;
+    return new Promise(() => {});
+  };
+  const timers = new Set();
+  const facadeModule = loadFacade({
+    setTimeoutFn: (fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      timers.add(timer);
+      return timer;
+    },
+    clearTimeoutFn: (timer) => {
+      timers.delete(timer);
+      clearTimeout(timer);
+    },
+  });
+  const facade = facadeModule.createMcpServer({ input, output, call });
+  // Deliver the frames synchronously so the call entry exists before close(),
+  // then close before the deferred dispatch microtask can run.
+  input.emit(
+    "data",
+    Buffer.from(
+      frame(request("init", "initialize", INITIALIZE_PARAMS)) +
+        frame(notification("notifications/initialized")) +
+        frame(request("c", "tools/call", { name: "alpi_status", arguments: {} })),
+    ),
+  );
+  facade.close();
+  assert.equal(await facade.done, 0);
+  assert.equal(dispatches, 0, "the callback must not run after close");
+  assert.equal(timers.size, 0, "the call timer must be cleared");
+  input.end();
+});
+
+test("output write callback errors terminate once without escaping", async () => {
+  const input = new PassThrough();
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback(new Error("synthetic-output-failure"));
+    },
+  });
+  const terminations = [];
+  const facade = createMcpServer({
+    input,
+    output,
+    call: () => ({ ok: true }),
+    onTerminate: (code) => terminations.push(code),
+  });
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+  input.write(frame(notification("notifications/initialized")));
+  input.write(frame(request("p", "ping")));
+  assert.equal(await facade.done, 1);
+  assert.deepEqual(terminations, [1]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(output.listenerCount("error"), 0);
+  input.end();
+});
+
+test("independently emitted output errors abort active calls and terminate once", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const out = makeReader(output);
+  let startedResolve;
+  const started = new Promise((resolve) => {
+    startedResolve = resolve;
+  });
+  let aborted = false;
+  const terminations = [];
+  const call = (name, params, { signal }) => {
+    startedResolve();
+    return new Promise((resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => {
+          aborted = true;
+          reject(Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" }));
+        },
+        { once: true },
+      );
+    });
+  };
+  const facade = createMcpServer({
+    input,
+    output,
+    call,
+    onTerminate: (code) => terminations.push(code),
+  });
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+  assert.equal(JSON.parse(await out.next()).id, "init");
+  input.write(frame(notification("notifications/initialized")));
+  input.write(
+    frame(request("w", "tools/call", { name: "alpi_wait", arguments: { taskId: randomUUID() } })),
+  );
+  await started;
+
+  // The error arrives after the initialize write completed while a call is
+  // active; it must abort that call and terminate exactly once.
+  output.emit("error", new Error("synthetic-late-error"));
+  assert.equal(await facade.done, 1);
+  assert.equal(aborted, true);
+  assert.deepEqual(terminations, [1]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(output.listenerCount("error"), 0);
+  assert.equal(
+    out.all.some((line) => line.includes("synthetic-late-error")),
+    false,
+    "raw stream errors must not appear in protocol output",
+  );
+  input.end();
+});
+
+test("the output error handler does not leak across repeated server use", async () => {
+  const output = new PassThrough();
+  for (let index = 0; index < 3; index += 1) {
+    const input = new PassThrough();
+    const facade = createMcpServer({ input, output, call: () => ({}) });
+    assert.equal(output.listenerCount("error"), 1, "one output error handler per active server");
+    input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+    input.write(frame(notification("notifications/initialized")));
+    input.write(frame(request("p", "ping")));
+    input.end();
+    assert.equal(await facade.done, 0);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(output.listenerCount("error"), 0);
+});
+
+test("shared transfer contract rejects relative host paths and unsafe names", () => {
+  const importBase = { environmentId: "env-1", guestParent: "/work" };
+  assert.throws(() =>
+    validateCall("alpi_import", { ...importBase, source: "relative", name: "ok" }),
+  );
+  assert.throws(() =>
+    validateCall("alpi_import", { ...importBase, source: "/Users/synthetic/file.txt", guestParent: "relative", name: "ok" }),
+  );
+  for (const name of ["", ".", "..", "a/b", "a\\b", "bad\u0000name", "bad\nname"]) {
+    assert.throws(
+      () =>
+        validateCall("alpi_import", {
+          ...importBase,
+          source: "/Users/synthetic/file.txt",
+          name,
+        }),
+      `expected rejection for ${JSON.stringify(name)}`,
+    );
+  }
+  assert.doesNotThrow(() =>
+    validateCall("alpi_import", { ...importBase, source: "/Users/synthetic/file.txt", name: "my folder" }),
+  );
+  assert.doesNotThrow(() =>
+    validateCall("alpi_import", { ...importBase, source: "/Users/synthetic/file.txt", name: "結果 名前" }),
+  );
+
+  const exportBase = { environmentId: "env-1", source: "/work" };
+  assert.throws(() =>
+    validateCall("alpi_export", { ...exportBase, hostParent: "relative", name: "ok" }),
+  );
+  assert.throws(() =>
+    validateCall("alpi_export", { ...exportBase, hostParent: "", name: "ok" }),
+  );
+  assert.throws(() =>
+    validateCall("alpi_export", { ...exportBase, hostParent: "/Users/synthetic", name: "/absolute" }),
+  );
+  assert.doesNotThrow(() =>
+    validateCall("alpi_export", { ...exportBase, hostParent: "/Users/synthetic", name: "my folder" }),
+  );
+
+  const importTool = TOOLS.find((entry) => entry.name === "alpi_import");
+  const exportTool = TOOLS.find((entry) => entry.name === "alpi_export");
+  assert.equal(importTool.inputSchema.properties.source.pattern, "^/[^\\u0000]*$");
+  assert.equal(exportTool.inputSchema.properties.hostParent.pattern, "^/[^\\u0000]*$");
+  assert.equal(importTool.inputSchema.properties.name.pattern, "^(?!\\.{1,2}$)[^\\u0000-\\u001F\\u007F/\\\\]+$");
+  assert.equal(exportTool.inputSchema.properties.name.pattern, importTool.inputSchema.properties.name.pattern);
+});
+
+test("invalid transfer arguments never reach the broker", async (t) => {
+  const dir = privateDir(t);
+  const socketPath = socketIn(dir);
+  const seen = [];
+  const server = await startServer({
+    socketPath,
+    dispatch: (method, params) => {
+      seen.push({ method, params });
+      return { ok: true };
+    },
+  });
+  t.after(() => server.close());
+  const f = spawnFacade(t, socketPath);
+  await initialize(f);
+
+  const invalid = [
+    {
+      name: "alpi_import",
+      arguments: { environmentId: "env-1", source: "relative", guestParent: "/work", name: "ok" },
+    },
+    {
+      name: "alpi_import",
+      arguments: {
+        environmentId: "env-1",
+        source: "/Users/synthetic/file.txt",
+        guestParent: "/work",
+        name: "../escape",
+      },
+    },
+    {
+      name: "alpi_export",
+      arguments: { environmentId: "env-1", source: "/work", hostParent: "relative", name: "ok" },
+    },
+    {
+      name: "alpi_export",
+      arguments: {
+        environmentId: "env-1",
+        source: "/work",
+        hostParent: "/Users/synthetic",
+        name: "/absolute",
+      },
+    },
+  ];
+  for (let index = 0; index < invalid.length; index += 1) {
+    f.send(request(200 + index, "tools/call", invalid[index]));
+    const response = JSON.parse(await f.out.next());
+    assert.equal(response.id, 200 + index);
+    assert.equal(response.error.code, -32602);
+  }
+  assert.equal(seen.length, 0, "invalid transfer calls must not reach the broker");
+
+  f.send(
+    request(210, "tools/call", {
+      name: "alpi_import",
+      arguments: {
+        environmentId: "env-1",
+        source: "/Users/synthetic/file.txt",
+        guestParent: "/work",
+        name: "my folder",
+      },
+    }),
+  );
+  const response = JSON.parse(await f.out.next());
+  assert.equal(response.id, 210);
+  assert.equal(response.result.isError, false);
+  assert.deepEqual(seen.at(-1), {
+    method: "alpi_import",
+    params: {
+      environmentId: "env-1",
+      source: "/Users/synthetic/file.txt",
+      guestParent: "/work",
+      name: "my folder",
+    },
+  });
+});
+
+test("text limits use schema characters with an explicit UTF-8 byte bound", () => {
+  const delegate = TOOLS.find((entry) => entry.name === "alpi_delegate");
+  const promptSchema = delegate.inputSchema.properties.prompt;
+  assert.equal(promptSchema.maxLength, 32768);
+  assert.equal(promptSchema.maxUtf8Bytes, 32768);
+  assert.match(promptSchema.description, /32768 UTF-8 bytes/);
+
+  const base = {
+    environmentId: "env-1",
+    cwd: "/work",
+    provider: "provider",
+    model: "model",
+    requestId: randomUUID(),
+  };
+
+  // ASCII stays within both the character and byte bound.
+  assert.doesNotThrow(() =>
+    validateCall("alpi_delegate", { ...base, prompt: "a".repeat(32768) }),
+  );
+  assert.throws(() => validateCall("alpi_delegate", { ...base, prompt: "a".repeat(32769) }));
+
+  // Multibyte text is capped by the preserved UTF-8 byte bound.
+  assert.doesNotThrow(() =>
+    validateCall("alpi_delegate", { ...base, prompt: "é".repeat(16000) }),
+  );
+  assert.throws(() => validateCall("alpi_delegate", { ...base, prompt: "é".repeat(20000) }));
+
+  // Astral characters count as one schema character but four UTF-8 bytes.
+  assert.doesNotThrow(() =>
+    validateCall("alpi_delegate", { ...base, prompt: "😀".repeat(8192) }),
+  );
+  assert.throws(() => validateCall("alpi_delegate", { ...base, prompt: "😀".repeat(32768) }));
+  assert.equal([..."😀".repeat(32768)].length, 32768);
+  assert.equal("😀".repeat(32768).length, 65536);
 });

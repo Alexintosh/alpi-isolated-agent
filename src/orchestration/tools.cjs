@@ -1,10 +1,22 @@
 // One contract is used by the MCP facade and the privileged host dispatcher.
-const text = (description, maxLength = 4096, extra = {}) => ({ type: 'string', description, minLength: 1, maxLength, ...extra });
+// maxLength is a JSON Schema character (Unicode code point) bound. The
+// maxUtf8Bytes annotation carries the distinct UTF-8 byte bound that protects
+// downstream prompt/command handling; both are enforced by validateCall.
+const text = (description, maxLength = 4096, extra = {}) => ({
+  type: 'string', description: `${description} At most ${maxLength} UTF-8 bytes.`,
+  minLength: 1, maxLength, maxUtf8Bytes: maxLength, ...extra,
+});
 const environmentId = text('Explicit Alpi environment ID from alpi_status.', 64, { pattern: '^[a-z0-9-]+$' });
+const uuidPattern = '^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$';
 const uuid = text('Caller-generated UUID. Reuse it only to recover this exact request; never blindly retry a prompt with a new ID.', 36,
-  { pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' });
-const taskId = { ...uuid, description: 'Host-issued task ID returned by alpi_delegate or alpi_tasks.' };
+  { pattern: uuidPattern });
+const taskId = text('Host-issued task ID returned by alpi_delegate or alpi_tasks.', 36, { pattern: uuidPattern });
 const guestDirectory = text('Absolute directory INSIDE the Linux guest; no host path is mounted.', 4096, { pattern: '^/[^\\u0000]*$' });
+const hostPath = description => text(description, 4096, { pattern: '^/[^\\u0000]*$' });
+// Matches the existing transfer layer's folderName rule: one non-empty
+// component, no . / .., no slash or backslash and no control characters.
+const containerName = text('New container name, one path component; no . or .., slash, backslash or control characters.', 255,
+  { pattern: '^(?!\\.{1,2}$)[^\\u0000-\\u001F\\u007F/\\\\]+$' });
 const prompt = text('Task or follow-up for the guest agent. Do not include host secrets.', 32768);
 const integer = (description, minimum, maximum) => ({ type: 'integer', description, minimum, maximum });
 function tool(name, description, properties, required = [], readOnly = false) {
@@ -35,14 +47,19 @@ const TOOLS = [
   }, ['taskId'], true),
   tool('alpi_cancel', 'Request stock Harness cancellation for one task. This is cooperative and does not guarantee guest process termination; alpi_stop is the verified whole-VM stop.', { taskId }, ['taskId']),
   tool('alpi_import', 'Explicitly copy an authorized host file/tree into a new guest workspace container using Alpi verified transfers. No mount, overwrite, automatic secret filtering, or dependency execution. A directory import includes every permitted regular file in that tree: prepare a clean staging copy first.', {
-    environmentId, source: text('Authorized absolute HOST source path.'), guestParent: guestDirectory, name: text('New container name, one path component.', 255),
+    environmentId, source: hostPath('Authorized absolute HOST source path.'), guestParent: guestDirectory, name: containerName,
   }, ['environmentId', 'source', 'guestParent', 'name']),
   tool('alpi_export', 'Copy untrusted guest results into a NEW container under the explicit host destination using bounded verified transfers. No extraction, execution, merge or overwrite. Guest cannot choose the host destination.', {
-    environmentId, source: guestDirectory, hostParent: text('Authorized existing absolute HOST destination directory.'), name: text('New container name, one path component.', 255),
+    environmentId, source: guestDirectory, hostParent: hostPath('Authorized existing absolute HOST destination directory.'), name: containerName,
   }, ['environmentId', 'source', 'hostParent', 'name']),
 ];
 const byName = new Map(TOOLS.map(value => [value.name, value]));
 function invalid() { return Object.assign(new Error('Invalid orchestration request.'), { code: 'invalid_arguments' }); }
+function characterCount(value) {
+  let count = 0;
+  for (const _ of value) count += 1;
+  return count;
+}
 function validateCall(name, input) {
   const definition = byName.get(name);
   if (!definition) throw Object.assign(new Error('Unknown orchestration tool.'), { code: 'unknown_tool' });
@@ -53,9 +70,14 @@ function validateCall(name, input) {
   for (const [key, value] of Object.entries(input)) {
     const field = schema.properties[key];
     if (field.enum && !field.enum.includes(value)) throw invalid();
-    if (field.type === 'string' && (typeof value !== 'string' || value.includes('\0') ||
-        (field.minLength && !value.trim()) || value.length < (field.minLength ?? 0) ||
-        Buffer.byteLength(value) > (field.maxLength ?? 65536) || (field.pattern && !new RegExp(field.pattern).test(value)))) throw invalid();
+    if (field.type === 'string' && typeof value !== 'string') throw invalid();
+    if (field.type === 'string') {
+      const characters = characterCount(value);
+      if (value.includes('\0') || (field.minLength && !value.trim()) ||
+          characters < (field.minLength ?? 0) || characters > (field.maxLength ?? 65536) ||
+          Buffer.byteLength(value) > (field.maxUtf8Bytes ?? field.maxLength ?? 65536) ||
+          (field.pattern && !new RegExp(field.pattern).test(value))) throw invalid();
+    }
     if (field.type === 'integer' && (!Number.isSafeInteger(value) || value < field.minimum || value > field.maximum)) throw invalid();
     if (field.type === 'boolean' && typeof value !== 'boolean') throw invalid();
     result[key] = value;

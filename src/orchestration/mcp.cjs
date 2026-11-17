@@ -18,6 +18,8 @@ const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
 const MAX_ACTIVE_CALLS = 8;
 const MAX_ID_LENGTH = 256;
 const MAX_METHOD_LENGTH = 256;
+const MAX_META_KEYS = 32;
+const MAX_CLIENT_FIELD_LENGTH = 128;
 const MAX_CALL_MS = 180000;
 const WRITE_STALL_MS = 30000;
 
@@ -43,6 +45,16 @@ function validId(value) {
 
 function validMethod(value) {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_METHOD_LENGTH;
+}
+
+// Request params may carry bounded _meta (progress tokens and similar). It is
+// accepted at the protocol layer and never forwarded as tool arguments.
+function validMeta(value) {
+  return isObject(value) && Object.keys(value).length <= MAX_META_KEYS;
+}
+
+function validClientField(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_CLIENT_FIELD_LENGTH;
 }
 
 // JSON-RPC responses carry a null id when the request id cannot be trusted.
@@ -189,11 +201,21 @@ function createMcpServer({ input, output, call, onTerminate }) {
   });
 
   let queue;
+  let outputErrorHandler = null;
+  const removeOutputErrorHandler = () => {
+    if (!outputErrorHandler) return;
+    if (typeof output.off === "function") output.off("error", outputErrorHandler);
+    else if (typeof output.removeListener === "function") output.removeListener("error", outputErrorHandler);
+    outputErrorHandler = null;
+  };
   const finish = () => {
     if (finished) return;
     finished = true;
     queue.stop();
     doneResolve(exitCode);
+    // A failed write callback schedules the stream error on a later tick, so
+    // keep the handler attached through the deferred error before dropping it.
+    if (outputErrorHandler) setImmediate(removeOutputErrorHandler);
     if (onTerminate) onTerminate(exitCode);
   };
 
@@ -229,6 +251,14 @@ function createMcpServer({ input, output, call, onTerminate }) {
       if (closing) finish();
     },
   });
+
+  // Subscribe before the first write so a write callback failure or an
+  // independently emitted output error aborts pending calls and terminates
+  // exactly once instead of escaping as an unhandled stream error.
+  if (typeof output.on === "function") {
+    outputErrorHandler = () => terminate(1, true);
+    output.on("error", outputErrorHandler);
+  }
 
   const sendFrame = (frame) => {
     if (finished) return;
@@ -267,7 +297,12 @@ function createMcpServer({ input, output, call, onTerminate }) {
       !isObject(params) ||
       typeof params.protocolVersion !== "string" ||
       params.protocolVersion.length === 0 ||
-      params.protocolVersion.length > 64
+      params.protocolVersion.length > 64 ||
+      !isObject(params.capabilities) ||
+      !isObject(params.clientInfo) ||
+      !validClientField(params.clientInfo.name) ||
+      !validClientField(params.clientInfo.version) ||
+      (Object.hasOwn(params, "_meta") && !validMeta(params._meta))
     ) {
       return sendError(id, INVALID_PARAMS, "Invalid initialize parameters.");
     }
@@ -286,7 +321,10 @@ function createMcpServer({ input, output, call, onTerminate }) {
       if (Object.hasOwn(params, "cursor")) {
         return sendError(id, INVALID_PARAMS, "Cursors are not supported.");
       }
-      if (Object.keys(params).length !== 0) {
+      if (Object.keys(params).some((key) => key !== "_meta")) {
+        return sendError(id, INVALID_PARAMS, "Invalid tools/list parameters.");
+      }
+      if (Object.hasOwn(params, "_meta") && !validMeta(params._meta)) {
         return sendError(id, INVALID_PARAMS, "Invalid tools/list parameters.");
       }
     }
@@ -305,7 +343,12 @@ function createMcpServer({ input, output, call, onTerminate }) {
       sendResult(id, toolError("timeout", "The Alpi request timed out."));
     }, MAX_CALL_MS);
     Promise.resolve()
-      .then(() => call(name, args, { signal: controller.signal, timeoutMs: MAX_CALL_MS }))
+      .then(() => {
+        // Cancellation and shutdown can settle this entry before the deferred
+        // dispatch runs; never start callback work for an invalidated call.
+        if (entry.settled || closing || finished || controller.signal.aborted) return;
+        return call(name, args, { signal: controller.signal, timeoutMs: MAX_CALL_MS });
+      })
       .then(
         (value) => {
           if (entry.settled) return;
@@ -326,13 +369,18 @@ function createMcpServer({ input, output, call, onTerminate }) {
 
   const onCall = (id, params) => {
     if (!isObject(params)) return sendError(id, INVALID_PARAMS, "Invalid tools/call parameters.");
-    if (Object.keys(params).some((key) => key !== "name" && key !== "arguments")) {
+    if (Object.keys(params).some((key) => key !== "name" && key !== "arguments" && key !== "_meta")) {
+      return sendError(id, INVALID_PARAMS, "Invalid tools/call parameters.");
+    }
+    if (Object.hasOwn(params, "_meta") && !validMeta(params._meta)) {
       return sendError(id, INVALID_PARAMS, "Invalid tools/call parameters.");
     }
     if (!validMethod(params.name)) return sendError(id, INVALID_PARAMS, "Invalid tool name.");
     let args;
     try {
-      args = validateCall(params.name, params.arguments);
+      // CallToolRequest.arguments is optional; normalize it before the strict
+      // shared validator so zero-argument tools stay callable.
+      args = validateCall(params.name, params.arguments === undefined ? {} : params.arguments);
     } catch (error) {
       return sendError(
         id,
