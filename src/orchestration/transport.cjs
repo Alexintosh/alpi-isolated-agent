@@ -194,21 +194,21 @@ async function startServer(options) {
   let closingPromise;
   let endpointStat;
 
-  const canRespond = (connection) =>
-    !closing && !connection.responded && !connection.socket.destroyed;
+  // Liveness is independent of response eligibility: a connection stays live
+  // while a response is draining, so its absolute deadline remains armed.
+  const isLive = (connection) => !connection.socket.destroyed;
+  const canRespond = (connection) => !closing && isLive(connection) && !connection.responded;
+  const dispatchActive = (connection) =>
+    canRespond(connection) && !connection.controller.signal.aborted;
 
-  const abortConnection = (connection) => {
-    try {
-      connection.controller.abort();
-    } catch {
-      // AbortController.abort never throws; keep shutdown unconditional.
-    }
-  };
+  // AbortController.abort() is specified not to throw.
+  const abortConnection = (connection) => connection.controller.abort();
 
   const sendFrame = (connection, frame) => {
     if (!canRespond(connection)) return;
     connection.responded = true;
-    clearTimeout(connection.timer);
+    // The deadline deliberately survives the response drain. A peer that stops
+    // reading is destroyed by onDeadline instead of holding a slot forever.
     try {
       connection.socket.end(Buffer.from(frame + "\n", "utf8"), () => {
         connection.socket.destroy();
@@ -223,9 +223,6 @@ async function startServer(options) {
     sendFrame(connection, JSON.stringify({ id: connection.id, error: { code, message } }));
   };
 
-  const dispatchActive = (connection) =>
-    canRespond(connection) && !connection.controller.signal.aborted;
-
   const sendResult = (connection, result) => {
     if (!dispatchActive(connection)) return;
     let serializedResult;
@@ -239,14 +236,9 @@ async function startServer(options) {
       sendErrorFrame(connection, "invalid_result", "The result could not be serialized.");
       return;
     }
-    let serializedId;
-    try {
-      serializedId = JSON.stringify(connection.id);
-    } catch {
-      sendErrorFrame(connection, "invalid_result", "The result could not be serialized.");
-      return;
-    }
-    const serialized = `{"id":${serializedId},"result":${serializedResult}}`;
+    // connection.id was validated as a string or safe integer, so stringify
+    // cannot throw here.
+    const serialized = `{"id":${JSON.stringify(connection.id)},"result":${serializedResult}}`;
     if (Buffer.byteLength(serialized) > MAX_RESPONSE_BYTES) {
       sendErrorFrame(connection, "response_too_large", "The response is too large.");
       return;
@@ -324,7 +316,7 @@ async function startServer(options) {
   };
 
   const onData = (connection, chunk) => {
-    if (connection.responded || connection.socket.destroyed) return;
+    if (!canRespond(connection)) return;
     if (connection.frameDone) {
       // A second frame before the first reply is a protocol violation.
       rejectConnection(connection);
@@ -356,13 +348,26 @@ async function startServer(options) {
   };
 
   const onDeadline = (connection) => {
-    if (!canRespond(connection)) return;
+    // The deadline covers receipt, dispatch and response drain. It destroys the
+    // connection even after a response was queued, so a peer that stops reading
+    // cannot retain an admission slot.
+    if (!isLive(connection)) return;
     abortConnection(connection);
-    if (connection.frameDone && validId(connection.id)) {
-      sendErrorFrame(connection, "timeout", "The request timed out.");
-    } else {
-      connection.socket.destroy();
+    if (canRespond(connection) && connection.frameDone && validId(connection.id)) {
+      // Best effort only: this frame is never waited on. Destruction below is
+      // unconditional and does not extend the connection lifetime.
+      try {
+        connection.socket.write(
+          `${JSON.stringify({
+            id: connection.id,
+            error: { code: "timeout", message: "The request timed out." },
+          })}\n`,
+        );
+      } catch {
+        // An unwritable socket is destroyed immediately afterwards.
+      }
     }
+    connection.socket.destroy();
   };
 
   const onConnection = (socket) => {
@@ -435,8 +440,8 @@ async function startServer(options) {
 
   let linked = false;
   let linkedStat = null;
+  let hiddenStat = null;
   try {
-    let hiddenStat;
     try {
       hiddenStat = fs.lstatSync(hidden);
     } catch {
@@ -470,15 +475,17 @@ async function startServer(options) {
     if (!current.isSocket() || current.uid !== process.getuid() || (current.mode & 0o777) !== 0o600) {
       throw endpointUntrusted();
     }
-    try {
-      fs.unlinkSync(hidden);
-    } catch {
-      throw transportError("EACCES", "The socket endpoint is unavailable.");
-    }
+    // Keep the hidden name reserved for the listener's lifetime. Node records
+    // its listen pathname and unlinks it during close(); freeing that name now
+    // would let a replacement listener bound there be removed by our close.
+    // The public path stays guarded by the dev/ino check on removal.
     endpointStat = linkedStat;
   } catch (error) {
     if (linked && linkedStat) removeEndpointIfOwned(socketPath, linkedStat);
     await closeServer(server);
+    // Node normally unlinks its listen pathname; only remove the hidden name if
+    // it still belongs to this listener.
+    if (hiddenStat) removeEndpointIfOwned(hidden, hiddenStat);
     throw error;
   }
 
@@ -493,6 +500,7 @@ async function startServer(options) {
       }
       connections.clear();
       await closeServer(server);
+      if (hiddenStat) removeEndpointIfOwned(hidden, hiddenStat);
       if (endpointStat) removeEndpointIfOwned(socketPath, endpointStat);
     })();
     return closingPromise;

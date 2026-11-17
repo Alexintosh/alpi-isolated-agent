@@ -6,9 +6,11 @@ const os = require("node:os");
 const path = require("node:path");
 const { randomBytes } = require("node:crypto");
 const { once } = require("node:events");
+const vm = require("node:vm");
 const { startServer, request } = require("../src/orchestration/transport.cjs");
 
 const TMP_ROOT = fs.realpathSync(os.tmpdir());
+const TRANSPORT_SOURCE = path.join(__dirname, "../src/orchestration/transport.cjs");
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_DEADLINE_MS = 180000;
@@ -40,6 +42,26 @@ function deferred() {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Loads the transport source with injected Node built-ins so deadline and
+// startup-fault behavior can be exercised without adding production test knobs.
+function loadTransport({ requireModule = require, setTimeoutFn = setTimeout } = {}) {
+  const source = fs.readFileSync(TRANSPORT_SOURCE, "utf8");
+  const module = { exports: {} };
+  const sandbox = {
+    module,
+    exports: module.exports,
+    require: requireModule,
+    setTimeout: setTimeoutFn,
+    clearTimeout,
+    Buffer,
+    process,
+    TextDecoder,
+    AbortController,
+  };
+  vm.runInNewContext(source, sandbox, { filename: TRANSPORT_SOURCE });
+  return module.exports;
 }
 
 async function rawConnect(socketPath) {
@@ -172,6 +194,66 @@ test("sixteen concurrent requests are served within the socket bound", async (t)
       Array.from({ length: 16 }, (_, index) => ({ index })),
     );
   } finally {
+    await server.close();
+  }
+});
+
+test("stalled response drains are destroyed at the deadline and slots recover", async (t) => {
+  const dir = privateDir(t);
+  const socketPath = socketIn(dir);
+  // Only the server deadline is shortened. The client keeps its normal timeout.
+  const serverTransport = loadTransport({
+    setTimeoutFn: (fn, delayMs) => setTimeout(fn, Math.min(delayMs, 500)),
+  });
+  const clientTransport = loadTransport();
+  const dispatched = deferred();
+  const allAborted = deferred();
+  const aborted = [];
+  let calls = 0;
+  const server = await serverTransport.startServer({
+    socketPath,
+    dispatch: (method, params, { signal }) => {
+      calls += 1;
+      if (calls === 16) dispatched.resolve();
+      signal.addEventListener(
+        "abort",
+        () => {
+          aborted.push(params.index);
+          if (aborted.length === 16) allAborted.resolve();
+        },
+        { once: true },
+      );
+      // Just under MAX_RESPONSE_BYTES, far beyond a non-reading peer's buffers.
+      if (method === "stall") return { payload: "x".repeat(2_000_000) };
+      return { ok: true };
+    },
+  });
+  const peers = [];
+  try {
+    for (let index = 0; index < 16; index += 1) {
+      const socket = await rawConnect(socketPath);
+      socket.pause();
+      socket.write(frame({ id: `stall-${index}`, method: "stall", params: { index } }));
+      peers.push(socket);
+    }
+    await dispatched.promise;
+    await Promise.race([
+      allAborted.promise,
+      delay(3000).then(() => {
+        throw new Error("Stalled peers were not aborted by the deadline.");
+      }),
+    ]);
+    assert.equal(calls, 16);
+    assert.equal(aborted.length, 16);
+
+    // The paused peers are still open on the client side; the server reclaimed
+    // their slots without any manual unblocking.
+    const result = await clientTransport.request({ socketPath, method: "ping", params: {} });
+    // The response object comes from the vm realm, so compare its fields.
+    assert.equal(result && result.ok, true);
+    assert.equal(calls, 17);
+  } finally {
+    for (const socket of peers) socket.destroy();
     await server.close();
   }
 });
@@ -428,6 +510,48 @@ test("close preserves a replacement endpoint at the same path", async (t) => {
   assert.equal(fs.existsSync(socketPath), false);
 });
 
+test("the hidden listener name stays reserved for the listener lifetime", async (t) => {
+  const dir = privateDir(t);
+  const socketPath = socketIn(dir);
+  const server = await startServer({
+    socketPath,
+    dispatch: () => ({ ok: true }),
+  });
+  let hiddenPath;
+  try {
+    const publicStat = fs.lstatSync(socketPath);
+    const hiddenNames = fs.readdirSync(dir).filter((name) => name.startsWith(".s"));
+    assert.equal(hiddenNames.length, 1);
+    hiddenPath = path.join(dir, hiddenNames[0]);
+    const hiddenStat = fs.lstatSync(hiddenPath);
+    assert.equal(hiddenStat.isSocket(), true);
+    assert.equal(hiddenStat.dev, publicStat.dev);
+    assert.equal(hiddenStat.ino, publicStat.ino);
+    assert.equal(hiddenStat.mode & 0o777, 0o600);
+
+    // A competing listener cannot take the reserved name, and the original
+    // endpoint keeps working after the refused attempt.
+    const reuseError = await new Promise((resolve) => {
+      const intruder = net.createServer();
+      const finish = (value) => {
+        intruder.close(() => {});
+        resolve(value);
+      };
+      intruder.once("error", (error) => finish(error));
+      intruder.once("listening", () => finish(null));
+      intruder.listen(hiddenPath);
+    });
+    assert.equal(reuseError instanceof Error, true);
+    assert.equal(reuseError.code, "EADDRINUSE");
+    assert.equal(fs.lstatSync(hiddenPath).ino, publicStat.ino);
+    assert.deepEqual(await request({ socketPath, method: "ping", params: {} }), { ok: true });
+  } finally {
+    await server.close();
+  }
+  assert.equal(fs.existsSync(socketPath), false);
+  if (hiddenPath) assert.equal(fs.existsSync(hiddenPath), false);
+});
+
 test("an occupied endpoint is rejected and left intact", async (t) => {
   const dir = privateDir(t);
   const socketPath = socketIn(dir);
@@ -472,6 +596,82 @@ test("a failed start never removes another server endpoint", async (t) => {
     assert.equal(fs.lstatSync(socketPath).ino, stat.ino);
   } finally {
     await new Promise((resolve) => external.close(() => resolve()));
+  }
+  assert.equal(fs.existsSync(socketPath), false);
+});
+
+test("an asynchronous listener failure fails closed without leftovers", async (t) => {
+  const dir = privateDir(t);
+  const socketPath = socketIn(dir);
+  const failingNet = Object.create(net);
+  failingNet.createServer = (options, onConnection) => {
+    const server = net.createServer(options, onConnection);
+    server.listen = () => {
+      process.nextTick(() => {
+        const error = new Error("EMFILE-CANARY");
+        error.code = "EMFILE";
+        server.emit("error", error);
+      });
+      return server;
+    };
+    return server;
+  };
+  const transport = loadTransport({
+    requireModule: (specifier) => (specifier === "node:net" ? failingNet : require(specifier)),
+  });
+
+  const failure = await transport
+    .startServer({ socketPath, dispatch: () => ({}) })
+    .then(
+      () => {
+        throw new Error("Expected startup to fail.");
+      },
+      (error) => error,
+    );
+  assert.equal(failure.code, "EADDRINUSE");
+  assert.equal(failure.message.includes("EMFILE-CANARY"), false);
+  assert.deepEqual(fs.readdirSync(dir), []);
+
+  // No listener is left behind: the same path can be served immediately.
+  const server = await startServer({ socketPath, dispatch: () => ({ ok: true }) });
+  try {
+    assert.deepEqual(await request({ socketPath, method: "ping", params: {} }), { ok: true });
+  } finally {
+    await server.close();
+  }
+  assert.equal(fs.existsSync(socketPath), false);
+});
+
+test("an unsupported hard-link publication fails closed without leftovers", async (t) => {
+  const dir = privateDir(t);
+  const socketPath = socketIn(dir);
+  const failingFs = Object.create(fs);
+  failingFs.linkSync = () => {
+    const error = new Error("EOPNOTSUPP-CANARY");
+    error.code = "EOPNOTSUPP";
+    throw error;
+  };
+  const transport = loadTransport({
+    requireModule: (specifier) => (specifier === "node:fs" ? failingFs : require(specifier)),
+  });
+
+  const failure = await transport
+    .startServer({ socketPath, dispatch: () => ({}) })
+    .then(
+      () => {
+        throw new Error("Expected startup to fail.");
+      },
+      (error) => error,
+    );
+  assert.equal(failure.code, "EACCES");
+  assert.equal(failure.message.includes("EOPNOTSUPP-CANARY"), false);
+  assert.deepEqual(fs.readdirSync(dir), []);
+
+  const server = await startServer({ socketPath, dispatch: () => ({ ok: true }) });
+  try {
+    assert.deepEqual(await request({ socketPath, method: "ping", params: {} }), { ok: true });
+  } finally {
+    await server.close();
   }
   assert.equal(fs.existsSync(socketPath), false);
 });
