@@ -4,7 +4,7 @@
   "checks": [
     {
       "id": "portable",
-      "minimumTests": 376,
+      "minimumTests": 405,
       "files": [
         "tests/atomic-json.test.cjs",
         "tests/coordinator.test.cjs",
