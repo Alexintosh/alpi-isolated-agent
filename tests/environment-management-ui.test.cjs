@@ -12,14 +12,15 @@ function fixture() {
   const nodes = new Map(), calls = [];
   function node() {
     const attributes = {}, events = {}, classes = new Set(), queries = new Map();
-    return {
-      disabled: false, hidden: false, dataset: {}, textContent: '', value: '', elements: [], children: [],
+    let value = '';
+    const item = {
+      disabled: false, hidden: false, dataset: {}, textContent: '', elements: [], children: [],
       classList: { toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); } },
       setAttribute(name, value) { attributes[name] = value; }, getAttribute: name => attributes[name],
       removeAttribute(name) { delete attributes[name]; },
       addEventListener(name, handler) { (events[name] ??= []).push(handler); },
       listenerCount(name) { return events[name]?.length ?? 0; },
-      fire(name = 'click') { return Promise.all((events[name] ?? []).map(handler => handler())); },
+      fire(name = 'click') { return Promise.all((events[name] ?? []).map(handler => handler({ preventDefault() {} }))); },
       click() { return this.disabled ? Promise.resolve() : this.fire(); },
       append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
       prepend(child) { child.parentNode = this; this.children.unshift(child); },
@@ -27,11 +28,24 @@ function fixture() {
       querySelector(selector) { if (!queries.has(selector)) queries.set(selector, node()); return queries.get(selector); },
       querySelectorAll() { return []; }, contains() { return false; }, focus() {},
     };
+    // Emulate the browser's range sanitization: a value assigned before max is
+    // clamped to the default max of 100. Text inputs keep their literal value.
+    Object.defineProperty(item, 'value', {
+      get() { return value; },
+      set(next) {
+        if (item.type === 'range') {
+          const numeric = Number(next), min = Number(item.min ?? 0), max = Number(item.max ?? 100);
+          value = Number.isFinite(numeric) ? String(Math.min(Math.max(numeric, min), max)) : '';
+        } else value = String(next);
+      },
+    });
+    return item;
   }
   for (const match of html.matchAll(/<[a-z]+\b[^>]*\bid="([^"]+)"[^>]*>/g)) {
     const item = node(); item.disabled = /\sdisabled(?:\s|>)/.test(match[0]);
     item.hidden = /\shidden(?:\s|>)/.test(match[0]);
     for (const attr of match[0].matchAll(/([\w-]+)="([^"]*)"/g)) item.setAttribute(attr[1], attr[2]);
+    item.type = item.getAttribute('type') || undefined;
     nodes.set(match[1], item);
   }
   const get = id => { assert(nodes.has(id), `Missing live DOM ID: ${id}`); return nodes.get(id); };
@@ -41,6 +55,7 @@ function fixture() {
     async manageEnvironment(...args) { calls.push(['manage', ...args]); return manage(...args); },
     async connect() { calls.push(['connect']); }, async disconnect() { calls.push(['disconnect']); },
     async stopEnvironment() { calls.push(['stop']); }, async showPanel(panel) { calls.push(['panel', panel]); },
+    async setResources(value) { calls.push(['resources', value]); },
   };
   vm.runInNewContext(source, {
     document: { getElementById: get, createElement: node, createElementNS: node },
@@ -244,4 +259,67 @@ test('management keeps visible destructive scope, accessible controls and strict
   assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'"/);
   const management = source.slice(source.indexOf('let environmentManagementPending'), source.indexOf('let resourceKey'));
   assert(!/window\.confirm\(|innerHTML\s*=/.test(management));
+});
+
+test('resource sliders expose live values and units, preserve drafts/reset and omit overlay for Lima', async () => {
+  const f = fixture();
+  const wrap = state({
+    selectedId: 'vm',
+    resources: {
+      environments: [{ id: 'vm', cpus: 4, memoryMiB: 8192, diskGiB: 30, overlayGiB: 12, diskChange: 'grow-only' }],
+      limits: { cpus: 8, memoryMiB: 16384, diskGiB: 100, overlayGiB: 128, hostMemoryMiB: 16384 },
+    },
+  }, { prepared: true });
+  f.render(wrap);
+  for (const id of ['resource-cpus', 'resource-memory', 'resource-disk-gib', 'resource-overlay-gib'])
+    assert.equal(f.get(id).getAttribute('type'), 'range');
+  assert.equal(f.get('resource-cpus').min, 1);
+  assert.equal(f.get('resource-cpus').max, 8);
+  assert.equal(f.get('resource-cpus').value, '4');
+  assert.equal(f.get('resource-cpus-value').textContent, '4 CPUs');
+  assert.equal(f.get('resource-cpus').getAttribute('aria-valuetext'), '4 CPUs');
+  // These values are above the browser's default range max of 100. They must not
+  // be clamped while the slider bounds are being populated.
+  assert.equal(f.get('resource-memory').min, 2048);
+  assert.equal(f.get('resource-memory').max, 16384);
+  assert.equal(f.get('resource-memory').value, '8192');
+  assert.equal(f.get('resource-memory-value').textContent, '8192 MiB');
+  assert.equal(f.get('resource-memory').getAttribute('aria-valuetext'), '8192 MiB');
+  assert.equal(f.get('resource-disk-gib').min, 30);
+  assert.equal(f.get('resource-disk-gib').max, 100);
+  assert.equal(f.get('resource-disk-gib').value, '30');
+  assert.equal(f.get('resource-disk-gib-value').textContent, '30 GiB');
+  assert.equal(f.get('resource-overlay-row').hidden, false);
+  assert.equal(f.get('resource-overlay-gib').min, 12);
+  assert.equal(f.get('resource-overlay-gib').max, 128);
+  assert.equal(f.get('resource-overlay-gib').value, '12');
+  assert.equal(f.get('resource-overlay-gib-value').textContent, '12 GiB');
+
+  f.get('resource-memory').value = '12288';
+  await f.get('resource-memory').fire('input');
+  assert.equal(f.get('resource-memory-value').textContent, '12288 MiB');
+  assert.equal(f.get('resource-memory').getAttribute('aria-valuetext'), '12288 MiB');
+  f.render({ ...wrap, detail: 'Unrelated lifecycle tick' });
+  assert.equal(f.get('resource-memory').value, '12288');
+  assert.equal(f.get('resource-memory-value').textContent, '12288 MiB');
+  await f.get('resource-form').fire('submit');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.at(-1))), ['resources', { cpus: 4, memoryMiB: 12288, diskGiB: 30, overlayGiB: 12 }]);
+  await new Promise(resolve => setImmediate(resolve));
+  f.render(wrap);
+  assert.equal(f.get('resource-memory').value, '8192');
+  assert.equal(f.get('resource-memory-value').textContent, '8192 MiB');
+
+  const lima = state({
+    selectedId: 'vm',
+    resources: {
+      environments: [{ id: 'vm', cpus: 4, memoryMiB: 4096, diskGiB: 30, diskChange: 'before-create' }],
+      limits: { cpus: 8, memoryMiB: 16384, diskGiB: 100, hostMemoryMiB: 16384 },
+    },
+  }, { prepared: true, kind: 'lima' });
+  f.render(lima);
+  assert.equal(f.get('resource-overlay-row').hidden, true);
+  assert.equal(f.get('resource-disk-gib').disabled, true);
+  assert.match(f.get('resource-disk-gib').title, /fixed after its first creation/);
+  await f.get('resource-form').fire('submit');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.at(-1))), ['resources', { cpus: 4, memoryMiB: 4096, diskGiB: 30 }]);
 });

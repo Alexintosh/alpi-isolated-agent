@@ -52,18 +52,34 @@
         <p class="note">Saving stops this environment and its jobs. Connect again to apply the limits. Sessions and workspace files are preserved.</p>
         <h2>Resources</h2>
         <form id="resource-form" class="settings-form">
-          <label for="resource-cpus">CPU limit
-            <input id="resource-cpus" type="number" min="1" step="1" required>
-          </label>
-          <label for="resource-memory">Memory limit (MiB)
-            <input id="resource-memory" type="number" min="2048" step="512" required>
-          </label>
-          <label for="resource-disk-gib">Disk capacity (GiB)
-            <input id="resource-disk-gib" type="number" min="20" step="1" required>
-          </label>
-          <label for="resource-overlay-gib" id="resource-overlay-row" hidden>WrapVM system overlay (GiB)
-            <input id="resource-overlay-gib" type="number" min="10" step="1">
-          </label>
+          <div class="range-field">
+            <div class="range-head">
+              <label for="resource-cpus">CPU limit</label>
+              <output id="resource-cpus-value" class="range-value" for="resource-cpus" aria-live="off">2 CPUs</output>
+            </div>
+            <input id="resource-cpus" type="range" min="1" step="1" required>
+          </div>
+          <div class="range-field">
+            <div class="range-head">
+              <label for="resource-memory">Memory limit</label>
+              <output id="resource-memory-value" class="range-value" for="resource-memory" aria-live="off">4096 MiB</output>
+            </div>
+            <input id="resource-memory" type="range" min="2048" step="512" required>
+          </div>
+          <div class="range-field">
+            <div class="range-head">
+              <label for="resource-disk-gib">Disk capacity</label>
+              <output id="resource-disk-gib-value" class="range-value" for="resource-disk-gib" aria-live="off">20 GiB</output>
+            </div>
+            <input id="resource-disk-gib" type="range" min="20" step="1" required>
+          </div>
+          <div id="resource-overlay-row" class="range-field" hidden>
+            <div class="range-head">
+              <label for="resource-overlay-gib">WrapVM system overlay</label>
+              <output id="resource-overlay-gib-value" class="range-value" for="resource-overlay-gib" aria-live="off">10 GiB</output>
+            </div>
+            <input id="resource-overlay-gib" type="range" min="10" step="1">
+          </div>
           <p id="resource-disk" class="note" role="status"></p>
           <p id="resource-budget" class="note" role="status"></p>
           <button id="resource-save" type="submit" class="primary">
