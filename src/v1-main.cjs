@@ -50,7 +50,7 @@ let installer,installationReady=!installedMode,installationBusy=false,artifactTa
 let diagnostic = {};
 let environmentVerification = "pending";
 let orchestrationState=orchestrationEnabled?'unavailable':'disabled';
-let orchestrationSocket,orchestrationClose,orchestrationStarted=false,orchestrationStarting=false,orchestrationSealed=false,orchestrationBusy=false;
+let orchestrationSocket,orchestrationClose,orchestrationStartup,orchestrationStarted=false,orchestrationStarting=false,orchestrationSealed=false,orchestrationBusy=false;
 let selectedImage = "stock-amd64";
 const imageStore = new DesktopImageStore({stateRoot,artifactRoot:path.join(__dirname,"../vendor")});
 let imageTask, imagePicker;
@@ -429,8 +429,13 @@ async function quit(exitCode = 0) {
   // runtime shutdown. A close failure is bounded and must not change VM
   // shutdown semantics; the closed state is reported either way.
   const brokerClose = orchestrationClose;
-  orchestrationClose = undefined; orchestrationStarted = false;
+  const pendingStartup = orchestrationStartup;
+  orchestrationClose = undefined; orchestrationStartup = undefined;
+  orchestrationStarted = false;
   if (orchestrationEnabled) orchestrationState = 'closed';
+  // A startup that was still binding owns its late sealed-path cleanup. Join it
+  // first so Quit cannot exit before a broker.close() removes its socket.
+  if (pendingStartup) { try { await pendingStartup; } catch {} }
   if (brokerClose) { try { await brokerClose(); } catch {} }
   try {
     // Native sheets close when the verified shutdown reaches app.quit().
@@ -834,20 +839,27 @@ async function startOrchestration() {
   if (!orchestrationEnabled || orchestrationSealed || orchestrationStarted || orchestrationStarting || quitting) return;
   if (!runtime || !installationReady || environmentVerification !== 'verified') { orchestrationState = 'unavailable'; return; }
   orchestrationStarting = true;
-  try {
-    const broker = await startBroker({ stateRoot, getRuntime: () => runtime,
-      getModels: () => catalog?.snapshot(), runExclusive: orchestrationExclusive });
-    if (quitting || orchestrationSealed) {
-      try { await broker.close(); } catch {}
-      orchestrationState = 'closed';
-      return;
-    }
-    orchestrationClose = broker.close;
-    orchestrationSocket = broker.socketPath;
-    orchestrationStarted = true;
-    orchestrationState = 'ready';
-  } catch { orchestrationState = (quitting || orchestrationSealed) ? 'closed' : 'error'; }
-  finally { orchestrationStarting = false; }
+  // One startup promise owns the late sealed-path close. Quit joins it before
+  // runtime shutdown instead of observing a half-installed broker.
+  const startup = (async () => {
+    try {
+      const broker = await startBroker({ stateRoot, getRuntime: () => runtime,
+        getModels: () => catalog?.snapshot(), runExclusive: orchestrationExclusive });
+      if (quitting || orchestrationSealed) {
+        try { await broker.close(); } catch {}
+        orchestrationState = 'closed';
+        return;
+      }
+      orchestrationClose = broker.close;
+      orchestrationSocket = broker.socketPath;
+      orchestrationStarted = true;
+      orchestrationState = 'ready';
+    } catch { orchestrationState = (quitting || orchestrationSealed) ? 'closed' : 'error'; }
+    finally { orchestrationStarting = false; }
+  })();
+  orchestrationStartup = startup;
+  try { await startup; }
+  finally { if (orchestrationStartup === startup) orchestrationStartup = undefined; }
 }
 async function stopForArtifacts(){
  if(quitting)throw Error('Application shutdown is in progress.');

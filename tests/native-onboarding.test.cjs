@@ -2,7 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=require('node:vm');
 const {createRequire}=require('node:module'),{EventEmitter}=require('node:events');
 const main=path.resolve(__dirname,'../src/v1-main.cjs');
-function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,saveDestination,deferSave=false,viewerNavigation,harnessNavigation,storedSelection,imageAvailable=true,manualHealth=false,healthFetch,catalogMutation,modelCatalogFactory,argv=['node','v1-main.cjs'],orchestrationFailure=false,orchestrationDelay,runtimeFactory,restoreGate}={}){
+function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,saveDestination,deferSave=false,viewerNavigation,harnessNavigation,storedSelection,imageAvailable=true,manualHealth=false,healthFetch,catalogMutation,modelCatalogFactory,argv=['node','v1-main.cjs'],orchestrationFailure=false,orchestrationDelay,runtimeFactory,restoreGate,appDataRoot,realBroker=false,brokerDelay}={}){
  const calls={quit:0,shutdown:0,prepare:0,policy:0,models:0,git:0,savePickers:0,starts:0,networkRestores:0,viewerClose:0,viewerFocus:0,stops:[],selections:[],imageImports:[],imageCancelled:0,secrets:[],catalogChanges:[],brokerStarts:0,brokerCloses:0,brokerOrder:[],transfersCancel:0,sharesCancel:0,installerCancel:0};
  const brokerState={deps:null};let resolvePicker,resolveSave,resolveMessage;
  const messages=[],messagePicker=new Promise(resolve=>resolveMessage=resolve);
@@ -71,12 +71,14 @@ function harness({messageChoice=0,deferMessage=false,reconcileFailure=false,save
   update(value){Object.assign(this.state,value);this.emit('change')}
   async importLocal(source){calls.imageImports.push(source);return true}
  }
- const app=Object.assign(new EventEmitter(),{isPackaged:true,getVersion:()=>'1.0.0',getPath:()=>'/fixture',setPath(){},setName(){},commandLine:{appendSwitch(){}},requestSingleInstanceLock:()=>true,whenReady:async()=>{},quit(){calls.quit++},exit(){calls.quit++}});
- const realRequire=createRequire(main),mocks={electron:{app,BaseWindow:Window,WebContentsView:View,Tray,session:{fromPartition:()=>({fetch:healthFetch??(async()=>({status:200,body:{cancel:async()=>{}}})),cookies:{get:async()=>[]},clearStorageData:async()=>{},clearCache:async()=>{}})},Menu:{buildFromTemplate:x=>x},nativeImage:{createFromBitmap:()=>({setTemplateImage(){}})},ipcMain:{handle:(name,handler)=>handlers.set(name,handler)},dialog:{showMessageBox:(_window,options)=>{messages.push(options);return deferMessage?messagePicker:Promise.resolve({response:messageChoice})},showOpenDialog:()=>picker,showSaveDialog:async()=>{calls.savePickers++;return deferSave?savePicker:{canceled:!saveDestination,filePath:saveDestination}}}},
+ const app=Object.assign(new EventEmitter(),{isPackaged:true,getVersion:()=>'1.0.0',getPath:()=>appDataRoot??'/fixture',setPath(){},setName(){},commandLine:{appendSwitch(){}},requestSingleInstanceLock:()=>true,whenReady:async()=>{},quit(){calls.quit++},exit(){calls.quit++}});
+ const realRequire=createRequire(main),realBrokerModule=realRequire('./orchestration/broker.cjs'),mocks={electron:{app,BaseWindow:Window,WebContentsView:View,Tray,session:{fromPartition:()=>({fetch:healthFetch??(async()=>({status:200,body:{cancel:async()=>{}}})),cookies:{get:async()=>[]},clearStorageData:async()=>{},clearCache:async()=>{}})},Menu:{buildFromTemplate:x=>x},nativeImage:{createFromBitmap:()=>({setTemplateImage(){}})},ipcMain:{handle:(name,handler)=>handlers.set(name,handler)},dialog:{showMessageBox:(_window,options)=>{messages.push(options);return deferMessage?messagePicker:Promise.resolve({response:messageChoice})},showOpenDialog:()=>picker,showSaveDialog:async()=>{calls.savePickers++;return deferSave?savePicker:{canceled:!saveDestination,filePath:saveDestination}}}},
   './runtime/viewer-boundary.cjs':{createViewerBoundary:async()=>({revoke(){},close:async()=>{}})},
   './runtime/renderer-boundary.cjs':{createRendererBoundary:async()=>({setOrigin:async()=>{},revoke(){},close:async()=>{}})},
-  'node:fs':{openSync:fs.openSync,writeFileSync:fs.writeFileSync,fsyncSync:fs.fsyncSync,closeSync:fs.closeSync,mkdirSync(){}},'./runtime/index.cjs':{createRuntime:options=>{runtimeOptions=options;return runtimeFactory?runtimeFactory(runtime):runtime}},'./runtime/atomic-json.cjs':{readJson:(file,fallback)=>file.endsWith('selection.json')&&storedSelection?storedSelection:fallback,writeJson(file,value){if(file.endsWith('selection.json'))calls.selections.push(value)}},
-  './orchestration/broker.cjs':{startBroker:async options=>{calls.brokerStarts++;calls.brokerOrder.push('broker-start');brokerState.deps=options;await orchestrationDelay?.();
+  'node:fs':{openSync:fs.openSync,writeFileSync:fs.writeFileSync,fsyncSync:fs.fsyncSync,closeSync:fs.closeSync,mkdirSync:appDataRoot?fs.mkdirSync:()=>{}},'./runtime/index.cjs':{createRuntime:options=>{runtimeOptions=options;return runtimeFactory?runtimeFactory(runtime):runtime}},'./runtime/atomic-json.cjs':{readJson:(file,fallback)=>file.endsWith('selection.json')&&storedSelection?storedSelection:fallback,writeJson(file,value){if(file.endsWith('selection.json'))calls.selections.push(value)}},
+  './orchestration/broker.cjs':realBroker?{startBroker:async options=>{calls.brokerStarts++;calls.brokerOrder.push('broker-start');brokerState.deps=options;await brokerDelay?.();
+   const broker=await realBrokerModule.startBroker(options);calls.brokerOrder.push('broker-open');
+   return {socketPath:broker.socketPath,close:async()=>{calls.brokerCloses++;calls.brokerOrder.push('broker-close');await broker.close()}}}}:{startBroker:async options=>{calls.brokerStarts++;calls.brokerOrder.push('broker-start');brokerState.deps=options;await orchestrationDelay?.();
    if(orchestrationFailure)throw Object.assign(Error('fixture broker failure'),{code:'broker_unavailable'});
    return {socketPath:path.join(options.stateRoot,'o','s'),close:async()=>{calls.brokerCloses++;calls.brokerOrder.push('broker-close')}}}},
   './runtime/desktop-image-store.cjs':{DesktopImageStore:Images},
@@ -566,6 +568,63 @@ test('a failed verified stop keeps the broker closed and never restarts it',asyn
  assert.equal(calls.brokerStarts,1);assert.equal(ui.snapshot().orchestration.state,'closed');
  assert.equal(calls.prepare,0);
 });
+test('quit joins a pending broker startup and closes it before verified shutdown',async()=>{
+ let entered;const started=new Promise(resolve=>entered=resolve);
+ let release;const gate=new Promise(resolve=>release=resolve);
+ const {ui,calls}=harness({argv:ORCHESTRATION_FLAG,orchestrationDelay:async()=>{entered();await gate}});
+ const ready=ui.ready;await started;
+ const quitting=ui.quit();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.shutdown,0);assert.equal(calls.brokerCloses,0);assert.equal(calls.quit,0);
+ release();await ready;await quitting;
+ assert.equal(calls.brokerCloses,1);
+ assert(calls.brokerOrder.indexOf('broker-close')<calls.brokerOrder.indexOf('shutdown'));
+ assert.equal(calls.shutdown,1);assert.equal(calls.quit,1);
+ assert.equal(ui.snapshot().orchestration.state,'closed');
+});
+test('a failed verified stop still joins pending broker cleanup and keeps admission sealed',async()=>{
+ let entered;const started=new Promise(resolve=>entered=resolve);
+ let release;const gate=new Promise(resolve=>release=resolve);
+ const {ui,calls,coordinator}=harness({argv:ORCHESTRATION_FLAG,orchestrationDelay:async()=>{entered();await gate}});
+ const ready=ui.ready;await started;
+ coordinator.shutdown=async()=>{calls.shutdown++;calls.brokerOrder.push('shutdown');throw Error('still running')};
+ const quitting=ui.quit();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.shutdown,0);assert.equal(calls.brokerCloses,0);
+ release();await ready;await quitting;
+ assert.equal(calls.brokerCloses,1);
+ assert(calls.brokerOrder.indexOf('broker-close')<calls.brokerOrder.indexOf('shutdown'));
+ assert.equal(calls.quit,0);assert.equal(ui.snapshot().quitting,false);
+ assert.equal(ui.snapshot().orchestration.state,'closed');
+ await ui.artifactAction('restore');
+ assert.equal(calls.brokerStarts,1);assert.equal(ui.snapshot().orchestration.state,'closed');
+ assert.equal(calls.prepare,0);
+});
+test('quit joins a pending real broker startup and removes its socket before verified shutdown',async t=>{
+ // Unix socket paths are capped at 100 bytes; use a short canonical base.
+ const tempBase=process.platform==='darwin'?'/private/tmp':fs.realpathSync(os.tmpdir());
+ const appData=fs.mkdtempSync(path.join(tempBase,'alpi-broker-'));
+ t.after(()=>fs.rmSync(appData,{recursive:true,force:true}));
+ let entered;const started=new Promise(resolve=>entered=resolve);
+ let release;const gate=new Promise(resolve=>release=resolve);
+ const {ui,calls,coordinator}=harness({argv:ORCHESTRATION_FLAG,appDataRoot:appData,realBroker:true,
+  brokerDelay:async()=>{entered();await gate}});
+ const ready=ui.ready;await started;
+ const stateRoot=path.join(appData,'Harness Isolated','personal-v1');
+ const socketPath=path.join(stateRoot,'o','s');
+ let socketAtShutdown;
+ coordinator.shutdown=async()=>{calls.shutdown++;calls.brokerOrder.push('shutdown');socketAtShutdown=fs.existsSync(socketPath)};
+ const quitting=ui.quit();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.shutdown,0);assert.equal(fs.existsSync(socketPath),false);
+ release();await ready;await quitting;
+ assert.equal(socketAtShutdown,false);assert.equal(fs.existsSync(socketPath),false);
+ assert.equal(calls.brokerCloses,1);
+ assert(calls.brokerOrder.indexOf('broker-close')<calls.brokerOrder.indexOf('shutdown'));
+ assert.equal(calls.quit,1);
+ assert.equal(ui.snapshot().orchestration.state,'closed');
+});
+
 test('broker admission fails fast during a runtime artifact replacement',async()=>{
  let release;const gate=new Promise(resolve=>release=resolve);
  const {ui,calls,brokerState}=harness({argv:ORCHESTRATION_FLAG,restoreGate:gate});await ui.ready;
@@ -647,4 +706,43 @@ test('actual broker refuses unsafe directories and preserves an existing endpoin
  fs.writeFileSync(path.join(occupied,'o','s'),'preserve');
  await assert.rejects(startBroker({stateRoot:occupied,getRuntime:()=>brokerRuntime(),getModels:()=>BROKER_MODELS,runExclusive:async work=>work()}),error=>error.code==='broker_unavailable');
  assert.equal(fs.readFileSync(path.join(occupied,'o','s'),'utf8'),'preserve');
+});
+
+function preparingJournal(){
+ const stamp='2026-01-01T00:00:00.000Z',taskId='11111111-1111-4111-8111-111111111111';
+ return {version:1,tasks:[{taskId,environmentId:'wrapvm-v1',sessionId:'22222222-2222-4222-8222-222222222222',cwd:'/work',provider:'provider',model:'model',ownershipToken:'fixture-token',createdAt:stamp,updatedAt:stamp,state:'preparing',requests:[{requestId:taskId,fingerprint:'a'.repeat(64),status:'preparing',createdAt:stamp,updatedAt:stamp}]}]};
+}
+function writePreparingJournal(directory){
+ const file=path.join(directory,'orchestration-tasks.json'),bytes=JSON.stringify(preparingJournal(),null,2)+'\n';
+ fs.writeFileSync(file,bytes,{mode:0o600});return {file,bytes};
+}
+function assertJournalWouldNormalize(directory,file){
+ const {OrchestrationService}=require('../src/orchestration/service.cjs');
+ new OrchestrationService({stateRoot:directory,getRuntime:()=>brokerRuntime(),getModels:()=>BROKER_MODELS,runExclusive:async work=>work()});
+ assert.equal(JSON.parse(fs.readFileSync(file,'utf8')).tasks[0].state,'uncertain');
+}
+test('actual broker refuses a symlinked stateRoot before creating o or touching a preparing journal',async t=>{
+ const root=brokerRoot(t),target=path.join(root,'target');fs.mkdirSync(target,{mode:0o700});
+ const {file,bytes}=writePreparingJournal(target);
+ const alias=path.join(root,'alias');fs.symlinkSync(target,alias);
+ await assert.rejects(startBroker({stateRoot:alias,getRuntime:()=>brokerRuntime(),getModels:()=>BROKER_MODELS,runExclusive:async work=>work()}),error=>error.code==='broker_unavailable');
+ assert.equal(fs.existsSync(path.join(target,'o')),false);
+ assert.equal(fs.readFileSync(file,'utf8'),bytes);
+ assertJournalWouldNormalize(target,file);
+});
+test('actual broker refuses a symlinked higher ancestor before creating o or touching a preparing journal',async t=>{
+ const root=brokerRoot(t),target=path.join(root,'target'),nested=path.join(target,'nested');
+ fs.mkdirSync(target,{mode:0o700});fs.mkdirSync(nested,{mode:0o700});
+ const {file,bytes}=writePreparingJournal(nested);
+ const link=path.join(root,'link');fs.symlinkSync(target,link);
+ const stateRoot=path.join(link,'nested');
+ await assert.rejects(startBroker({stateRoot,getRuntime:()=>brokerRuntime(),getModels:()=>BROKER_MODELS,runExclusive:async work=>work()}),error=>error.code==='broker_unavailable');
+ assert.equal(fs.existsSync(path.join(nested,'o')),false);
+ assert.equal(fs.readFileSync(file,'utf8'),bytes);
+ assertJournalWouldNormalize(nested,file);
+});
+test('actual broker refuses a non-canonical stateRoot spelling before creating o',async t=>{
+ const root=brokerRoot(t),target=path.join(root,'target');fs.mkdirSync(target,{mode:0o700});
+ await assert.rejects(startBroker({stateRoot:target+'/../target',getRuntime:()=>brokerRuntime(),getModels:()=>BROKER_MODELS,runExclusive:async work=>work()}),error=>error.code==='broker_unavailable');
+ assert.equal(fs.existsSync(path.join(target,'o')),false);
 });

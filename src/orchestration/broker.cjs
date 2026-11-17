@@ -28,6 +28,39 @@ function lstatIfPresent(file) {
   }
 }
 
+// A refused bootstrap must not create, chmod, adopt or remove anything. Walk
+// every existing component from the filesystem root and reject symlinks and
+// non-directories before the socket directory or service can touch the tree.
+// The final spelling must already be canonical: an unsafe alias is refused
+// rather than resolved and adopted.
+function assertCanonicalStateRoot(directory) {
+  const parsed = path.parse(directory);
+  const relative = path.relative(parsed.root, directory);
+  const parts = relative === "" ? [] : relative.split(path.sep);
+  let current = parsed.root;
+  const inspect = (file) => {
+    const info = lstatIfPresent(file);
+    if (info === null) return false;
+    if (info.isSymbolicLink() || !info.isDirectory()) throw unavailable();
+    return true;
+  };
+  if (parts.length === 0) {
+    if (!inspect(current)) throw unavailable();
+  } else {
+    for (const part of parts) {
+      current = path.join(current, part);
+      if (!inspect(current)) throw unavailable();
+    }
+  }
+  let canonical;
+  try {
+    canonical = fs.realpathSync(directory);
+  } catch {
+    throw unavailable();
+  }
+  if (canonical !== directory) throw unavailable();
+}
+
 // Create only a missing socket directory with mode 0700. An existing directory
 // is inspected, never chmodded, adopted or removed.
 function assertPrivateDirectory(directory) {
@@ -57,6 +90,7 @@ async function startBroker(options) {
   if (
     typeof stateRoot !== "string" ||
     !path.isAbsolute(stateRoot) ||
+    path.normalize(stateRoot) !== stateRoot ||
     typeof getRuntime !== "function" ||
     typeof getModels !== "function" ||
     typeof runExclusive !== "function"
@@ -64,8 +98,16 @@ async function startBroker(options) {
     throw unavailable();
   }
 
-  const socketPath = path.join(stateRoot, SOCKET_DIRECTORY, SOCKET_NAME);
-  assertPrivateDirectory(path.dirname(socketPath));
+  const socketDirectory = path.join(stateRoot, SOCKET_DIRECTORY);
+  const socketPath = path.join(socketDirectory, SOCKET_NAME);
+  // Validate the complete existing ancestry and canonical spelling before any
+  // side effect. The transport repeats this at bind time; doing it first keeps
+  // a refused bootstrap from creating `o` or normalizing a journal through a
+  // symlinked ancestor.
+  assertCanonicalStateRoot(stateRoot);
+  assertPrivateDirectory(socketDirectory);
+  // Preserve an existing endpoint exactly as found: refuse, never unlink it.
+  if (lstatIfPresent(socketPath) !== null) throw unavailable();
 
   let service;
   try {
