@@ -267,8 +267,11 @@ and MCP facade at 9.68 (final round 3/3). The MCP reviewer independently ran
 29 focused and 410 portable tests; hosted CI passed. These are component reviews,
 not GitHub approvals or whole-feature acceptance. Exact-SHA reports are on PR #3.
 
-The complete service and native integration require repairs after their first
-reviews (8.78 and 9.35 respectively). Live packaged VM/inference acceptance and
-the final integrated review remain outstanding. No score is assigned by the
+The complete service passed round 2/3 at 9.61 on
+`e2367fb86ce40711801912037da0ad38b6ca1124`. Native integration passed its 65
+focused tests after repair and awaits round 2/3 review (initial score 9.35).
+Runtime code at `e82001b695a1973f55faacaf0a5d3c6c30955ab6` passed 692 tracked
+tests and [bounded packaged VM/inference acceptance](alpi-orchestration.md#recorded-development-mac-acceptance).
+The final integrated review remains outstanding. No score is assigned by the
 coordinator. Completion requires integrated behavior, live evidence, CI and the
 reviewer threshold; code existence and passing synthetic tests are insufficient.

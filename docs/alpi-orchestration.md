@@ -80,7 +80,9 @@ An MCP initialization alone only establishes the stdio facade.
 2. Use an existing guest project or prepare a clean host staging directory.
    `alpi_import({environmentId, source, guestParent, name})` copies into a new
    guest workspace container. `source` is an absolute host path; `guestParent`
-   is inside the guest. Use the returned `destination`, not a guessed path.
+   is inside the guest. The returned `destination` is the new container; the
+   source keeps its basename inside it. For a source directory named `project`,
+   inspect `<destination>/project` before using it as the task's working directory.
    Import includes every permitted file in the tree, including dotfiles; it
    does not filter credentials. No host directory is implicitly mounted.
 3. Call `alpi_delegate` with `environmentId`, absolute guest `cwd`, `provider`,
@@ -170,3 +172,60 @@ same-ID recovery, cooperative cancellation, export/content comparison and
 verified lifecycle cleanup. Record the tested revision, environment/model IDs,
 outcomes and limits without credentials, launch URLs or private transcripts.
 The [implementation plan](alpi-orchestration-plan.md) tracks acceptance work.
+
+### Recorded development-Mac acceptance
+
+On 2026-11-17, runtime code at
+`e82001b695a1973f55faacaf0a5d3c6c30955ab6` was packaged into a separate ad-hoc
+signed app with `sourceDirty: false` and Electron 45.3.1. The installed app was
+not modified. The existing pinned `personal-v1-20261112-r1` runtime passed its
+actual artifact verifier. Tests retained the selected `wrapvm-arm64-v1` /
+`local-arm64` environment and existing policy/catalog without recreating a VM,
+changing shares, importing credentials or weakening network enforcement.
+
+Executed evidence:
+
+- All **692 tracked repository tests passed**, with no failures or skips. The
+  command enumerated tracked `tests/*.test.cjs` files and ran `node --test`;
+  unrelated untracked test files were excluded.
+- A coordinator client exercised the real stdio MCP process, private Unix socket,
+  packaged native broker, verified VM driver and stock guest Harness. Initialize,
+  tool listing, status and explicit protected start succeeded.
+- Guest user/root commands, literal shell quoting, exit code 7, stderr and 64 KiB
+  output truncation were checked. Guest root could not access a newly created
+  host-only canary. The canary's host hash remained unchanged.
+- A command deadline and a separate MCP disconnect each prevented an ordinary
+  child process from writing its delayed marker. The disconnect test first
+  confirmed that the command had started. These are ordinary-process cleanup
+  observations, not guarantees against hostile guest root.
+- A clean two-file staging directory imported through the real transfer path.
+  `spark` / `DeepSeek-V4.1-Flash-1017` implemented a small CommonJS library and
+  nine tests. A queued follow-up added sparse-array and boxed-string regressions.
+  The coordinator read the implementation and independently ran **11/11 tests**
+  in the guest. Guest output reported the selected provider/model.
+- A fresh MCP connection recovered the identical task/session receipt with the
+  original request ID and one recorded request. No new identity was used to
+  bypass an ambiguous prompt submission.
+- Relative host paths, traversal container names, existing destinations, host
+  symlink sources and guest symlink exports were rejected. A successful export
+  contained four files; every host file hash matched its guest counterpart.
+  Exported code was inspected without executing it on the host.
+- An additional turn was observed running, cancelled through `alpi_cancel`, then
+  observed idle with an empty queue and no pending input. Verified whole-VM stop
+  returned stopped/offline. Normal Quit exited and removed the broker socket.
+  Existing unrelated legacy VM processes were left untouched.
+
+One configuration limit was exercised explicitly: the saved Alpi model had no
+reasoning-effort mapping. Requesting `low` was rejected by stock model selection
+before prompt submission, leaving an observable/cancellable uncertain binding.
+The successful test used the **same provider/model with its configured default**;
+effective reasoning was uncontrolled, not asserted to be low. No catalog or
+provider configuration was changed to obtain a pass.
+
+This evidence covers one existing macOS/ARM64 guest configuration and a small
+real model task. It does not establish fresh-machine runtime installation, live
+Lima/AMD64 operation, every provider, an external MCP SDK/client UI, native T3
+subagent registration or comprehensive guest-root containment. Network bypass
+and proxy-failure tests were not rerun live for this orchestration change; the
+existing boundary and synthetic regression coverage remain in place. The final
+integrated PR review is a separate acceptance gate.
