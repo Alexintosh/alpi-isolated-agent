@@ -323,45 +323,74 @@ $("environment-export").addEventListener("click", () => {
 
 let resourceKey, resourceEnvironment;
 const resourceDrafts = new Map();
+const resourceRangeIds = ["resource-cpus", "resource-memory", "resource-disk-gib", "resource-overlay-gib"];
+function resourceValueText(id, value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "";
+  if (id === "resource-cpus") return `${numeric} ${numeric === 1 ? "CPU" : "CPUs"}`;
+  return `${numeric} ${id === "resource-memory" ? "MiB" : "GiB"}`;
+}
+function updateResourceValue(id) {
+  const input = $(id), text = resourceValueText(id, input.value);
+  $(id + "-value").textContent = text;
+  input.setAttribute("aria-valuetext", text);
+}
+function updateResourceValues() {
+  for (const id of resourceRangeIds) updateResourceValue(id);
+}
 function renderResources(state) {
   $("resources-panel").hidden = state.panel !== "resources";
   const data = state.resources, item = data?.environments?.find(value => value.id === state.selectedId);
   const blocked = state.busy || state.filesBusy || state.modelBusy || state.quitting || !item || data?.fault;
-  for (const id of ["resource-cpus", "resource-memory", "resource-disk-gib", "resource-overlay-gib", "resource-save"])
+  for (const id of [...resourceRangeIds, "resource-save"])
     $(id).disabled = blocked;
   $("resource-environment").textContent = (state.environments ?? []).find(value => value.id === state.selectedId)?.name ?? "";
   if (data?.fault) {
     $("resource-budget").textContent = "Resource settings are invalid and were preserved. VM stop remains available from the toolbar.";
     $("resource-disk").textContent = "";
+    updateResourceValues();
     return;
   }
-  if (!item) return;
+  if (!item) { updateResourceValues(); return; }
   const key = JSON.stringify(item), draft = resourceDrafts.get(state.selectedId);
-  if (resourceEnvironment !== state.selectedId || (!draft && key !== resourceKey)) {
-    $("resource-cpus").value = draft?.cpus ?? item.cpus;
-    $("resource-memory").value = draft?.memoryMiB ?? item.memoryMiB;
-    $("resource-disk-gib").value = draft?.diskGiB ?? item.diskGiB;
-    $("resource-overlay-gib").value = draft?.overlayGiB ?? item.overlayGiB ?? 10;
-    resourceKey = key; resourceEnvironment = state.selectedId;
-  }
-  $("resource-cpus").max = data.limits.cpus;
-  $("resource-memory").max = data.limits.memoryMiB;
   const wrap = item.diskChange === "grow-only";
   const env = state.environments?.find(value => value.id === state.selectedId);
   const limaLocked = item.diskChange === "before-create" && Boolean(env?.prepared);
   const disk = $("resource-disk-gib");
-  disk.max = data.limits.diskGiB;
-  disk.min = wrap ? Math.max(20, item.diskGiB) : 20;
-  disk.disabled = blocked || limaLocked;
-  disk.title = limaLocked ? "Disk capacity for this environment is fixed after its first creation." : "";
   const overlayRow = $("resource-overlay-row");
+  const overlay = $("resource-overlay-gib");
+  // Range inputs sanitize a value against their initial/default max (100) when it
+  // is assigned. Configure every bound first so MiB/GiB values are never clamped.
+  $("resource-cpus").min = 1;
+  $("resource-cpus").max = data.limits.cpus;
+  $("resource-memory").min = 2048;
+  $("resource-memory").max = data.limits.memoryMiB;
+  disk.min = wrap ? Math.max(20, item.diskGiB) : 20;
+  disk.max = data.limits.diskGiB;
   overlayRow.hidden = item.overlayGiB === undefined;
   if (!overlayRow.hidden) {
-    const overlay = $("resource-overlay-gib");
-    overlay.max = data.limits.overlayGiB;
     overlay.min = Math.max(10, item.overlayGiB);
+    overlay.max = data.limits.overlayGiB;
+  }
+  if (resourceEnvironment !== state.selectedId || (!draft && key !== resourceKey)) {
+    $("resource-cpus").value = draft?.cpus ?? item.cpus;
+    $("resource-memory").value = draft?.memoryMiB ?? item.memoryMiB;
+    disk.value = draft?.diskGiB ?? item.diskGiB;
+    overlay.value = draft?.overlayGiB ?? item.overlayGiB ?? 10;
+    resourceKey = key; resourceEnvironment = state.selectedId;
+  }
+  disk.disabled = blocked || limaLocked;
+  disk.title = limaLocked ? "Disk capacity for this environment is fixed after its first creation." : "";
+  if (!overlayRow.hidden) {
     overlay.title = "WrapVM disk capacity can only grow; it never shrinks below the current value.";
   }
+  updateResourceValues();
+  // Keep a dirty draft aligned with the range values after any bound-driven
+  // clamping, so switching environments does not restore an out-of-range draft.
+  if (draft) resourceDrafts.set(state.selectedId, {
+    cpus: $("resource-cpus").value, memoryMiB: $("resource-memory").value,
+    diskGiB: $("resource-disk-gib").value, overlayGiB: $("resource-overlay-gib").value,
+  });
   let text = `Disk capacity: ${item.diskGiB} GiB${item.overlayGiB ? `, plus ${item.overlayGiB} GiB system overlay` : ""}. Capacity is the virtual disk size, not a per-workspace quota or reserved host space.`;
   if (limaLocked) text += " Disk capacity is fixed for this environment after its first creation.";
   if (wrap) text += " WrapVM disk and overlay can only grow, never shrink below their current sizes.";
@@ -388,8 +417,9 @@ $("resource-form").addEventListener("submit", event => {
   });
 });
 
-for (const id of ["resource-cpus", "resource-memory", "resource-disk-gib", "resource-overlay-gib"])
+for (const id of resourceRangeIds)
   $(id).addEventListener("input", () => {
+    updateResourceValue(id);
     if (resourceEnvironment) resourceDrafts.set(resourceEnvironment, {
       cpus: $("resource-cpus").value, memoryMiB: $("resource-memory").value,
       diskGiB: $("resource-disk-gib").value, overlayGiB: $("resource-overlay-gib").value,
