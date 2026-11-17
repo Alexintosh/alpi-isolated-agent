@@ -1,6 +1,7 @@
 # Alpi agent orchestration implementation plan
 
-Status: implementation in progress; this document is not acceptance evidence.
+Implementation and acceptance plan. Exact-head evidence is recorded below;
+current integrated acceptance and merge status are recorded on PR #3.
 Base: `c6d5cb28e062d48b86d37667da8c19dffa165cc6` (`origin/main`).
 Branch: `feat/alpi-agent-orchestration`.
 
@@ -268,10 +269,12 @@ and MCP facade at 9.68 (final round 3/3). The MCP reviewer independently ran
 not GitHub approvals or whole-feature acceptance. Exact-SHA reports are on PR #3.
 
 The complete service passed round 2/3 at 9.61 on
-`e2367fb86ce40711801912037da0ad38b6ca1124`. Native integration passed its 65
-focused tests after repair and awaits round 2/3 review (initial score 9.35).
+`e2367fb86ce40711801912037da0ad38b6ca1124`. Native integration passed round
+2/3 at 9.66 on `58a9bf43befbafa8753718942e986159ee3e682f`, with 65 native
+tests, 88 reference tests and four supplemental reviewer scenarios passing.
 Runtime code at `e82001b695a1973f55faacaf0a5d3c6c30955ab6` passed 692 tracked
 tests and [bounded packaged VM/inference acceptance](alpi-orchestration.md#recorded-development-mac-acceptance).
-The final integrated review remains outstanding. No score is assigned by the
-coordinator. Completion requires integrated behavior, live evidence, CI and the
-reviewer threshold; code existence and passing synthetic tests are insufficient.
+This checkpoint precedes the final integrated review, whose exact-head report
+belongs on PR #3. No score is assigned by the coordinator. Completion requires
+integrated behavior, live evidence, CI and the reviewer threshold; code existence
+and passing synthetic tests are insufficient.
