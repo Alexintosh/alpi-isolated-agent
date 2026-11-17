@@ -1,0 +1,709 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const { randomUUID, createHash } = require("node:crypto");
+const { OrchestrationService } = require("../src/orchestration/service.cjs");
+
+const execFileAsync = promisify(execFile);
+const JOURNAL = "orchestration-tasks.json";
+const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
+const uuid = () => randomUUID();
+const fingerprint = parts => createHash("sha256").update(JSON.stringify(parts), "utf8").digest("hex");
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function journalPath(harness) {
+  return path.join(harness.root, JOURNAL);
+}
+
+function makeModels(overrides = {}) {
+  return {
+    fault: false,
+    cleanupPending: false,
+    selected: { provider: "p1", model: "m1" },
+    providers: [{
+      id: "p1",
+      displayName: "Private Provider",
+      api: "openai-completions",
+      baseURL: "https://secret.example/v1",
+      authMode: "bearer",
+      credentialAvailable: true,
+      availability: "available",
+      models: [{
+        id: "m1",
+        name: "Model One",
+        contextWindow: 1000,
+        maxTokens: 100,
+        reasoningEfforts: { low: "low", high: "high" },
+      }],
+    }],
+    ...overrides,
+  };
+}
+
+function makeRuntime({ token = "token-1", onStart } = {}) {
+  const calls = { start: [], stop: [], withRunning: [] };
+  const environment = {
+    id: "env-1",
+    name: "Work",
+    kind: "lima",
+    phase: "running",
+    busy: false,
+    network: "ready",
+    prepared: true,
+    issue: "raw-issue-must-not-leak",
+    networkStatus: { proxy: "http://raw-proxy-must-not-leak" },
+  };
+  const coordinator = {
+    snapshot() { return [environment]; },
+    async start(id) {
+      calls.start.push(id);
+      if (onStart) onStart();
+      return [environment];
+    },
+    async stop(id) {
+      calls.stop.push(id);
+      return [environment];
+    },
+    async withRunning(id, operation, { signal } = {}) {
+      calls.withRunning.push(id);
+      return operation({ exec: async () => "" }, { ownershipToken: token, signal });
+    },
+  };
+  return { coordinator, calls, environment };
+}
+
+function makeGuest({ onCall, onExec, failAt, createResult, block } = {}) {
+  const calls = [];
+  const guest = {
+    calls,
+    async executeGuest(driver, options, request) {
+      calls.push({ kind: "exec", request, ownershipToken: options.ownershipToken });
+      if (onExec) await onExec({ request });
+      if (failAt === "exec") throw Object.assign(new Error("raw command output"), { code: "guest-command-failed" });
+      return { stdout: "ok", stderr: "", exitCode: 0, signal: null, timedOut: false, truncated: false };
+    },
+    async harnessRpc(driver, options, method, args) {
+      const call = { kind: "rpc", method, args, ownershipToken: options.ownershipToken };
+      calls.push(call);
+      if (onCall) await onCall(call);
+      if (block && block.method === method) await block.promise;
+      if (failAt === method) throw Object.assign(new Error("raw prompt secret"), { code: "guest-rpc-failed" });
+      switch (method) {
+        case "session/create": return createResult ?? { sessionId: args.sessionId };
+        case "session/selectModel": return { ok: true };
+        case "session/prompt": return { queued: true, requestId: args.requestId };
+        case "session/wait": return { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] };
+        case "session/cancel": return { cancelled: true };
+        default: throw new Error("unexpected RPC");
+      }
+    },
+  };
+  return guest;
+}
+
+function makeHarness(t, options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "alpi-orchestration-service-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const state = { runtime: options.runtime ?? makeRuntime(options.runtimeOptions) };
+  const models = options.models ?? makeModels();
+  const guest = options.guest ?? makeGuest({
+    ...options.guestOptions,
+    onCall: options.guestOptions?.onCall
+      ? context => options.guestOptions.onCall(context, state)
+      : undefined,
+    onExec: options.guestOptions?.onExec
+      ? context => options.guestOptions.onExec(context, state)
+      : undefined,
+  });
+  const runExclusive = options.runExclusive ?? (async work => work());
+  const open = (overrides = {}) => new OrchestrationService({
+    stateRoot: root,
+    getRuntime: () => overrides.runtime ?? state.runtime,
+    getModels: () => overrides.models ?? models,
+    runExclusive: overrides.runExclusive ?? runExclusive,
+    guest: overrides.guest ?? guest,
+  });
+  return { root, state, models, guest, service: open(), open };
+}
+
+function delegateArgs(requestId = uuid(), extra = {}) {
+  return {
+    environmentId: "env-1",
+    cwd: "/home/user/workspace",
+    prompt: "fix the bug",
+    provider: "p1",
+    model: "m1",
+    requestId,
+    ...extra,
+  };
+}
+
+test("full delegation cycle is durable, idempotent and exposes no endpoint or credential", async t => {
+  const h = makeHarness(t);
+  const { service, guest } = h;
+
+  const status = await service.dispatch("alpi_status", {});
+  assert.deepEqual(status.environments, [{
+    id: "env-1", name: "Work", kind: "lima", phase: "running",
+    busy: false, network: "ready", prepared: true,
+  }]);
+  assert.deepEqual(status.models, {
+    fault: false,
+    selected: { provider: "p1", model: "m1" },
+    providers: [{ id: "p1", models: [{ id: "m1" }] }],
+  });
+  const visibleStatus = JSON.stringify(status);
+  for (const forbidden of ["secret.example", "bearer", "credential", "baseURL",
+    "authMode", "Private Provider", "raw-issue", "networkStatus", "raw-proxy"]) {
+    assert.equal(visibleStatus.includes(forbidden), false, forbidden);
+  }
+
+  const started = await service.dispatch("alpi_start", { environmentId: "env-1" });
+  assert.equal(started.environment.id, "env-1");
+  assert.deepEqual(h.state.runtime.calls.start, ["env-1"]);
+
+  const executed = await service.dispatch("alpi_exec", {
+    environmentId: "env-1", command: "echo hi", cwd: "/home/user/workspace",
+  });
+  assert.equal(executed.stdout, "ok");
+  assert.deepEqual(guest.calls.at(-1).request, { command: "echo hi", cwd: "/home/user/workspace" });
+
+  const requestId = uuid();
+  const args = delegateArgs(requestId);
+  const receipt = await service.dispatch("alpi_delegate", args);
+  assert.equal(receipt.taskId, requestId);
+  assert.equal(receipt.state, "submitted");
+  assert.equal(receipt.requestStatus, "submitted");
+  assert.equal(receipt.provider, "p1");
+  assert.equal(receipt.model, "m1");
+  assert.match(receipt.sessionId, /^[a-f0-9-]{36}$/);
+
+  const rpc = guest.calls.filter(call => call.kind === "rpc");
+  assert.deepEqual(rpc.map(call => call.method), ["session/create", "session/selectModel", "session/prompt"]);
+  assert.deepEqual(rpc[0].args, { cwd: "/home/user/workspace", sessionId: receipt.sessionId });
+  assert.deepEqual(rpc[1].args, { sessionId: receipt.sessionId, provider: "p1", model: "m1" });
+  assert.deepEqual(rpc[2].args, {
+    sessionId: receipt.sessionId,
+    requestId,
+    mode: "queue",
+    content: [{ type: "text", text: "fix the bug" }],
+  });
+
+  const beforeDuplicate = guest.calls.length;
+  const duplicate = await service.dispatch("alpi_delegate", args);
+  assert.deepEqual(duplicate, receipt);
+  assert.equal(guest.calls.length, beforeDuplicate);
+
+  const sendId = uuid();
+  const sent = await service.dispatch("alpi_send", {
+    taskId: requestId, prompt: "follow up", requestId: sendId,
+  });
+  assert.equal(sent.requestStatus, "submitted");
+  assert.equal(sent.requestId, sendId);
+  assert.deepEqual(guest.calls.at(-1).args, {
+    sessionId: receipt.sessionId,
+    requestId: sendId,
+    mode: "queue",
+    content: [{ type: "text", text: "follow up" }],
+  });
+
+  const beforeSendDuplicate = guest.calls.length;
+  const sentAgain = await service.dispatch("alpi_send", {
+    taskId: requestId, prompt: "follow up", requestId: sendId,
+  });
+  assert.deepEqual(sentAgain, sent);
+  assert.equal(guest.calls.length, beforeSendDuplicate);
+
+  const waited = await service.dispatch("alpi_wait", { taskId: requestId });
+  assert.deepEqual(waited, {
+    taskId: requestId,
+    untrusted: true,
+    value: { cursor: 42, messages: [{ seq: 1, text: "assistant output" }] },
+  });
+  assert.deepEqual(guest.calls.at(-1).args, {
+    sessionId: receipt.sessionId, timeoutMs: 1000, maxMessages: 8,
+  });
+  await service.dispatch("alpi_wait", {
+    taskId: requestId, timeoutMs: 5000, maxMessages: 4, afterSeq: 3,
+  });
+  assert.deepEqual(guest.calls.at(-1).args, {
+    sessionId: receipt.sessionId, timeoutMs: 5000, maxMessages: 4, afterSeq: 3,
+  });
+
+  const cancelled = await service.dispatch("alpi_cancel", { taskId: requestId });
+  assert.deepEqual(cancelled, { taskId: requestId, acknowledged: true, cooperative: true });
+  assert.deepEqual(guest.calls.at(-1).args, { sessionId: receipt.sessionId });
+
+  const tasks = await service.dispatch("alpi_tasks", {});
+  assert.equal(tasks.fault, false);
+  assert.equal(tasks.tasks.length, 1);
+  assert.equal(tasks.tasks[0].state, "submitted");
+  assert.deepEqual(tasks.tasks[0].requests.map(request => request.status), ["submitted", "submitted"]);
+  assert.equal(tasks.tasks[0].requests[1].requestId, sendId);
+
+  const stopped = await service.dispatch("alpi_stop", { environmentId: "env-1" });
+  assert.equal(stopped.environment.id, "env-1");
+  assert.deepEqual(h.state.runtime.calls.stop, ["env-1"]);
+
+  const raw = fs.readFileSync(journalPath(h), "utf8");
+  for (const forbidden of ["fix the bug", "follow up", "echo hi", "assistant output",
+    "secret.example", "Bearer", "credential", "cookie"]) {
+    assert.equal(raw.includes(forbidden), false, forbidden);
+  }
+  assert.match(raw, /"ownershipToken": "token-1"/);
+});
+
+test("explicit reasoning effort and steer mode are forwarded without defaults", async t => {
+  const h = makeHarness(t);
+  const { service, guest } = h;
+
+  const requestId = uuid();
+  const receipt = await service.dispatch("alpi_delegate",
+    delegateArgs(requestId, { reasoningEffort: "high" }));
+  assert.equal(receipt.reasoningEffort, "high");
+  const selected = guest.calls.find(call => call.method === "session/selectModel");
+  assert.equal(selected.args.reasoningEffort, "high");
+
+  const sendId = uuid();
+  await service.dispatch("alpi_send", {
+    taskId: requestId, prompt: "steer it", requestId: sendId, mode: "steer",
+  });
+  assert.equal(guest.calls.at(-1).args.mode, "steer");
+
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(uuid(), { reasoningEffort: "max" })),
+    error => error.code === "reasoning_effort_invalid",
+  );
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(uuid(), { model: "unknown" })),
+    error => error.code === "model_not_configured",
+  );
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(uuid(), { provider: "unknown" })),
+    error => error.code === "model_not_configured",
+  );
+  assert.equal(guest.calls.filter(call => call.method === "session/create").length, 1);
+});
+
+test("duplicate request IDs return receipts while conflicts never target another task", async t => {
+  const h = makeHarness(t);
+  const { service, guest } = h;
+
+  const first = uuid();
+  await service.dispatch("alpi_delegate", delegateArgs(first));
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(first, { prompt: "different work" })),
+    error => error.code === "request_conflict",
+  );
+
+  const second = uuid();
+  await service.dispatch("alpi_delegate", delegateArgs(second, { prompt: "other task" }));
+
+  const sendId = uuid();
+  await service.dispatch("alpi_send", { taskId: second, prompt: "first follow-up", requestId: sendId });
+  await assert.rejects(
+    service.dispatch("alpi_send", { taskId: second, prompt: "changed follow-up", requestId: sendId }),
+    error => error.code === "request_conflict",
+  );
+  await assert.rejects(
+    service.dispatch("alpi_send", { taskId: first, prompt: "cross task", requestId: sendId }),
+    error => error.code === "request_conflict",
+  );
+
+  const secondSend = uuid();
+  await service.dispatch("alpi_send", { taskId: first, prompt: "another", requestId: secondSend });
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(secondSend)),
+    error => error.code === "request_conflict",
+  );
+
+  const before = guest.calls.length;
+  const receipt = await service.dispatch("alpi_delegate", delegateArgs(first));
+  assert.equal(receipt.state, "submitted");
+  assert.equal(guest.calls.length, before);
+});
+
+test("catalog faults and missing models never fall back or replay a recorded request", async t => {
+  const h = makeHarness(t);
+  const { service, guest } = h;
+  const requestId = uuid();
+  const args = delegateArgs(requestId);
+  await service.dispatch("alpi_delegate", args);
+
+  h.models.fault = true;
+  const status = await service.dispatch("alpi_status", {});
+  assert.deepEqual(status.models, { fault: true, selected: null, providers: [] });
+
+  const before = guest.calls.length;
+  const duplicate = await service.dispatch("alpi_delegate", args);
+  assert.equal(duplicate.state, "submitted");
+  assert.equal(guest.calls.length, before);
+  await assert.rejects(
+    service.dispatch("alpi_delegate", delegateArgs(uuid())),
+    error => error.code === "model_catalog_unavailable",
+  );
+});
+
+test("interrupted create, model selection and prompt recover as uncertain without replay", async t => {
+  for (const stage of ["session/create", "session/selectModel", "session/prompt"]) {
+    const h = makeHarness(t, { guestOptions: { failAt: stage } });
+    const requestId = uuid();
+    const args = delegateArgs(requestId);
+    await assert.rejects(
+      h.service.dispatch("alpi_delegate", args),
+      error => error.code === "guest_failed",
+    );
+    const tasks = await h.service.dispatch("alpi_tasks", {});
+    assert.equal(tasks.tasks.length, 1, stage);
+    assert.equal(tasks.tasks[0].state, "uncertain", stage);
+    assert.equal(tasks.tasks[0].requests[0].status, "uncertain", stage);
+
+    const freshGuest = makeGuest();
+    const restarted = h.open({ guest: freshGuest });
+    const recovered = await restarted.dispatch("alpi_tasks", {});
+    assert.equal(recovered.tasks[0].state, "uncertain", stage);
+    const receipt = await restarted.dispatch("alpi_delegate", args);
+    assert.equal(receipt.state, "uncertain", stage);
+    assert.equal(receipt.requestStatus, "uncertain", stage);
+    assert.equal(freshGuest.calls.length, 0, `${stage} must not replay`);
+  }
+});
+
+test("a mismatched session create response is not adopted", async t => {
+  const wrongSession = uuid();
+  const h = makeHarness(t, { guestOptions: { createResult: { sessionId: wrongSession } } });
+  const requestId = uuid();
+  await assert.rejects(
+    h.service.dispatch("alpi_delegate", delegateArgs(requestId)),
+    error => error.code === "session_mismatch",
+  );
+  const tasks = await h.service.dispatch("alpi_tasks", {});
+  assert.equal(tasks.tasks[0].state, "uncertain");
+  assert.notEqual(tasks.tasks[0].sessionId, wrongSession);
+  const rpc = h.guest.calls.filter(call => call.kind === "rpc");
+  assert.deepEqual(rpc.map(call => call.method), ["session/create"]);
+});
+
+test("a persisted preparing record becomes uncertain on restart and is never replayed", async t => {
+  const h = makeHarness(t);
+  const requestId = uuid();
+  const sessionId = uuid();
+  const stamp = new Date().toISOString();
+  const digest = fingerprint(["delegate", "env-1", "/home/user/workspace", "fix the bug", "p1", "m1", null]);
+  fs.writeFileSync(journalPath(h), JSON.stringify({
+    version: 1,
+    tasks: [{
+      taskId: requestId,
+      environmentId: "env-1",
+      sessionId,
+      cwd: "/home/user/workspace",
+      provider: "p1",
+      model: "m1",
+      ownershipToken: "token-1",
+      createdAt: stamp,
+      updatedAt: stamp,
+      state: "preparing",
+      requests: [{
+        requestId, fingerprint: digest, status: "preparing", createdAt: stamp, updatedAt: stamp,
+      }],
+    }],
+  }));
+
+  const freshGuest = makeGuest();
+  const service = h.open({ guest: freshGuest });
+  const tasks = await service.dispatch("alpi_tasks", {});
+  assert.equal(tasks.tasks[0].state, "uncertain");
+  assert.equal(tasks.tasks[0].requests[0].status, "uncertain");
+
+  const receipt = await service.dispatch("alpi_delegate", delegateArgs(requestId));
+  assert.equal(receipt.state, "uncertain");
+  assert.equal(receipt.requestStatus, "uncertain");
+  assert.equal(freshGuest.calls.length, 0);
+});
+
+test("a failed journal write latches a fault, preserves the file and leaves stop/exec usable", async t => {
+  const h = makeHarness(t);
+  const target = path.join(h.root, "journal-target.json");
+  fs.writeFileSync(target, JSON.stringify({ version: 1, tasks: [] }));
+  fs.symlinkSync(target, journalPath(h));
+
+  await assert.rejects(
+    h.service.dispatch("alpi_delegate", delegateArgs()),
+    error => error.code === "journal_unavailable",
+  );
+  const tasks = await h.service.dispatch("alpi_tasks", {});
+  assert.deepEqual(tasks, { fault: true, tasks: [] });
+  assert.equal(fs.lstatSync(journalPath(h)).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(target, "utf8"), JSON.stringify({ version: 1, tasks: [] }));
+
+  await assert.rejects(
+    h.service.dispatch("alpi_delegate", delegateArgs()),
+    error => error.code === "journal_unavailable",
+  );
+  const stopped = await h.service.dispatch("alpi_stop", { environmentId: "env-1" });
+  assert.equal(stopped.environment.id, "env-1");
+  await h.service.dispatch("alpi_exec", { environmentId: "env-1", command: "true" });
+  assert.deepEqual(h.state.runtime.calls.stop, ["env-1"]);
+  assert.equal((await h.service.dispatch("alpi_status", {})).environments.length, 1);
+});
+
+test("a failure after atomic publication still latches and preserves the published intent", async t => {
+  const h = makeHarness(t);
+  const realRename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    realRename(from, to);
+    throw Object.assign(new Error("raw disk secret"), { code: "EIO" });
+  };
+  try {
+    await assert.rejects(
+      h.service.dispatch("alpi_delegate", delegateArgs()),
+      error => error.code === "journal_unavailable",
+    );
+  } finally {
+    fs.renameSync = realRename;
+  }
+
+  const raw = fs.readFileSync(journalPath(h), "utf8");
+  assert.match(raw, /"state": "preparing"/);
+  const tasks = await h.service.dispatch("alpi_tasks", {});
+  assert.deepEqual(tasks, { fault: true, tasks: [] });
+  await assert.rejects(
+    h.service.dispatch("alpi_delegate", delegateArgs()),
+    error => error.code === "journal_unavailable",
+  );
+
+  const restarted = h.open({ guest: makeGuest() });
+  const recovered = await restarted.dispatch("alpi_tasks", {});
+  assert.equal(recovered.tasks[0].state, "uncertain");
+});
+
+test("corrupt, symlinked, FIFO and oversize journals latch without blocking verified controls", async t => {
+  const corrupt = makeHarness(t);
+  fs.writeFileSync(journalPath(corrupt), "{not-json-secret");
+  const corruptService = corrupt.open({ guest: makeGuest() });
+  assert.deepEqual(await corruptService.dispatch("alpi_tasks", {}), { fault: true, tasks: [] });
+  await corruptService.dispatch("alpi_stop", { environmentId: "env-1" });
+  await corruptService.dispatch("alpi_exec", { environmentId: "env-1", command: "true" });
+
+  const linked = makeHarness(t);
+  const target = path.join(linked.root, "valid.json");
+  fs.writeFileSync(target, JSON.stringify({ version: 1, tasks: [] }));
+  fs.symlinkSync(target, journalPath(linked));
+  const linkedService = linked.open({ guest: makeGuest() });
+  assert.deepEqual(await linkedService.dispatch("alpi_tasks", {}), { fault: true, tasks: [] });
+
+  const fifo = makeHarness(t);
+  try {
+    await execFileAsync("mkfifo", [journalPath(fifo)]);
+  } catch {
+    t.diagnostic("mkfifo is unavailable; FIFO journal case skipped");
+  }
+  if (fs.existsSync(journalPath(fifo))) {
+    const fifoService = fifo.open({ guest: makeGuest() });
+    assert.deepEqual(await fifoService.dispatch("alpi_tasks", {}), { fault: true, tasks: [] });
+  }
+
+  const oversized = makeHarness(t);
+  fs.writeFileSync(journalPath(oversized), Buffer.alloc(MAX_JOURNAL_BYTES + 1, 120));
+  const oversizedService = oversized.open({ guest: makeGuest() });
+  assert.deepEqual(await oversizedService.dispatch("alpi_tasks", {}), { fault: true, tasks: [] });
+});
+
+test("task and request capacity errors are explicit and never delete history", async t => {
+  const tasksHarness = makeHarness(t);
+  const ids = [];
+  for (let index = 0; index < 256; index += 1) {
+    const requestId = uuid();
+    ids.push(requestId);
+    await tasksHarness.service.dispatch("alpi_delegate",
+      delegateArgs(requestId, { prompt: `task ${index}` }));
+  }
+  await assert.rejects(
+    tasksHarness.service.dispatch("alpi_delegate", delegateArgs(uuid(), { prompt: "overflow" })),
+    error => error.code === "capacity",
+  );
+  const kept = await tasksHarness.service.dispatch("alpi_tasks", {});
+  assert.equal(kept.tasks.length, 256);
+  assert.equal(kept.tasks[0].taskId, ids[0]);
+
+  const requestsHarness = makeHarness(t);
+  const taskId = uuid();
+  await requestsHarness.service.dispatch("alpi_delegate", delegateArgs(taskId));
+  for (let index = 0; index < 63; index += 1) {
+    await requestsHarness.service.dispatch("alpi_send", {
+      taskId, prompt: `follow ${index}`, requestId: uuid(),
+    });
+  }
+  await assert.rejects(
+    requestsHarness.service.dispatch("alpi_send", {
+      taskId, prompt: "overflow", requestId: uuid(),
+    }),
+    error => error.code === "capacity",
+  );
+  const task = (await requestsHarness.service.dispatch("alpi_tasks", {})).tasks[0];
+  assert.equal(task.requests.length, 64);
+});
+
+test("wrong ownership and runtime replacement reject before any guest mutation or success write", async t => {
+  const h = makeHarness(t);
+  const requestId = uuid();
+  await h.service.dispatch("alpi_delegate", delegateArgs(requestId));
+
+  h.state.runtime = makeRuntime({ token: "different-owner" });
+  const before = h.guest.calls.length;
+  await assert.rejects(
+    h.service.dispatch("alpi_send", { taskId: requestId, prompt: "nope", requestId: uuid() }),
+    error => error.code === "ownership_mismatch",
+  );
+  await assert.rejects(
+    h.service.dispatch("alpi_wait", { taskId: requestId }),
+    error => error.code === "ownership_mismatch",
+  );
+  await assert.rejects(
+    h.service.dispatch("alpi_cancel", { taskId: requestId }),
+    error => error.code === "ownership_mismatch",
+  );
+  assert.equal(h.guest.calls.length, before);
+
+  const swapped = makeHarness(t, {
+    guestOptions: {
+      onCall: ({ method }, state) => {
+        if (method === "session/prompt") state.runtime = makeRuntime({ token: "token-2" });
+      },
+    },
+  });
+  const swapRequest = uuid();
+  await assert.rejects(
+    swapped.service.dispatch("alpi_delegate", delegateArgs(swapRequest)),
+    error => error.code === "runtime_replaced",
+  );
+  const pending = await swapped.service.dispatch("alpi_tasks", {});
+  assert.equal(pending.tasks[0].state, "preparing");
+  const restarted = swapped.open({ guest: makeGuest() });
+  assert.equal((await restarted.dispatch("alpi_tasks", {})).tasks[0].state, "uncertain");
+
+  const execSwap = makeHarness(t, {
+    guestOptions: {
+      onExec: (context, state) => { state.runtime = makeRuntime({ token: "token-2" }); },
+    },
+  });
+  await assert.rejects(
+    execSwap.service.dispatch("alpi_exec", { environmentId: "env-1", command: "true" }),
+    error => error.code === "runtime_replaced",
+  );
+
+  let startHarness;
+  startHarness = makeHarness(t, {
+    runtimeOptions: { onStart: () => { startHarness.state.runtime = makeRuntime({ token: "token-2" }); } },
+  });
+  await assert.rejects(
+    startHarness.service.dispatch("alpi_start", { environmentId: "env-1" }),
+    error => error.code === "runtime_replaced",
+  );
+});
+
+test("caller abort and close reject late success without recording a submitted request", async t => {
+  const abortGate = deferred();
+  const abortEntered = deferred();
+  const abortHarness = makeHarness(t, {
+    guestOptions: {
+      block: { method: "session/prompt", promise: abortGate.promise },
+      onCall: ({ method }) => { if (method === "session/prompt") abortEntered.resolve(); },
+    },
+  });
+  const controller = new AbortController();
+  const requestId = uuid();
+  const pending = abortHarness.service.dispatch("alpi_delegate", delegateArgs(requestId),
+    { signal: controller.signal });
+  await abortEntered.promise;
+  controller.abort();
+  abortGate.resolve();
+  await assert.rejects(pending, error => error.code === "aborted");
+  const abortedTasks = await abortHarness.service.dispatch("alpi_tasks", {});
+  assert.equal(abortedTasks.tasks[0].state, "uncertain");
+  assert.equal(abortedTasks.tasks[0].requests[0].status, "uncertain");
+  const restarted = abortHarness.open({ guest: makeGuest() });
+  assert.equal((await restarted.dispatch("alpi_tasks", {})).tasks[0].state, "uncertain");
+
+  const closeGate = deferred();
+  const closeEntered = deferred();
+  const closeHarness = makeHarness(t, {
+    guestOptions: {
+      block: { method: "session/prompt", promise: closeGate.promise },
+      onCall: ({ method }) => { if (method === "session/prompt") closeEntered.resolve(); },
+    },
+  });
+  const closing = closeHarness.service.dispatch("alpi_delegate", delegateArgs(uuid()));
+  await closeEntered.promise;
+  await closeHarness.service.close();
+  closeGate.resolve();
+  await assert.rejects(closing, error => error.code === "closing");
+  await assert.rejects(
+    closeHarness.service.dispatch("alpi_status", {}),
+    error => error.code === "closing",
+  );
+  await assert.rejects(
+    closeHarness.service.dispatch("alpi_tasks", {}),
+    error => error.code === "closing",
+  );
+});
+
+test("admission is fail-fast while status and tasks reads remain available", async t => {
+  const gate = deferred();
+  const entered = deferred();
+  const h = makeHarness(t, {
+    guestOptions: {
+      block: { method: "session/prompt", promise: gate.promise },
+      onCall: ({ method }) => { if (method === "session/prompt") entered.resolve(); },
+    },
+  });
+  const pending = h.service.dispatch("alpi_delegate", delegateArgs());
+  await entered.promise;
+
+  await assert.rejects(
+    h.service.dispatch("alpi_exec", { environmentId: "env-1", command: "true" }),
+    error => error.code === "busy",
+  );
+  assert.equal((await h.service.dispatch("alpi_status", {})).environments.length, 1);
+  const tasks = await h.service.dispatch("alpi_tasks", {});
+  assert.equal(tasks.tasks[0].state, "preparing");
+
+  gate.resolve();
+  await pending;
+  await h.service.dispatch("alpi_exec", { environmentId: "env-1", command: "true" });
+});
+
+test("imports and exports are validated but explicitly unsupported", async t => {
+  const h = makeHarness(t);
+  await assert.rejects(
+    h.service.dispatch("alpi_import", {
+      environmentId: "env-1", source: "/tmp/source", guestParent: "/home/user/workspace", name: "copy",
+    }),
+    error => error.code === "unsupported",
+  );
+  await assert.rejects(
+    h.service.dispatch("alpi_export", {
+      environmentId: "env-1", source: "/home/user/workspace/copy", hostParent: "/tmp", name: "copy",
+    }),
+    error => error.code === "unsupported",
+  );
+  await assert.rejects(
+    h.service.dispatch("alpi_missing", {}),
+    error => error.code === "unknown_tool",
+  );
+  await assert.rejects(
+    h.service.dispatch("alpi_status", { extra: true }),
+    error => error.code === "invalid_arguments",
+  );
+  assert.deepEqual(h.state.runtime.calls.start, []);
+  assert.equal(h.guest.calls.length, 0);
+});
