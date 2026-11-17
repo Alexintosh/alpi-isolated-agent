@@ -176,10 +176,10 @@ function runCli(args) {
 // exercised without production test knobs.
 function loadFacade({ setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
   const source = fs.readFileSync(MCP_SOURCE, "utf8");
-  const module = { exports: {} };
+  const facadeModule = { exports: {} };
   const sandbox = {
-    module,
-    exports: module.exports,
+    module: facadeModule,
+    exports: facadeModule.exports,
     require: (specifier) => {
       if (specifier === "./tools.cjs") return require("../src/orchestration/tools.cjs");
       if (specifier === "./transport.cjs") return require("../src/orchestration/transport.cjs");
@@ -195,7 +195,7 @@ function loadFacade({ setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout }
     console,
   };
   vm.runInNewContext(source, sandbox, { filename: MCP_SOURCE });
-  return module.exports;
+  return facadeModule.exports;
 }
 
 function blockedOutput() {
@@ -205,6 +205,151 @@ function blockedOutput() {
     },
   });
 }
+
+// Runs the facade in an isolated child so a late stream error that escapes the
+// facade's ownership is observed as the child's own failure instead of taking
+// down the test process.
+function runOwnedWriteChild(t, scenario) {
+  const dir = privateDir(t);
+  const scriptPath = path.join(dir, "owned-write-child.cjs");
+  fs.writeFileSync(scriptPath, OWNED_WRITE_CHILD_SOURCE, { mode: 0o600 });
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath, scenario], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already exited.
+      }
+      resolve({ code: null, signal: "timeout", stdout, stderr });
+    }, 8000);
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+}
+
+const OWNED_WRITE_CHILD_SOURCE = `
+"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { PassThrough, Writable } = require("node:stream");
+const MODULE_PATH = ${JSON.stringify(MCP_SOURCE)};
+const INITIALIZE_PARAMS = ${JSON.stringify(INITIALIZE_PARAMS)};
+const WRITE_STALL_MS = ${WRITE_STALL_MS};
+const scenario = process.argv[2];
+
+const source = fs.readFileSync(MODULE_PATH, "utf8");
+const facadeModule = { exports: {} };
+const timers =
+  scenario === "stall"
+    ? {
+        setTimeout: (fn, ms) => setTimeout(fn, ms === WRITE_STALL_MS ? 150 : ms),
+        clearTimeout,
+      }
+    : { setTimeout, clearTimeout };
+vm.runInNewContext(
+  source,
+  {
+    module: facadeModule,
+    exports: facadeModule.exports,
+    require: (specifier) => {
+      if (specifier === "./tools.cjs" || specifier === "./transport.cjs") {
+        return require(path.join(path.dirname(MODULE_PATH), specifier));
+      }
+      return require(specifier);
+    },
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    setImmediate,
+    Buffer,
+    process,
+    TextDecoder,
+    AbortController,
+    console,
+  },
+  { filename: MODULE_PATH },
+);
+const { createMcpServer } = facadeModule.exports;
+
+const frame = (value) => JSON.stringify(value) + "\\n";
+const immediate = () => new Promise((resolve) => setImmediate(resolve));
+const input = new PassThrough();
+const chunks = [];
+const pending = [];
+const output = new Writable({
+  write(chunk, _encoding, callback) {
+    chunks.push(chunk.toString("utf8"));
+    pending.push(callback);
+  },
+});
+const terminations = [];
+const payload = "x".repeat(4 * 1024 * 1024 - 4096);
+const facade = createMcpServer({
+  input,
+  output,
+  call: () => payload,
+  onTerminate: (code) => terminations.push(code),
+});
+input.write(frame({ jsonrpc: "2.0", id: "init", method: "initialize", params: INITIALIZE_PARAMS }));
+input.write(frame({ jsonrpc: "2.0", method: "notifications/initialized" }));
+if (scenario === "overflow") {
+  for (let id = 1; id <= 6; id += 1) {
+    input.write(
+      frame({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "alpi_status", arguments: {} },
+      }),
+    );
+  }
+}
+
+(async () => {
+  const code = await facade.done;
+  await immediate();
+  await immediate();
+  const before = {
+    code,
+    terminations: terminations.slice(),
+    listeners: output.listenerCount("error"),
+    pending: pending.length,
+    ids: chunks.map((chunk) => JSON.parse(chunk).id),
+  };
+  // Fail the facade-owned write after the cleanup the previous implementation
+  // would already have run. Its deferred stream error must stay contained.
+  pending[0](new Error("synthetic-owned-write-failed-after-" + scenario));
+  await immediate();
+  await immediate();
+  const after = {
+    terminations: terminations.slice(),
+    listeners: output.listenerCount("error"),
+    pending: pending.length,
+    chunks: chunks.length,
+    leaked: chunks.some((chunk) => chunk.includes("synthetic-owned-write-failed")),
+  };
+  process.stdout.write(JSON.stringify({ before, after }) + "\\n");
+  process.exit(0);
+})().catch((error) => {
+  process.stderr.write(String(error && error.stack ? error.stack : error));
+  process.exit(2);
+});
+`;
 
 test("CLI requires exactly one explicit absolute socket", async () => {
   const cases = [
@@ -1099,11 +1244,14 @@ test("synchronous close prevents a deferred dispatch", async () => {
   input.end();
 });
 
-test("output write callback errors terminate once without escaping", async () => {
+test("an output write callback failure terminates once and owns its deferred stream error", async () => {
   const input = new PassThrough();
+  const written = [];
   const output = new Writable({
-    write(_chunk, _encoding, callback) {
-      callback(new Error("synthetic-output-failure"));
+    write(chunk, _encoding, callback) {
+      written.push(chunk.toString());
+      // Fail on a later tick: the stream error is deferred behind this callback.
+      setImmediate(() => callback(new Error("synthetic-output-failure")));
     },
   });
   const terminations = [];
@@ -1118,9 +1266,191 @@ test("output write callback errors terminate once without escaping", async () =>
   input.write(frame(request("p", "ping")));
   assert.equal(await facade.done, 1);
   assert.deepEqual(terminations, [1]);
+  // The guard has to survive the deferred error the failed write schedules and
+  // is released once that error has been delivered.
+  await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(output.listenerCount("error"), 0);
+  assert.equal(output.listenerCount("close"), 0);
+  assert.equal(
+    written.some((chunk) => chunk.includes("synthetic-output-failure")),
+    false,
+    "raw stream errors must not appear in protocol output",
+  );
+  assert.deepEqual(terminations, [1], "termination must stay exactly once");
   input.end();
+});
+
+test("a forced write stall terminates once and keeps the guard for the outstanding write", async () => {
+  const facadeModule = loadFacade({
+    setTimeoutFn: (fn, ms) => setTimeout(fn, ms === WRITE_STALL_MS ? 150 : ms),
+  });
+  const input = new PassThrough();
+  let retained = null;
+  const chunks = [];
+  const output = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(chunk.toString());
+      retained = callback;
+    },
+  });
+  const terminations = [];
+  const facade = facadeModule.createMcpServer({
+    input,
+    output,
+    call: () => ({ ok: true }),
+    onTerminate: (code) => terminations.push(code),
+  });
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+  input.write(frame(notification("notifications/initialized")));
+
+  const code = await Promise.race([
+    facade.done,
+    delay(2000).then(() => {
+      throw new Error("The stalled facade did not terminate.");
+    }),
+  ]);
+  assert.equal(code, 1);
+  assert.deepEqual(terminations, [1]);
+  assert.equal(typeof retained, "function");
+  assert.equal(
+    output.listenerCount("error"),
+    1,
+    "the guard must outlive finish while a write is pending",
+  );
+  assert.equal(output.listenerCount("close"), 1);
+
+  // A late successful callback retires the owned write; the guard is released
+  // without waiting for an error that will never arrive.
+  retained(null);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(output.listenerCount("error"), 0);
+  assert.equal(output.listenerCount("close"), 0);
+  assert.deepEqual(terminations, [1], "termination must stay exactly once");
+  assert.equal(chunks.length, 1);
+  input.end();
+});
+
+test("an emitted output error does not release the guard for a pending owned write", async () => {
+  const input = new PassThrough();
+  let retained = null;
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      retained = callback;
+    },
+  });
+  const terminations = [];
+  const facade = createMcpServer({
+    input,
+    output,
+    call: () => ({}),
+    onTerminate: (code) => terminations.push(code),
+  });
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+  assert.equal(typeof retained, "function");
+  output.emit("error", new Error("synthetic-live-error"));
+  assert.equal(await facade.done, 1);
+  assert.deepEqual(terminations, [1]);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    output.listenerCount("error"),
+    1,
+    "the guard must stay while a facade-owned write is still pending",
+  );
+  retained(null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(output.listenerCount("error"), 0);
+  assert.deepEqual(terminations, [1], "termination must stay exactly once");
+  input.end();
+});
+
+test("close waits for an outstanding owned write and releases its guard afterwards", async () => {
+  const input = new PassThrough();
+  let retained = null;
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      retained = callback;
+    },
+  });
+  const terminations = [];
+  const facade = createMcpServer({
+    input,
+    output,
+    call: () => ({}),
+    onTerminate: (code) => terminations.push(code),
+  });
+  input.write(frame(request("init", "initialize", INITIALIZE_PARAMS)));
+  facade.close();
+  let settled = false;
+  facade.done.then(() => {
+    settled = true;
+  });
+  await delay(50);
+  assert.equal(settled, false, "done must not resolve while an owned write is outstanding");
+  assert.equal(output.listenerCount("error"), 1);
+
+  retained(null);
+  assert.equal(await facade.done, 0);
+  assert.deepEqual(terminations, [0]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(output.listenerCount("error"), 0);
+  assert.equal(output.listenerCount("close"), 0);
+});
+
+test("reused input and output release owned listeners without disturbing caller listeners", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const callerData = () => {};
+  const callerError = () => {};
+  const callerClose = () => {};
+  input.on("data", callerData);
+  input.on("error", callerError);
+  output.on("error", callerError);
+  output.on("close", callerClose);
+
+  const counts = () => ({
+    data: input.listenerCount("data"),
+    end: input.listenerCount("end"),
+    inputError: input.listenerCount("error"),
+    outputError: output.listenerCount("error"),
+    outputClose: output.listenerCount("close"),
+  });
+  const baseline = { data: 1, end: 0, inputError: 1, outputError: 1, outputClose: 1 };
+  assert.deepEqual(counts(), baseline);
+
+  for (let index = 0; index < 2; index += 1) {
+    const facade = createMcpServer({ input, output, call: () => ({}) });
+    const active = counts();
+    assert.deepEqual(
+      {
+        data: active.data,
+        end: active.end,
+        inputError: active.inputError,
+        outputError: active.outputError,
+      },
+      { data: 2, end: 1, inputError: 2, outputError: 2 },
+      "one owned listener per event on top of the caller's listeners",
+    );
+    input.write(frame(request(`init-${index}`, "initialize", INITIALIZE_PARAMS)));
+    input.write(frame(notification("notifications/initialized")));
+    input.write(frame(request(`ping-${index}`, "ping")));
+    facade.close();
+    assert.equal(await facade.done, 0);
+    assert.deepEqual(counts(), baseline, "owned listeners must be released at finish");
+    // The facade pauses input while closing; a caller reusing the stream
+    // resumes it for the next cycle.
+    input.resume();
+  }
+
+  // A readable that already ended disposes its owned listeners too.
+  const facade = createMcpServer({ input, output, call: () => ({}) });
+  input.write(frame(request("init-end", "initialize", INITIALIZE_PARAMS)));
+  input.write(frame(notification("notifications/initialized")));
+  input.end();
+  assert.equal(await facade.done, 0);
+  assert.deepEqual(counts(), baseline);
 });
 
 test("independently emitted output errors abort active calls and terminate once", async () => {
@@ -1174,6 +1504,42 @@ test("independently emitted output errors abort active calls and terminate once"
     "raw stream errors must not appear in protocol output",
   );
   input.end();
+});
+
+test("a delayed owned write failing after termination stays contained", async (t) => {
+  for (const scenario of ["overflow", "stall"]) {
+    const result = await runOwnedWriteChild(t, scenario);
+    assert.equal(
+      result.code,
+      0,
+      `child ${scenario} must not exit on an unhandled stream error: ${result.stderr}`,
+    );
+    const report = JSON.parse(result.stdout.trim());
+    assert.equal(report.before.code, 1, `${scenario}: termination code`);
+    assert.deepEqual(report.before.terminations, [1], `${scenario}: exactly one termination`);
+    assert.equal(report.before.pending, 1, `${scenario}: the owned write must still be pending`);
+    assert.equal(
+      report.before.listeners,
+      1,
+      `${scenario}: the guard must outlive finish while the owned write is pending`,
+    );
+    assert.deepEqual(
+      report.before.ids,
+      ["init"],
+      `${scenario}: only the initialize frame is written`,
+    );
+    assert.deepEqual(
+      report.after.terminations,
+      [1],
+      `${scenario}: termination must stay exactly once`,
+    );
+    assert.equal(
+      report.after.listeners,
+      0,
+      `${scenario}: the guard must be released once the owned write retires`,
+    );
+    assert.equal(report.after.leaked, false, `${scenario}: raw stream errors must not reach protocol output`);
+  }
 });
 
 test("the output error handler does not leak across repeated server use", async () => {

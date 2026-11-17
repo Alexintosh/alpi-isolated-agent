@@ -117,38 +117,62 @@ function toolFailure(error) {
   return toolError("request_failed", "The Alpi request failed.");
 }
 
+function removeListener(stream, event, handler) {
+  if (!handler) return;
+  if (typeof stream.off === "function") stream.off(event, handler);
+  else if (typeof stream.removeListener === "function") stream.removeListener(event, handler);
+}
+
 // Serializes frames and enforces both the per-frame and total queue bounds.
 // A peer that stops reading is terminated at the stall deadline instead of
-// retaining unbounded memory or an admission slot.
-function createOutputQueue({ output, onStall, onOverflow, onIdle }) {
+// retaining unbounded memory or an admission slot. The server hooks and any
+// queued payloads are released on stop, so a caller-retained stream that never
+// completes an outstanding write cannot keep the finished server reachable.
+function createOutputQueue({ output, guard, onStall, onOverflow, onIdle }) {
   const frames = [];
   let queuedBytes = 0;
   let writing = false;
   let timer = null;
   let stopped = false;
+  let hooks = { onStall, onOverflow, onIdle };
 
   const writeNext = () => {
     if (stopped || writing || frames.length === 0) {
-      if (!stopped && !writing && frames.length === 0) onIdle();
+      if (!stopped && !writing && frames.length === 0) hooks.onIdle();
       return;
     }
     const frame = frames.shift();
+    const bytes = frame.bytes;
     writing = true;
     let settled = false;
     const settle = (stalled) => {
       if (settled) return;
       settled = true;
+      if (stopped) return;
       clearTimeout(timer);
-      queuedBytes -= frame.bytes;
+      queuedBytes -= bytes;
       writing = false;
-      if (stalled) onStall();
+      if (stalled) hooks.onStall();
       else writeNext();
     };
     timer = setTimeout(() => settle(true), WRITE_STALL_MS);
+    guard.beginWrite();
     try {
-      output.write(frame.text, "utf8", (error) => settle(Boolean(error)));
+      output.write(frame.text, "utf8", (error) => {
+        const failed = Boolean(error);
+        // Retire ownership before settling: a failed callback schedules the
+        // stream error on a later tick and the guard has to cover it.
+        guard.endWrite(failed);
+        settle(failed);
+      });
     } catch {
-      settle(true);
+      // A synchronous throw never emits a deferred stream error. The callback
+      // may already have settled the write if a custom stream calls back and
+      // then throws, so only retire ownership when it has not.
+      if (!settled) {
+        guard.endWrite(false);
+        settle(true);
+      }
     }
   };
 
@@ -157,7 +181,7 @@ function createOutputQueue({ output, onStall, onOverflow, onIdle }) {
       if (stopped) return false;
       const bytes = Buffer.byteLength(frame) + 1;
       if (queuedBytes + bytes > MAX_QUEUE_BYTES) {
-        onOverflow();
+        hooks.onOverflow();
         return false;
       }
       frames.push({ text: frame + "\n", bytes });
@@ -170,9 +194,78 @@ function createOutputQueue({ output, onStall, onOverflow, onIdle }) {
       frames.length = 0;
       queuedBytes = 0;
       clearTimeout(timer);
+      hooks = { onStall: null, onOverflow: null, onIdle: null };
     },
     idle() {
       return !writing && frames.length === 0;
+    },
+  };
+}
+
+// Owns the facade's error interest in the caller-owned output stream. Exactly
+// one handler stays attached while a write issued by the facade is
+// outstanding, because a delayed Writable callback can still surface a stream
+// error after termination. Once the facade has retired, every owned write has
+// settled and any deferred write failure has been delivered (or the stream
+// reached its terminal state), the handler is detached. After retirement the
+// guard holds no reference to the server, so a caller that retains the stream
+// keeps only this small bookkeeping reachable.
+function createOutputGuard(output) {
+  let errorHandler = null;
+  let closeHandler = null;
+  let notifyError = null;
+  let retired = false;
+  let closed = false;
+  let ownedWrites = 0;
+  let deferredError = false;
+
+  const detach = () => {
+    removeListener(output, "error", errorHandler);
+    removeListener(output, "close", closeHandler);
+    errorHandler = null;
+    closeHandler = null;
+  };
+
+  const release = () => {
+    if (!retired || !errorHandler) return;
+    if (!closed && (ownedWrites > 0 || deferredError)) return;
+    detach();
+  };
+
+  return {
+    attach(onError) {
+      notifyError = onError;
+      if (errorHandler || typeof output.on !== "function") return;
+      errorHandler = () => {
+        // A stream error here is either the deferred failure of an owned write
+        // or an error emitted while the facade is still live; both belong to
+        // the facade and are never forwarded to the protocol stream.
+        deferredError = false;
+        const notify = notifyError;
+        if (notify) notify();
+        release();
+      };
+      output.on("error", errorHandler);
+      closeHandler = () => {
+        // A closed stream cannot emit further errors, so an outstanding owned
+        // write no longer needs the guard.
+        closed = true;
+        release();
+      };
+      output.on("close", closeHandler);
+    },
+    beginWrite() {
+      ownedWrites += 1;
+    },
+    endWrite(failed) {
+      ownedWrites -= 1;
+      if (failed) deferredError = true;
+      release();
+    },
+    retire() {
+      retired = true;
+      notifyError = null;
+      release();
     },
   };
 }
@@ -201,21 +294,19 @@ function createMcpServer({ input, output, call, onTerminate }) {
   });
 
   let queue;
-  let outputErrorHandler = null;
-  const removeOutputErrorHandler = () => {
-    if (!outputErrorHandler) return;
-    if (typeof output.off === "function") output.off("error", outputErrorHandler);
-    else if (typeof output.removeListener === "function") output.removeListener("error", outputErrorHandler);
-    outputErrorHandler = null;
-  };
+  const outputGuard = createOutputGuard(output);
   const finish = () => {
     if (finished) return;
     finished = true;
     queue.stop();
+    // Disposing the owned input listeners releases the finished server
+    // closure; listeners the caller attached are left untouched.
+    detachInput();
+    // A delayed write callback can still fail after termination, so the output
+    // guard retires on its own schedule: it stays attached while a
+    // facade-owned write is outstanding and drops its server reference now.
+    outputGuard.retire();
     doneResolve(exitCode);
-    // A failed write callback schedules the stream error on a later tick, so
-    // keep the handler attached through the deferred error before dropping it.
-    if (outputErrorHandler) setImmediate(removeOutputErrorHandler);
     if (onTerminate) onTerminate(exitCode);
   };
 
@@ -245,6 +336,7 @@ function createMcpServer({ input, output, call, onTerminate }) {
 
   queue = createOutputQueue({
     output,
+    guard: outputGuard,
     onStall: () => terminate(1, true),
     onOverflow: () => terminate(1, true),
     onIdle: () => {
@@ -254,11 +346,9 @@ function createMcpServer({ input, output, call, onTerminate }) {
 
   // Subscribe before the first write so a write callback failure or an
   // independently emitted output error aborts pending calls and terminates
-  // exactly once instead of escaping as an unhandled stream error.
-  if (typeof output.on === "function") {
-    outputErrorHandler = () => terminate(1, true);
-    output.on("error", outputErrorHandler);
-  }
+  // exactly once instead of escaping as an unhandled stream error. The guard
+  // outlives termination until every facade-owned write has retired.
+  outputGuard.attach(() => terminate(1, true));
 
   const sendFrame = (frame) => {
     if (finished) return;
@@ -478,9 +568,19 @@ function createMcpServer({ input, output, call, onTerminate }) {
     terminate(0);
   };
 
-  input.on("data", onData);
-  input.on("end", onEnd);
-  input.on("error", () => terminate(1));
+  const onInputError = () => terminate(1);
+  const inputHandlers = [
+    ["data", onData],
+    ["end", onEnd],
+    ["error", onInputError],
+  ];
+  // Owned listeners are named and removed at finish, so a caller that reuses
+  // the input stream across facades does not accumulate handlers or retain
+  // finished server closures. The caller's own listeners stay untouched.
+  const detachInput = () => {
+    for (const [event, handler] of inputHandlers) removeListener(input, event, handler);
+  };
+  for (const [event, handler] of inputHandlers) input.on(event, handler);
 
   return { done, close: () => terminate(0) };
 }
