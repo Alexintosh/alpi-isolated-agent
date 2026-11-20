@@ -6,7 +6,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/alpi/pi
-COPY package.json package-lock.json ./
+COPY package.json npm-shrinkwrap.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
     && npm cache clean --force \
     && install -d -m 0700 -o node -g node /home/node/workspace /home/node/.pi/agent

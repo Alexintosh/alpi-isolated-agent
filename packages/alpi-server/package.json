@@ -17,7 +17,10 @@
     "LICENSE",
     "deploy/linux/alpi-server.service",
     "api/control.openapi.yaml",
-    "manifests/"
+    "manifests/",
+    "profiles/pi-dev/Dockerfile",
+    "profiles/pi-dev/package.json",
+    "profiles/pi-dev/npm-shrinkwrap.json"
   ],
   "scripts": {
     "test": "node --test test/*.test.cjs"
