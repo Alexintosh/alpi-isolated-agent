@@ -11,6 +11,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const { promisify } = require('node:util');
 const execFile = promisify(require('node:child_process').execFile);
+const { createPiHarness } = require('../packages/alpi-server/src/harnesses/pi.cjs');
 const executable = process.env.ALPI_PI_BIN;
 const supervisor = process.env.ALPI_PI_SUPERVISOR || path.resolve(
   __dirname, '../packages/alpi-server/profiles/pi-dev/guest-session.cjs');
@@ -29,8 +30,7 @@ test('stock Pi executes a file write and fences both sides of a same-session han
   skip: executable ? false : 'Set ALPI_PI_BIN to the pinned stock guest executable',
   timeout: 60000,
 }, async () => {
-  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'alpi-handoff-'));
-  const socket = path.join(base, 'rpc.sock');
+  const base = await fs.mkdtemp('/tmp/alpi-handoff-');
   const session = randomUUID();
   const requests = [];
   const upstreamAuth = [];
@@ -49,30 +49,27 @@ test('stock Pi executes a file write and fences both sides of a same-session han
       reply(res, { role: 'assistant', content: 'turn ' + requests.length + ' complete' }, 'stop');
     }
   });
-  async function command(action, ...args) {
-    const params = [supervisor, action, '--socket', socket, ...args.map(String)];
+  // The test process and stock Pi run in the same disposable guest image.
+  // Map only the three installed programs used by the driver to test artifacts.
+  const guestExec = async ({ argv, cwd, timeoutMs, maxOutputBytes }) => {
+    const paths = new Map([['/usr/local/bin/node', process.execPath], ['/opt/alpi/pi/guest-session.cjs', supervisor],
+      ['/opt/alpi/pi/node_modules/.bin/pi', executable]]);
+    assert.equal(argv[0], '/usr/local/bin/node');
+    assert.equal(argv[1], '/opt/alpi/pi/guest-session.cjs');
     try {
-      const { stdout } = await execFile(process.execPath, params, { timeout: 15000 });
-      const result = JSON.parse(stdout);
-      assert.equal(result.ok, true);
-      return result;
+      const streams = await execFile(process.execPath, argv.slice(1).map(arg => paths.get(arg) ?? arg),
+        { cwd, timeout: timeoutMs, maxBuffer: maxOutputBytes });
+      return { exitCode: 0, ...streams };
     } catch (error) {
-      if (typeof error.code !== 'number') throw error;
-      const envelope = JSON.parse(error.stdout || error.stderr);
-      assert.equal(envelope.ok, false);
-      throw Object.assign(new Error(action + ' failed'), { code: envelope.code || envelope.error?.code });
+      if (!Number.isInteger(error.code)) throw error;
+      return { exitCode: error.code, stdout: error.stdout, stderr: error.stderr };
     }
-  }
-  async function awaitTurn(id) {
-    const deadline = Date.now() + 10000;
-    let after = 0;
-    while (Date.now() < deadline) {
-      const result = await command('events', '--after', after, '--wait-ms', 500);
-      if (result.activeTurn?.requestId === id && result.settled) return;
-      after = result.nextSeq;
-    }
-    assert.fail('Pi did not settle the expected turn');
-  }
+  };
+  guestExec.guestOnly = true;
+  const adapter = createPiHarness({ exec: guestExec, supervisorScript: '/opt/alpi/pi/guest-session.cjs',
+    nodeExecutable: '/usr/local/bin/node', piExecutable: '/opt/alpi/pi/node_modules/.bin/pi', workspaceDir: path.join(base, 'work'),
+    agentDir: path.join(base, 'agent'), sessionDir: path.join(base, 'sessions'), socketDir: base,
+    guestHome: base, provider: 'alpi', model: 'fixture', pathEnv: process.env.PATH });
   // This loopback bridge stands in for Iron and the VM network in this guest integration test.
   const modelSocket = path.join(base, 'model.sock');
   const ingress = net.createServer(guest => {
@@ -107,35 +104,33 @@ test('stock Pi executes a file write and fences both sides of a same-session han
     const config = { providers: { alpi: { baseUrl: 'http://127.0.0.1:' + ingress.address().port + '/v1',
       api: 'openai-completions', apiKey: 'fixture', models: [{ id: 'fixture' }] } } };
     await fs.writeFile(path.join(base, 'agent/models.json'), JSON.stringify(config), { mode: 0o600 });
-    await command('supervise', '--state', path.join(base, 'state.json'), '--session-id', session,
-      '--cwd', path.join(base, 'work'), '--session-dir', path.join(base, 'sessions'), '--agent-dir',
-      path.join(base, 'agent'), '--home', base, '--provider', 'alpi', '--model', 'fixture',
-      '--pi', executable, '--path-env', process.env.PATH);
+    const identity = await adapter.createSession({ sessionId: session, model: 'fixture' });
     started = true;
-    const { generation } = await command('status');
-    const submit = (id, gen, ...extra) => command('submit', '--request-id', id, '--generation', gen,
-      ...extra, '--chunk', 'Work in this session.');
-    assert.equal((await submit('first', generation)).accepted, true);
-    await awaitTurn('first');
+    assert.equal(identity.nativeSessionId, session);
+    const { generation } = identity;
+    const turn = (requestId, generation) => ({ nativeSessionId: session, generation, requestId,
+      message: 'Work in this session.' });
+    const wait = () => adapter.waitSettled({ nativeSessionId: session, deadlineMs: 10000 });
+    assert.equal((await adapter.submit(turn('first', generation))).accepted, true);
+    assert.equal((await wait()).settled, true);
     assert.equal(await fs.readFile(path.join(base, 'work/alpi-result.txt'), 'utf8'), fileText);
-    const handoff = await command('pause', '--generation', generation, '--owner', 'operator');
+    const handoff = await adapter.pause({ nativeSessionId: session, generation, owner: 'operator', abortActive: true });
     assert.equal(handoff.quiescent, true);
-    await assert.rejects(submit('stale-agent', generation), { code: 'stale_writer' });
-    const operator = ['--owner', 'operator', '--operator'];
-    assert.equal((await submit('second', handoff.generation, ...operator)).accepted, true);
-    await awaitTurn('second');
-    const resumed = await command('resume', '--generation', handoff.generation, '--owner', 'operator');
+    await assert.rejects(adapter.submit(turn('stale-agent', generation)), { code: 'stale_writer' });
+    const operator = id => ({ ...turn(id, handoff.generation), owner: 'operator' });
+    assert.equal((await adapter.operatorSend(operator('second'))).accepted, true);
+    assert.equal((await wait()).settled, true);
+    const resumed = await adapter.resume({ nativeSessionId: session, generation: handoff.generation, owner: 'operator' });
     assert.ok(resumed.generation > handoff.generation);
-    await assert.rejects(submit('stale-human', handoff.generation, ...operator), { code: 'stale_writer' });
-    assert.equal((await command('status')).sessionId, session);
-    assert.match(JSON.stringify(await command('messages')), /turn 3 complete/);
+    await assert.rejects(adapter.operatorSend(operator('stale-human')), { code: 'stale_writer' });
+    assert.match(JSON.stringify(await adapter.getMessages({ nativeSessionId: session })), /turn 3 complete/);
     assert.deepEqual(upstreamAuth, Array(3).fill('Bearer synthetic-relay-token'));
     assert.equal(requests.length, 3);
     assert.ok(requests.every(r => r.model === 'fixture'));
     assert.ok(requests[0].tools.some(t => t.function?.name === 'write'));
   } finally {
     try {
-      if (started) await command('stop');
+      if (started) assert.equal((await adapter.close({ nativeSessionId: session })).stopped, true);
     } finally {
       await relay?.close();
       if (ingress.listening) await new Promise(resolve => ingress.close(resolve));

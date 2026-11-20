@@ -880,11 +880,6 @@ function createSupervisor(config) {
       }
     });
     child.stdout.on('data', (chunk) => handleStdoutChunk(chunk));
-    child.stdout.on('end', () => {
-      if (!stopping && !piExited) {
-        handlePiExit(piExitCode, piSignal);
-      }
-    });
     child.stderr.on('data', (chunk) => {
       stderrTail += chunk.toString('utf8');
       if (stderrTail.length > MAX_STDERR_TAIL) {
@@ -1091,7 +1086,7 @@ function createSupervisor(config) {
         generation,
       };
     }
-    if (pendingPrompt && pendingPrompt.settled !== true) {
+    if (pendingPrompt && (pendingPrompt.settled !== true || pendingPrompt.uncertain === true)) {
       fail('prompt_pending', 'A previous prompt is still pending or uncertain.');
     }
     if (activeTurn && activeTurn.settled !== true) {
@@ -1135,7 +1130,7 @@ function createSupervisor(config) {
           error.code === 'pi_write_failed')) {
         pendingPrompt.uncertain = true;
         activeTurn.uncertain = true;
-        status = 'uncertain';
+        status = piExited ? 'exited' : 'uncertain';
         writeStateNow();
         return {
           ok: true,
@@ -1317,15 +1312,15 @@ function createSupervisor(config) {
   async function handleEvents(request) {
     const after = assertInteger(request.after, 0, 1_000_000_000, 'after');
     const limit = request.limit === undefined
-      ? 200
-      : assertInteger(request.limit, 1, maxEvents, 'limit');
+      ? Math.min(200, maxEvents)
+      : Math.min(maxEvents, assertInteger(request.limit, 1, 4096, 'limit'));
     const waitMs = request.waitMs === undefined
       ? 0
       : assertInteger(request.waitMs, 0, 5000, 'waitMs');
     if (waitMs > 0 && !(activeTurn && activeTurn.settled === true) && !piExited) {
       await waitForChange(waitMs);
     }
-    const gap = after < earliestSeq;
+    const gap = after + 1 < earliestSeq;
     const selected = events
       .filter((entry) => entry.seq > after)
       .slice(0, limit);
@@ -1822,10 +1817,10 @@ function createSupervisor(config) {
     }
     const exited = new Promise((resolve) => {
       if (piExited) {
-        resolve();
+        resolve(true);
         return;
       }
-      child.once('close', () => resolve());
+      child.once('close', () => resolve(true));
     });
     try {
       child.stdin.end();
@@ -1836,7 +1831,7 @@ function createSupervisor(config) {
     const waitFor = (ms) => Promise.race([
       exited,
       new Promise((resolve) => {
-        timer = setTimeout(resolve, ms);
+        timer = setTimeout(resolve, ms, false);
       }),
     ]);
     let done = await waitFor(deadlineMs);
