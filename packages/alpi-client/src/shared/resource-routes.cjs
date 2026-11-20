@@ -1,0 +1,1 @@
+../../../alpi-server/src/resource-routes.cjs

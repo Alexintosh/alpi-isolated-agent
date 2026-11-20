@@ -22,6 +22,8 @@ const {
   writeLegacyOwner,
 } = require('./process-lock.cjs');
 
+const { canCall, matchResource } = require('./resource-routes.cjs');
+
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
 const DEFAULT_PORT = 7443;
 const API_VERSION = 1;
@@ -637,63 +639,41 @@ async function routeHttps(req, res, context) {
     }
   }
 
-  if (pathname === '/v1/capabilities') {
-    if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
-      return;
-    }
+  const capabilities = req.url === '/v1/capabilities';
+  const route = capabilities ? { role: 'observer' } : matchResource(req.method, req.url);
+  if (!route) return sendJson(res, 404, { error: 'not_found' });
+  const allow = capabilities && req.method !== 'GET' ? ['GET'] : route.allow;
+  if (allow) return sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: allow.join(', ') });
 
-    const remote = remoteKey(req.socket && req.socket.remoteAddress);
-    const preLimit = limiter.check(remote);
-    if (preLimit.limited) {
-      sendJson(
-        res,
-        429,
-        { error: 'rate_limited' },
-        {
-          'Retry-After': String(
-            Math.ceil(preLimit.retryAfterMs / 1000) || 1
-          ),
-        }
-      );
-      return;
-    }
-
-    const authorization = req.headers.authorization;
-    const match =
-      typeof authorization === 'string'
-        ? BEARER_PATTERN.exec(authorization)
-        : null;
-    if (!match || !TOKEN_PATTERN.test(match[1])) {
-      respondEnrollFailure(res, limiter, remote, 401, 'unauthorized');
-      return;
-    }
-
-    try {
-      const client = store.authenticate(match[1]);
-      sendJson(res, 200, {
-        serverId,
-        apiVersion: API_VERSION,
-        project: client.project,
-        role: client.role,
-        runtimes: [],
-      });
-    } catch (error) {
-      if (error instanceof PairingStoreError) {
-        const status = storeErrorStatus(error);
-        if (status === 500 || status === 503) {
-          respondHttpError(req, res, error);
-          return;
-        }
-        respondEnrollFailure(res, limiter, remote, status, storeErrorCode(error));
-        return;
-      }
-      respondHttpError(req, res, error);
-    }
-    return;
+  const remote = remoteKey(req.socket?.remoteAddress);
+  const limit = limiter.check(remote);
+  if (limit.limited) {
+    return sendJson(res, 429, { error: 'rate_limited' }, { 'Retry-After': String(Math.ceil(limit.retryAfterMs / 1000) || 1) });
   }
-
-  sendJson(res, 404, { error: 'not_found' });
+  const match = typeof req.headers.authorization === 'string' && BEARER_PATTERN.exec(req.headers.authorization);
+  if (!match || !TOKEN_PATTERN.test(match[1])) return respondEnrollFailure(res, limiter, remote, 401, 'unauthorized');
+  const authenticate = () => store.authenticate(match[1]);
+  try {
+    let principal = authenticate();
+    if (capabilities) {
+      const runtimes = await context.runtimeInventory(principal);
+      authenticate();
+      return sendJson(res, 200, { serverId, apiVersion: API_VERSION, project: principal.project, role: principal.role, runtimes });
+    }
+    if (!canCall(principal.role, route.role)) throw new HttpError(403, 'forbidden');
+    if (!context.resources) throw new HttpError(503, 'service_unavailable');
+    const body = req.method === 'POST' ? requireObject(await readJsonBody(req, 64 * 1024)) : {};
+    // Recheck after an asynchronous body read. The callback also fences long-lived writers.
+    principal = authenticate();
+    const result = await context.resources.execute({ name: route.name, params: route.params, body, principal, authenticate });
+    authenticate();
+    return sendJson(res, 200, result);
+  } catch (error) {
+    if (error instanceof PairingStoreError && storeErrorStatus(error) === 401) {
+      return respondEnrollFailure(res, limiter, remote, 401, 'unauthorized');
+    }
+    throw error;
+  }
 }
 
 function createAdminHandler(context) {
@@ -1212,6 +1192,7 @@ async function startServer(options) {
 
   let store = null;
   let identity = null;
+  let resources = null;
   let httpsServer = null;
   let adminServer = null;
   let socketRecord = null;
@@ -1262,17 +1243,22 @@ async function startServer(options) {
           closeHttpServer(adminToClose, socketTracker),
         ]);
 
-        unlinkOwnedAdminSocket(socketRecord);
-        socketRecord = null;
-        releaseAdminOwnership(lockRecord);
-        lockRecord = null;
-        if (store) {
-          try {
-            store.close();
-          } catch {
-            // Ignore store close failures during shutdown.
+        try {
+          await resources?.close();
+        } finally {
+          resources = null;
+          unlinkOwnedAdminSocket(socketRecord);
+          socketRecord = null;
+          releaseAdminOwnership(lockRecord);
+          lockRecord = null;
+          if (store) {
+            try {
+              store.close();
+            } catch {
+              // Ignore store close failures during shutdown.
+            }
+            store = null;
           }
-          store = null;
         }
       } finally {
         // Keep a signal-triggered force-exit deadline until both listeners and
@@ -1302,6 +1288,7 @@ async function startServer(options) {
       throw new DaemonError('shutting_down', 'Server is shutting down.');
     }
 
+    if (options.openResources) resources = await options.openResources({ stateDir, serverId: store.serverId });
     const serverId = store.serverId;
     const fingerprint = identity.fingerprint;
     const limiter = new FailureRateLimiter(limits);
@@ -1343,6 +1330,8 @@ async function startServer(options) {
         maxHeaderSize: MAX_HEADER_BYTES,
       },
       createHttpsHandler({
+        resources,
+        runtimeInventory: options.runtimeInventory ?? (async () => []),
         store,
         serverId,
         limiter,

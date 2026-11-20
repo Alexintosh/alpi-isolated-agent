@@ -16,6 +16,8 @@ const {
 } = require('./context.cjs');
 const { requestJson: defaultRequestJson } = require('./transport.cjs');
 
+const { resourceRequest } = require('./shared/resource-routes.cjs');
+
 const MAX_RUNTIME_COUNT = 64;
 const MAX_RUNTIME_KEYS = 32;
 const MAX_RUNTIME_STRING = 1024;
@@ -272,27 +274,27 @@ function createClient(options) {
     fail('INVALID_ARGUMENT', 'Invalid client options.');
   }
 
+  function request(method, path, body) {
+    const current = now();
+    if (!Number.isSafeInteger(current) || current < 0) fail('INVALID_ARGUMENT', 'Invalid clock.');
+    if (current >= credentialExpiresAt) fail('CREDENTIAL_EXPIRED', 'Client credential has expired.');
+    return callTransport(transport, { origin, fingerprint, path, method, credential,
+      ...(body === undefined ? {} : { body }), timeoutMs: options.timeoutMs });
+  }
+
   const client = {
     serverId,
     project,
     role,
     credentialExpiresAt,
+    async requestResource(name, params, body) {
+      const route = resourceRequest(name, params);
+      // Select the peer, API version and project again before a remote mutation.
+      if (route.method !== 'GET') await client.getCapabilities();
+      return request(route.method, route.path, route.method === 'POST' ? body ?? {} : undefined);
+    },
     async getCapabilities() {
-      const current = now();
-      if (!Number.isSafeInteger(current) || current < 0) {
-        fail('INVALID_ARGUMENT', 'Invalid clock.');
-      }
-      if (current >= credentialExpiresAt) {
-        fail('CREDENTIAL_EXPIRED', 'Client credential has expired.');
-      }
-      const response = await callTransport(transport, {
-        origin,
-        fingerprint,
-        path: '/v1/capabilities',
-        method: 'GET',
-        credential,
-        timeoutMs: options.timeoutMs,
-      });
+      const response = await request('GET', '/v1/capabilities');
       return validateCapabilitiesResponse(response, client);
     },
   };
