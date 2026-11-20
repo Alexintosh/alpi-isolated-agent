@@ -4,7 +4,9 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
+const net = require('node:net');
 const os = require('node:os');
+const { makeProfileCatalog } = require('../packages/alpi-server/src/profile-catalog.cjs');
 const path = require('node:path');
 const { test } = require('node:test');
 const { promisify } = require('node:util');
@@ -31,9 +33,11 @@ test('stock Pi executes a file write and fences both sides of a same-session han
   const socket = path.join(base, 'rpc.sock');
   const session = randomUUID();
   const requests = [];
+  const upstreamAuth = [];
   const fileText = 'verified workspace result\n';
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || req.url !== '/v1/chat/completions') return res.writeHead(404).end();
+    upstreamAuth.push(req.headers.authorization);
     const body = [];
     for await (const chunk of req) body.push(chunk);
     requests.push(JSON.parse(Buffer.concat(body)));
@@ -69,11 +73,38 @@ test('stock Pi executes a file write and fences both sides of a same-session han
     }
     assert.fail('Pi did not settle the expected turn');
   }
+  // This loopback bridge stands in for Iron and the VM network in this guest integration test.
+  const modelSocket = path.join(base, 'model.sock');
+  const ingress = net.createServer(guest => {
+    const upstream = net.connect(modelSocket);
+    guest.on('error', () => upstream.destroy());
+    upstream.on('error', () => guest.destroy());
+    guest.on('close', () => upstream.destroy());
+    upstream.on('close', () => guest.destroy());
+    guest.pipe(upstream).pipe(guest);
+  });
+  let relay;
   let started = false;
   try {
     await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
     for (const name of ['agent', 'work', 'sessions']) await fs.mkdir(path.join(base, name), { mode: 0o700 });
-    const config = { providers: { alpi: { baseUrl: 'http://127.0.0.1:' + server.address().port + '/v1',
+    const catalog = makeProfileCatalog({ version: 1, profiles: [{ name: 'pi-dev', engine: 'boxlite',
+      projects: ['test'], harnesses: ['pi'], providers: ['local'], image: 'test/pi@sha256:' + '1'.repeat(64),
+      limits: { vcpus: 1, memoryMiB: 512, diskMiB: 1024 } }],
+      providers: [{ name: 'local', concurrency: 1, credentialName: 'model-token', models: ['fixture'],
+        upstream: { scheme: 'http', host: '127.0.0.1', port: server.address().port } }] });
+    const credentials = await fs.mkdtemp(path.join(os.tmpdir(), 'alpi-test-cred-'));
+    try {
+      await fs.writeFile(path.join(credentials, 'model-token'), 'synthetic-relay-token', { mode: 0o600 });
+      relay = await catalog.openModelRelay({ project: 'test', engine: 'boxlite', profile: 'pi-dev', harness: 'pi',
+        provider: 'local', model: 'fixture', sandboxId: randomUUID(), generation: 1, socketPath: modelSocket },
+        { credentialsDirectory: credentials });
+      await relay.allow({ generation: 1, ironReady: true, callbackReady: true });
+    } finally {
+      await fs.rm(credentials, { recursive: true, force: true });
+    }
+    await new Promise((resolve, reject) => ingress.once('error', reject).listen(0, '127.0.0.1', resolve));
+    const config = { providers: { alpi: { baseUrl: 'http://127.0.0.1:' + ingress.address().port + '/v1',
       api: 'openai-completions', apiKey: 'fixture', models: [{ id: 'fixture' }] } } };
     await fs.writeFile(path.join(base, 'agent/models.json'), JSON.stringify(config), { mode: 0o600 });
     await command('supervise', '--state', path.join(base, 'state.json'), '--session-id', session,
@@ -98,6 +129,7 @@ test('stock Pi executes a file write and fences both sides of a same-session han
     await assert.rejects(submit('stale-human', handoff.generation, ...operator), { code: 'stale_writer' });
     assert.equal((await command('status')).sessionId, session);
     assert.match(JSON.stringify(await command('messages')), /turn 3 complete/);
+    assert.deepEqual(upstreamAuth, Array(3).fill('Bearer synthetic-relay-token'));
     assert.equal(requests.length, 3);
     assert.ok(requests.every(r => r.model === 'fixture'));
     assert.ok(requests[0].tools.some(t => t.function?.name === 'write'));
@@ -105,6 +137,8 @@ test('stock Pi executes a file write and fences both sides of a same-session han
     try {
       if (started) await command('stop');
     } finally {
+      await relay?.close();
+      if (ingress.listening) await new Promise(resolve => ingress.close(resolve));
       await new Promise(resolve => server.close(resolve));
       await fs.rm(base, { recursive: true, force: true });
     }

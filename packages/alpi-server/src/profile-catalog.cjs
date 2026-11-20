@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
+const { createInferencePool, createModelRelay } = require('./network/model-relay.cjs');
 
 class ProfileError extends Error {
   constructor(code) { super(code); this.name = 'ProfileError'; this.code = code; }
@@ -59,6 +60,17 @@ function makeProfileCatalog(config) {
     if (!profile || !profile.projects.includes(project) || profile.engine !== engine) throw new ProfileError('profile_unavailable');
     return profile;
   }
+  const pools = new Map([...providers.values()].map(route => [
+    route.name, createInferencePool({ maxConcurrent: route.concurrency }),
+  ]));
+  function modelRoute(project, engine, name, harness, provider, model) {
+    const profile = resolve(project, engine, name);
+    const route = providers.get(provider);
+    if (!profile.harnesses.includes(harness) || !profile.providers.includes(provider) || !route?.models.includes(model)) {
+      throw new ProfileError('model_unavailable');
+    }
+    return route;
+  }
   return Object.freeze({
     resolve,
     installedProfile(engine, name) {
@@ -66,13 +78,13 @@ function makeProfileCatalog(config) {
       if (!profile || profile.engine !== engine) throw new ProfileError('profile_unavailable');
       return profile;
     },
-    modelRoute(project, engine, name, harness, provider, model) {
-      const profile = resolve(project, engine, name);
-      const route = providers.get(provider);
-      if (!profile.harnesses.includes(harness) || !profile.providers.includes(provider) || !route?.models.includes(model)) {
-        throw new ProfileError('model_unavailable');
-      }
-      return route;
+    modelRoute,
+    openModelRelay({ project, engine, profile, harness, provider, model, sandboxId, generation, socketPath },
+      { credentialsDirectory = process.env.CREDENTIALS_DIRECTORY } = {}) {
+      const route = modelRoute(project, engine, profile, harness, provider, model);
+      return createModelRelay({ projectId: project, sandboxId, generation, socketPath, model,
+        upstream: route.upstream, pool: pools.get(route.name),
+        credential: route.credentialName ? { directory: credentialsDirectory, name: route.credentialName } : null });
     },
     // Effective capabilities require separate worker, image and network qualification.
     forProject(project) {
