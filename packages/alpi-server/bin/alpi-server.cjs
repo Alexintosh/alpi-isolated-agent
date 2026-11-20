@@ -3,6 +3,7 @@
 
 const HELP = `Usage:
   alpi-server --help
+  alpi-server doctor --host [--state-dir DIR]
   alpi-server serve --state-dir DIR [--listen HOST] [--port PORT] [--origin URL]
   alpi-server pair issue --state-dir DIR --project PROJECT --role ROLE
                          [--expires 5m] [--origin URL]
@@ -260,6 +261,15 @@ async function main(argv) {
 
   const command = argv[0];
   const rest = argv.slice(1);
+
+  if (command === 'doctor' && rest[0] === '--host') {
+    const { values, positionals } = parseOptions(rest.slice(1), new Set(['state-dir']));
+    if (positionals.length) throw new CliUsageError('doctor --host accepts no positional arguments.');
+    const { inspectHost } = require('../src/host-doctor.cjs');
+    const report = await inspectHost(values['state-dir'] ?? process.cwd());
+    process.stdout.write(JSON.stringify(report) + '\n');
+    return;
+  }
 
   if (command === 'serve') {
     await runServe(rest);

@@ -40,5 +40,13 @@ test('control packages install offline and expose their commands outside the che
     const cmd = path.join(prefix, 'node_modules', '.bin', bin);
     const { stdout } = await execFile(cmd, ['--help'], { cwd: temp, env, timeout: 5000 });
     assert.match(stdout, /usage/i);
+    if (bin === 'alpi-server') {
+      const doctor = await execFile(cmd, ['doctor', '--host', '--state-dir', temp], { cwd: temp, env });
+      const host = JSON.parse(doctor.stdout);
+      assert.equal(host.platform, process.platform);
+      assert.equal(host.architecture, process.arch);
+      assert.ok(BigInt(host.availableDiskBytes) >= 0n);
+      if (process.platform !== 'linux') assert.equal(host.kvm, 'unsupported-platform');
+    }
   }
 });
