@@ -77,7 +77,7 @@ class FakeBox {
       image: this.image,
       cpus: this.cpus,
       memoryMib: this.memoryMib,
-      network: {
+      network: this.network ?? {
         outbound: { mode: 'disabled', allowNet: [] },
         inbound: { mode: 'disabled', allowNet: [] },
         mode: 'disabled',
@@ -159,6 +159,7 @@ class FakeJsBoxlite {
       memoryMib: options.memoryMib,
       createdAt: new Date().toISOString(),
     });
+    box.network = structuredClone(options.network);
     this.boxes.set(box.id, box);
     return { created: true, box };
   }
@@ -780,7 +781,7 @@ test('network boundary provider is launch-scoped and restricted', async (t) => {
   );
 });
 
-test('import and export only use the trusted staging directory', async (t) => {
+test('exports remain staged and unqualified archive imports are unavailable', async (t) => {
   const { adapter, runtime, stagingDir } = makeAdapter(t, {
     label: 'staging',
     staging: true,
@@ -808,23 +809,14 @@ test('import and export only use the trusted staging directory', async (t) => {
 
   const archive = path.join(stagingDir, 'import.tar');
   fs.writeFileSync(archive, 'archive', { mode: 0o600 });
-  const imported = await adapter.importBox({
-    archivePath: archive,
-    allocationId: UUID_B,
-    launchGeneration: 1,
-  });
-  assert.equal(imported.name, `alpi-${UUID_B}-g1`);
-  assert.equal(imported.imported, true);
-  assert.equal(runtime.boxes.size, 2);
+  const capabilities = (await adapter.probe()).capabilities;
+  assert.equal(capabilities.includes('import'), false);
+  assert.ok(capabilities.includes('export'));
+  await assert.rejects(adapter.importBox({
+    archivePath: archive, allocationId: UUID_B, launchGeneration: 1,
+  }), assertCode('engine_import_unsupported'));
+  assert.equal(runtime.boxes.size, 1);
 
-  await assert.rejects(
-    adapter.importBox({
-      archivePath: path.join(stagingDir, '..', 'outside.tar'),
-      allocationId: UUID_C,
-      launchGeneration: 1,
-    }),
-    assertCode('staging_path_forbidden')
-  );
 });
 
 test('an importable SDK on a host without a usable runtime has no capabilities', async t => {
@@ -841,4 +833,36 @@ test('an importable SDK on a host without a usable runtime has no capabilities',
   });
   assert.throws(() => createBoxliteAdapter({ ...options, guestUid: 0 }), assertCode('invalid_engine_config'));
   await adapter.close();
+});
+
+test('a stopped sandbox requires a verified boundary before explicit or implicit start', async t => {
+  let permit = true;
+  const networkBoundary = {
+    async prepare() {
+      return { network: { outbound: { mode: 'enabled', allowNet: ['api.example.com'] },
+        inbound: { mode: 'disabled' } } };
+    },
+    async verify() { return permit; },
+  };
+  const { adapter, runtime } = makeAdapter(t, { label: 'activation', networkBoundary });
+  t.after(() => adapter.close());
+  const ref = await adapter.createBox({ allocationId: UUID_A, profile: { network: 'boundary' } });
+  const box = runtime.boxes.get(ref.nativeId);
+  permit = false;
+  await assert.rejects(adapter.start(ref), assertCode('engine_network_unverified'));
+  await assert.rejects(adapter.exec(ref, { argv: ['true'] }), assertCode('engine_network_unverified'));
+  assert.equal(box.startCalls, 0);
+  assert.equal(box.execCalls.length, 0);
+});
+
+test('a name collision without an allocation receipt leaves the existing box untouched', async t => {
+  const { adapter, runtime } = makeAdapter(t, { label: 'collision' });
+  t.after(() => adapter.close());
+  const name = `alpi-${UUID_A}-g1`;
+  const { box } = await runtime.getOrCreate({ image: IMAGE, ...LIMITS }, name);
+  const callsBefore = runtime.calls.length;
+  await assert.rejects(adapter.createBox({ allocationId: UUID_A }), assertCode('engine_intent_conflict'));
+  assert.equal(runtime.calls.length, callsBefore);
+  assert.equal(runtime.boxes.get(box.id), box);
+  assert.equal((await adapter.listOwned()).length, 0);
 });

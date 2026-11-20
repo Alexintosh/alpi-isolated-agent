@@ -5,15 +5,24 @@
  *
  * This module is deliberately not a runtime host. The host must supply a
  * verified SDK module path and a private, dedicated runtime home. BoxLite is
- * dynamically imported from that path and every box is created through
- * `getOrCreate` with a reserved Alpi name. The default profile is fully
- * disconnected: no inbound network, no outbound network, no host mounts, no
- * ports, no secrets and no caller-supplied environment.
+ * dynamically imported from that path. Ownership is established from durable
+ * intent before any native side effect; recovery only attaches to the recorded
+ * native identity and never creates a replacement when that identity is gone.
+ *
+ * The default profile is fully disconnected: no inbound network, no outbound
+ * network, no host mounts, no ports, no secrets and no caller-supplied
+ * environment.
  *
  * Networked profiles are unavailable unless the host supplies an explicit
- * launch-scoped boundary provider with `prepare` and `verify`; that contract is
- * expected to be implemented by the later Iron integration. This adapter does
- * not implement an unrestricted network mode.
+ * launch-scoped boundary provider with `prepare` and `verify`. The prepared
+ * grant and operator configuration hash are persisted with the allocation and
+ * are rechecked before every start or implicit guest execution, including
+ * after an adapter restart. `prepare` fences egress before native allocation;
+ * traffic is only considered usable after `verify` observes a running shim.
+ *
+ * `pty` in the advertised capability set means a one-shot command executed
+ * with `tty=true`. It is not an attachable interactive PTY session; interactive
+ * attach remains unqualified and is not advertised by this adapter.
  */
 
 const crypto = require('node:crypto');
@@ -31,12 +40,16 @@ const BASE_CAPABILITIES = Object.freeze([
   'destroy',
   'list-owned',
   'exec',
+  // One-shot tty-flagged command execution, not an attachable PTY session.
   'pty',
 ]);
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
+const LEGACY_STATE_VERSION = 1;
 const STATE_FILE = 'alpi-engine-state.json';
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HASH_PATTERN = /^[0-9a-f]{64}$/;
+const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]{2,63}$/;
 const ALLOCATION_NAME_PATTERN =
   /^alpi-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-g([1-9][0-9]*)$/i;
 
@@ -50,6 +63,29 @@ const MAX_ARG_BYTES = 4_096;
 const MAX_ARGV_BYTES = 65_536;
 const MAX_NATIVE_ID_LENGTH = 256;
 const MAX_ALLOCATION_NAME_LENGTH = 128;
+const MAX_ERROR_MESSAGE_LENGTH = 4_096;
+const ID_READ_TIMEOUT_MS = 250;
+
+const SDK_FAILURE_MESSAGES = Object.freeze({
+  engine_unavailable: 'BoxLite engine is unavailable.',
+  engine_runtime_invalid: 'BoxLite runtime is invalid.',
+  engine_inspect_failed: 'BoxLite inspection failed.',
+  engine_list_failed: 'BoxLite inventory failed.',
+  engine_create_failed: 'BoxLite allocation failed.',
+  engine_start_failed: 'BoxLite box could not be started.',
+  engine_stop_failed: 'BoxLite box could not be stopped.',
+  engine_destroy_failed: 'BoxLite box could not be destroyed.',
+  engine_exec_dispatch_failed: 'BoxLite execution dispatch failed.',
+  engine_export_failed: 'BoxLite export failed.',
+  engine_network_unverified: 'Network boundary verification failed.',
+});
+
+/**
+ * In-process single-writer lease for runtime homes. The adapter owns the home
+ * until close(); a second adapter instance in the same process is refused
+ * rather than silently sharing mutable engine state.
+ */
+const ACTIVE_HOMES = new Set();
 
 class BoxliteEngineError extends Error {
   constructor(code, message, details) {
@@ -351,9 +387,13 @@ function normalizeArgv(argv) {
     fail('invalid_input', 'argv must be a non-empty array.');
   }
   let total = 0;
-  for (const argument of argv) {
-    if (typeof argument !== 'string' || argument.length === 0) {
-      fail('invalid_input', 'Every argv entry must be a non-empty string.');
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (typeof argument !== 'string') {
+      fail('invalid_input', 'Every argv entry must be a string.');
+    }
+    if (index === 0 && argument.length === 0) {
+      fail('invalid_input', 'The argv command must not be empty.');
     }
     if (argument.length > MAX_ARG_BYTES) {
       fail('invalid_input', 'An argv entry is too long.');
@@ -444,7 +484,7 @@ function assertRuntimeShape(runtime) {
   }
 }
 
-function assertBoxShape(box, expectedName) {
+function assertBoxShape(box, expectedName, expectedId) {
   if (!box || typeof box !== 'object') {
     fail('engine_identity_mismatch', 'BoxLite returned no box handle.');
   }
@@ -454,6 +494,11 @@ function assertBoxShape(box, expectedName) {
     box.id.length > MAX_NATIVE_ID_LENGTH
   ) {
     fail('engine_identity_mismatch', 'BoxLite returned an invalid native box id.');
+  }
+  if (expectedId !== undefined && box.id !== expectedId) {
+    fail('engine_identity_mismatch', 'BoxLite returned a handle with a different native box id.', {
+      expectedNativeId: expectedId,
+    });
   }
   if (box.name !== expectedName) {
     fail('engine_identity_mismatch', 'BoxLite returned a box with a different reserved name.');
@@ -510,6 +555,39 @@ function readPackageVersion(modulePath) {
   return null;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashOf(value) {
+  return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
+function sameStringSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  const leftSet = new Set(left);
+  if (leftSet.size !== left.length) {
+    return false;
+  }
+  for (const entry of right) {
+    if (!leftSet.has(entry)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function sanitizeInfo(info, record) {
   if (!info || typeof info !== 'object' || Array.isArray(info)) {
     fail('engine_invalid_result', 'BoxLite returned invalid box information.');
@@ -548,6 +626,8 @@ function sanitizeInfo(info, record) {
     launchGeneration: record.launchGeneration,
     name: record.name,
     nativeId: record.nativeId,
+    status: record.status,
+    configVerified: Boolean(record.config && record.configHash),
     state: state.status,
     running: state.running,
     ...(state.exitCode === undefined ? {} : { exitCode: state.exitCode }),
@@ -559,6 +639,41 @@ function sanitizeInfo(info, record) {
     network,
     autoStop: info.autoStop,
     autoDelete: info.autoDelete,
+  });
+}
+
+function deadlineError(phase, uncertain) {
+  const dispatched = phase === 'dispatch' || phase === 'collect';
+  return new BoxliteEngineError('engine_exec_deadline_exceeded', 'Execution deadline exceeded.', {
+    phase,
+    dispatched,
+    uncertain,
+  });
+}
+
+/**
+ * Resolve a promise or report a timeout. The underlying promise is observed so
+ * a late rejection never becomes an unhandled rejection.
+ *
+ * @returns {Promise<{status:'ok', value:unknown}|{status:'error', error:unknown}|{status:'timeout'}>}
+ */
+function boundedPromise(promise, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    timer = setTimeout(() => finish({ status: 'timeout' }), Math.max(0, timeoutMs));
+    Promise.resolve(promise).then(
+      (value) => finish({ status: 'ok', value }),
+      (error) => finish({ status: 'error', error })
+    );
   });
 }
 
@@ -575,7 +690,8 @@ function sanitizeInfo(info, record) {
  *   expectedSdkVersion?: string|null,
  *   execLimits?: { timeoutMs?: number, maxOutputBytes?: number, terminationGraceMs?: number },
  *   stagingDir?: string,
- *   networkBoundary?: { prepare: Function, verify: Function }
+ *   networkBoundary?: { prepare: Function, verify: Function },
+ *   guestUid?: number
  * }} options
  */
 function createBoxliteAdapter(options) {
@@ -638,6 +754,11 @@ function createBoxliteAdapter(options) {
     networkBoundary = provider;
   }
 
+  if (ACTIVE_HOMES.has(homeDir)) {
+    fail('engine_home_in_use', 'Another adapter instance owns this runtime home.', { homeDir });
+  }
+  ACTIVE_HOMES.add(homeDir);
+
   const statePath = path.join(homeDir, STATE_FILE);
   let sdk = options.sdk;
   let runtime = options.runtime;
@@ -652,6 +773,10 @@ function createBoxliteAdapter(options) {
     }
   }
 
+  function releaseHome() {
+    ACTIVE_HOMES.delete(homeDir);
+  }
+
   async function loadSdk() {
     if (sdk) {
       return sdk;
@@ -661,9 +786,13 @@ function createBoxliteAdapter(options) {
     }
     assertTrustedModulePath(sdkModulePath);
     const url = pathToFileURL(sdkModulePath).href;
-    const loaded = await import(url);
-    sdk = loaded;
-    return loaded;
+    try {
+      const loaded = await import(url);
+      sdk = loaded;
+      return loaded;
+    } catch {
+      fail('engine_unavailable', 'BoxLite SDK could not be loaded.');
+    }
   }
 
   function sdkVersion() {
@@ -687,9 +816,237 @@ function createBoxliteAdapter(options) {
     if (!loaded || typeof loaded.JsBoxlite !== 'function') {
       fail('engine_unavailable', 'The SDK does not export JsBoxlite.');
     }
-    runtime = new loaded.JsBoxlite({ homeDir });
-    assertRuntimeShape(runtime);
+    let opened;
+    try {
+      opened = new loaded.JsBoxlite({ homeDir });
+    } catch {
+      fail('engine_unavailable', 'BoxLite runtime could not be opened.');
+    }
+    assertRuntimeShape(opened);
+    runtime = opened;
     return runtime;
+  }
+
+  function buildConfig(profile) {
+    return Object.freeze({
+      image,
+      cpus: limits.cpus,
+      memoryMib: limits.memoryMib,
+      diskSizeGb: limits.diskSizeGb,
+      guestUid,
+      networkMode: profile.network.mode,
+      runtimeHome: homeDir,
+      sdkVersion: expectedSdkVersion,
+      lifecycle: Object.freeze({ autoStop: 0, autoDelete: 0, autoResume: false }),
+    });
+  }
+
+  function makeRecord(fields) {
+    return Object.freeze({
+      allocationId: fields.allocationId,
+      launchGeneration: fields.launchGeneration,
+      name: fields.name,
+      nativeId: fields.nativeId ?? null,
+      createdAt: fields.createdAt,
+      status: fields.status,
+      created: fields.created ?? null,
+      operationId: fields.operationId ?? null,
+      fingerprint: fields.fingerprint ?? null,
+      config: fields.config ?? null,
+      configHash: fields.configHash ?? null,
+      network: fields.network ?? null,
+      lastError: fields.lastError ?? null,
+    });
+  }
+
+  function parseConfig(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid configuration.');
+    }
+    let normalizedImage;
+    let normalizedLimits;
+    try {
+      normalizedImage = normalizeImage(value.image);
+      normalizedLimits = normalizeLimits(value);
+    } catch {
+      fail('engine_state_corrupt', 'Engine state contains an invalid configuration.');
+    }
+    if (
+      !Number.isSafeInteger(value.guestUid) ||
+      value.guestUid < 1 ||
+      value.guestUid > 2147483647 ||
+      (value.networkMode !== 'disabled' && value.networkMode !== 'boundary') ||
+      typeof value.runtimeHome !== 'string' ||
+      !path.isAbsolute(value.runtimeHome) ||
+      (value.sdkVersion !== null && typeof value.sdkVersion !== 'string')
+    ) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid configuration.');
+    }
+    const lifecycle = value.lifecycle;
+    if (
+      !lifecycle ||
+      typeof lifecycle !== 'object' ||
+      lifecycle.autoStop !== 0 ||
+      lifecycle.autoDelete !== 0 ||
+      lifecycle.autoResume !== false
+    ) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid lifecycle configuration.');
+    }
+    return Object.freeze({
+      image: normalizedImage,
+      cpus: normalizedLimits.cpus,
+      memoryMib: normalizedLimits.memoryMib,
+      diskSizeGb: normalizedLimits.diskSizeGb,
+      guestUid: value.guestUid,
+      networkMode: value.networkMode,
+      runtimeHome: value.runtimeHome,
+      sdkVersion: value.sdkVersion,
+      lifecycle: Object.freeze({ autoStop: 0, autoDelete: 0, autoResume: false }),
+    });
+  }
+
+  function parseNetwork(value, status, networkMode) {
+    if (value === null || value === undefined) {
+      if (status === 'pending') {
+        return null;
+      }
+      fail('engine_state_corrupt', 'Engine state contains no network grant.');
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.mode !== networkMode) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid network grant.');
+    }
+    if (networkMode === 'disabled') {
+      return Object.freeze({ mode: 'disabled' });
+    }
+    if (
+      !Array.isArray(value.allowNet) ||
+      value.allowNet.length === 0 ||
+      typeof value.grantHash !== 'string' ||
+      !HASH_PATTERN.test(value.grantHash)
+    ) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid boundary grant.');
+    }
+    const allowNet = value.allowNet.map((host) => {
+      if (
+        typeof host !== 'string' ||
+        host.length === 0 ||
+        host.length > 255 ||
+        /[\u0000-\u0020\u007f]/.test(host)
+      ) {
+        fail('engine_state_corrupt', 'Engine state contains an invalid boundary grant.');
+      }
+      return host;
+    });
+    return Object.freeze({
+      mode: 'boundary',
+      allowNet: Object.freeze(allowNet),
+      grantHash: value.grantHash,
+    });
+  }
+
+  function parseLegacyAllocation(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
+    }
+    let allocationId;
+    let launchGeneration;
+    try {
+      allocationId = normalizeAllocationId(entry.allocationId);
+      launchGeneration = normalizeLaunchGeneration(entry.launchGeneration);
+    } catch {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
+    }
+    const name = allocationName(allocationId, launchGeneration);
+    if (
+      entry.name !== name ||
+      typeof entry.nativeId !== 'string' ||
+      entry.nativeId.length === 0 ||
+      entry.nativeId.length > MAX_NATIVE_ID_LENGTH ||
+      typeof entry.createdAt !== 'string'
+    ) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
+    }
+    return makeRecord({
+      allocationId,
+      launchGeneration,
+      name,
+      nativeId: entry.nativeId,
+      createdAt: entry.createdAt,
+      status: 'legacy',
+      created: null,
+      operationId: null,
+      fingerprint: null,
+      config: null,
+      configHash: null,
+      network: null,
+      lastError: null,
+    });
+  }
+
+  function parseCurrentAllocation(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
+    }
+    let allocationId;
+    let launchGeneration;
+    try {
+      allocationId = normalizeAllocationId(entry.allocationId);
+      launchGeneration = normalizeLaunchGeneration(entry.launchGeneration);
+    } catch {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
+    }
+    const name = allocationName(allocationId, launchGeneration);
+    if (entry.name !== name || typeof entry.createdAt !== 'string') {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
+    }
+    const status = entry.status;
+    if (!['pending', 'allocated', 'owned', 'cleanup-pending'].includes(status)) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation status.');
+    }
+    const nativeId = entry.nativeId;
+    if (status === 'pending') {
+      if (nativeId !== null && nativeId !== undefined) {
+        fail('engine_state_corrupt', 'A pending allocation must not record a native id.');
+      }
+    } else if (
+      typeof nativeId !== 'string' ||
+      nativeId.length === 0 ||
+      nativeId.length > MAX_NATIVE_ID_LENGTH
+    ) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid native id.');
+    }
+    const config = parseConfig(entry.config);
+    if (
+      typeof entry.configHash !== 'string' ||
+      !HASH_PATTERN.test(entry.configHash) ||
+      typeof entry.fingerprint !== 'string' ||
+      !HASH_PATTERN.test(entry.fingerprint) ||
+      typeof entry.operationId !== 'string' ||
+      entry.operationId.length === 0 ||
+      entry.operationId.length > 128 ||
+      (entry.created !== null && typeof entry.created !== 'boolean') ||
+      (entry.lastError !== null &&
+        entry.lastError !== undefined &&
+        (typeof entry.lastError !== 'string' || !ERROR_CODE_PATTERN.test(entry.lastError)))
+    ) {
+      fail('engine_state_corrupt', 'Engine state contains an invalid allocation receipt.');
+    }
+    const network = parseNetwork(entry.network, status, config.networkMode);
+    return makeRecord({
+      allocationId,
+      launchGeneration,
+      name,
+      nativeId: status === 'pending' ? null : nativeId,
+      createdAt: entry.createdAt,
+      status,
+      created: entry.created ?? null,
+      operationId: entry.operationId,
+      fingerprint: entry.fingerprint,
+      config,
+      configHash: entry.configHash,
+      network,
+      lastError: entry.lastError ?? null,
+    });
   }
 
   function loadState() {
@@ -719,60 +1076,52 @@ function createBoxliteAdapter(options) {
     } catch {
       fail('engine_state_corrupt', 'Engine state is not valid JSON.');
     }
-    if (!parsed || parsed.version !== STATE_VERSION || !Array.isArray(parsed.allocations)) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       fail('engine_state_corrupt', 'Engine state has an unsupported shape.');
+    }
+    if (!Array.isArray(parsed.allocations)) {
+      fail('engine_state_corrupt', 'Engine state has an unsupported shape.');
+    }
+    if (parsed.version !== LEGACY_STATE_VERSION && parsed.version !== STATE_VERSION) {
+      fail('engine_state_corrupt', 'Engine state has an unsupported version.');
     }
     const next = new Map();
     for (const entry of parsed.allocations) {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-        fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
-      }
-      let allocationId;
-      let launchGeneration;
-      try {
-        allocationId = normalizeAllocationId(entry.allocationId);
-        launchGeneration = normalizeLaunchGeneration(entry.launchGeneration);
-      } catch {
-        fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
-      }
-      const name = allocationName(allocationId, launchGeneration);
-      if (
-        entry.name !== name ||
-        typeof entry.nativeId !== 'string' ||
-        entry.nativeId.length === 0 ||
-        entry.nativeId.length > MAX_NATIVE_ID_LENGTH ||
-        typeof entry.createdAt !== 'string'
-      ) {
-        fail('engine_state_corrupt', 'Engine state contains an invalid allocation.');
-      }
-      if (next.has(allocationId)) {
+      const record =
+        parsed.version === LEGACY_STATE_VERSION
+          ? parseLegacyAllocation(entry)
+          : parseCurrentAllocation(entry);
+      if (next.has(record.allocationId)) {
         fail('engine_state_corrupt', 'Engine state contains a duplicate allocation.');
       }
-      next.set(
-        allocationId,
-        Object.freeze({
-          allocationId,
-          launchGeneration,
-          name,
-          nativeId: entry.nativeId,
-          createdAt: entry.createdAt,
-        })
-      );
+      next.set(record.allocationId, record);
     }
     records = next;
     stateLoaded = true;
   }
 
-  function saveState() {
+  function serializeRecord(record) {
+    return {
+      allocationId: record.allocationId,
+      launchGeneration: record.launchGeneration,
+      name: record.name,
+      nativeId: record.nativeId,
+      createdAt: record.createdAt,
+      status: record.status,
+      created: record.created,
+      operationId: record.operationId,
+      fingerprint: record.fingerprint,
+      config: record.config,
+      configHash: record.configHash,
+      network: record.network,
+      lastError: record.lastError,
+    };
+  }
+
+  function writeState(next) {
     ensurePrivateDirectory(homeDir, 'unsafe_home', 'Runtime home');
-    const allocations = [...records.values()]
-      .map((record) => ({
-        allocationId: record.allocationId,
-        launchGeneration: record.launchGeneration,
-        name: record.name,
-        nativeId: record.nativeId,
-        createdAt: record.createdAt,
-      }))
+    const allocations = [...next.values()]
+      .map(serializeRecord)
       .sort((left, right) => left.allocationId.localeCompare(right.allocationId));
     const data = JSON.stringify({ version: STATE_VERSION, allocations }, null, 2);
     const temp = path.join(
@@ -816,12 +1165,45 @@ function createBoxliteAdapter(options) {
     }
   }
 
+  function saveRecords(next) {
+    writeState(next);
+    records = next;
+    stateLoaded = true;
+  }
+
+  function commitRecord(record) {
+    const next = new Map(records);
+    next.set(record.allocationId, record);
+    saveRecords(next);
+  }
+
+  function tryCommitRecord(record) {
+    try {
+      commitRecord(record);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function deleteRecord(allocationId) {
+    const next = new Map(records);
+    next.delete(allocationId);
+    saveRecords(next);
+  }
+
   function recordForRef(ref) {
     const normalized = normalizeRef(ref);
     loadState();
     const record = records.get(normalized.allocationId);
     if (!record) {
       fail('engine_unknown_allocation', 'Allocation is not owned by this adapter.', normalized);
+    }
+    if (record.status === 'pending' || !record.nativeId) {
+      fail('engine_allocation_pending', 'Allocation has no observed native identity.', {
+        allocationId: record.allocationId,
+        launchGeneration: record.launchGeneration,
+      });
     }
     if (record.launchGeneration !== normalized.launchGeneration) {
       fail('engine_generation_mismatch', 'Launch generation does not match the current launch.', {
@@ -834,45 +1216,285 @@ function createBoxliteAdapter(options) {
       fail('engine_identity_mismatch', 'Box identity does not match the owned allocation.', {
         allocationId: normalized.allocationId,
         expectedNativeId: record.nativeId,
-        receivedNativeId: normalized.nativeId,
       });
     }
     return { normalized, record };
+  }
+
+  function assertRecordConfig(record) {
+    if (
+      record.status === 'legacy' ||
+      !record.config ||
+      !record.configHash ||
+      record.config.runtimeHome !== homeDir ||
+      !record.network ||
+      record.network.mode !== record.config.networkMode
+    ) {
+      fail('engine_config_unverified', 'The allocation configuration cannot be verified.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+        status: record.status,
+      });
+    }
   }
 
   function assertInfoIdentity(info, record) {
     if (!info || typeof info !== 'object' || Array.isArray(info)) {
       fail('engine_invalid_result', 'BoxLite returned invalid box information.');
     }
+    if (
+      typeof info.id !== 'string' ||
+      info.id.length === 0 ||
+      info.id.length > MAX_NATIVE_ID_LENGTH ||
+      typeof info.name !== 'string'
+    ) {
+      fail('engine_invalid_result', 'BoxLite returned invalid box identity.');
+    }
     if (info.id !== record.nativeId || info.name !== record.name) {
       fail('engine_identity_mismatch', 'BoxLite information does not match the owned box.', {
         allocationId: record.allocationId,
         expectedNativeId: record.nativeId,
-        receivedNativeId: info.id,
       });
     }
   }
 
-  async function resolveBox(ref) {
+  function assertInfoState(info) {
+    if (
+      !info ||
+      typeof info !== 'object' ||
+      !info.state ||
+      typeof info.state !== 'object' ||
+      typeof info.state.running !== 'boolean'
+    ) {
+      fail('engine_invalid_result', 'BoxLite returned invalid box state.');
+    }
+  }
+
+  function assertEffectiveConfig(record, info) {
+    assertRecordConfig(record);
+    assertInfoState(info);
+    const config = record.config;
+    if (info.image !== config.image) {
+      fail('engine_config_mismatch', 'Box image does not match the recorded operator configuration.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+      });
+    }
+    if (info.cpus !== config.cpus || info.memoryMib !== config.memoryMib) {
+      fail('engine_config_mismatch', 'Box resources do not match the recorded operator configuration.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+      });
+    }
+    if (
+      info.privileged === true ||
+      info.autoStop !== config.lifecycle.autoStop ||
+      info.autoDelete !== config.lifecycle.autoDelete ||
+      info.autoResume !== config.lifecycle.autoResume
+    ) {
+      fail('engine_config_mismatch', 'Box lifecycle settings do not match the recorded operator configuration.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+      });
+    }
+    const network = info.network;
+    if (!network || typeof network !== 'object') {
+      fail('engine_network_unverified', 'Box network state cannot be verified.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+      });
+    }
+    if (config.networkMode === 'disabled') {
+      if (
+        !network.outbound ||
+        network.outbound.mode !== 'disabled' ||
+        !network.inbound ||
+        network.inbound.mode !== 'disabled'
+      ) {
+        fail('engine_network_unverified', 'Box network is not disconnected as recorded.', {
+          allocationId: record.allocationId,
+          nativeId: record.nativeId,
+        });
+      }
+      return;
+    }
+    if (
+      !network.outbound ||
+      network.outbound.mode !== 'enabled' ||
+      !network.inbound ||
+      network.inbound.mode !== 'disabled'
+    ) {
+      fail('engine_network_unverified', 'Box network does not match the recorded boundary grant.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+      });
+    }
+    const allowNet = Array.isArray(network.outbound.allowNet)
+      ? network.outbound.allowNet
+      : [];
+    if (!sameStringSet(allowNet, record.network.allowNet)) {
+      fail('engine_network_unverified', 'Box network allowlist does not match the recorded grant.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+      });
+    }
+  }
+
+  async function runBounded(factory, ctx, { phase, code, details, uncertain = false }) {
+    if (ctx) {
+      const remaining = ctx.deadlineAt - Date.now();
+      if (remaining <= 0) {
+        throw deadlineError(phase, uncertain);
+      }
+      const outcome = await boundedPromise(Promise.resolve().then(factory), remaining);
+      if (outcome.status === 'timeout') {
+        throw deadlineError(phase, uncertain);
+      }
+      if (outcome.status === 'error') {
+        if (outcome.error instanceof BoxliteEngineError) {
+          throw outcome.error;
+        }
+        fail(code, SDK_FAILURE_MESSAGES[code] ?? 'Engine operation failed.', details);
+      }
+      return outcome.value;
+    }
+    try {
+      return await factory();
+    } catch (error) {
+      if (error instanceof BoxliteEngineError) {
+        throw error;
+      }
+      fail(code, SDK_FAILURE_MESSAGES[code] ?? 'Engine operation failed.', details);
+    }
+  }
+
+  async function fenceBox(box) {
+    if (!box || typeof box.stop !== 'function') {
+      return false;
+    }
+    const outcome = await boundedPromise(
+      Promise.resolve().then(() => box.stop()),
+      execLimits.terminationGraceMs
+    );
+    return outcome.status === 'ok';
+  }
+
+  async function verifyActivation(record, info, box, { ctx, running, created }) {
+    if (record.config.networkMode !== 'boundary') {
+      return;
+    }
+    if (!networkBoundary) {
+      fail('engine_network_boundary_unavailable', 'A verified host network boundary is not available.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+        networkMode: 'boundary',
+      });
+    }
+    let verified = false;
+    try {
+      const result = await runBounded(
+        () =>
+          networkBoundary.verify({
+            allocationId: record.allocationId,
+            launchGeneration: record.launchGeneration,
+            name: record.name,
+            nativeId: record.nativeId,
+            network: record.network,
+            grantHash: record.network.grantHash,
+            configHash: record.configHash,
+            running,
+            pid: info.state.pid ?? null,
+            created,
+          }),
+        ctx,
+        {
+          phase: 'activation',
+          code: 'engine_network_unverified',
+          details: {
+            allocationId: record.allocationId,
+            nativeId: record.nativeId,
+            running,
+          },
+          uncertain: true,
+        }
+      );
+      verified = result === true;
+    } catch (error) {
+      if (error instanceof BoxliteEngineError && error.code === 'engine_exec_deadline_exceeded') {
+        if (box) {
+          await fenceBox(box);
+        }
+        throw error;
+      }
+      verified = false;
+    }
+    if (!verified) {
+      const fenced = box ? await fenceBox(box) : false;
+      fail('engine_network_unverified', 'Network boundary verification was refused.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+        running,
+        fenced,
+        uncertain: true,
+      });
+    }
+    if (running && info.state.running !== true) {
+      const fenced = box ? await fenceBox(box) : false;
+      fail('engine_start_unverified', 'BoxLite box is not running after activation.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+        fenced,
+      });
+    }
+  }
+
+  async function resolveBox(ref, { ctx, requireConfig = false } = {}) {
     const { normalized, record } = recordForRef(ref);
-    const activeRuntime = await getRuntime();
-    const info = await activeRuntime.getInfo(record.nativeId);
+    if (requireConfig) {
+      assertRecordConfig(record);
+    }
+    const activeRuntime = await runBounded(() => getRuntime(), ctx, {
+      phase: 'identity',
+      code: 'engine_unavailable',
+      details: {},
+    });
+    const info = await runBounded(() => activeRuntime.getInfo(record.nativeId), ctx, {
+      phase: 'identity',
+      code: 'engine_inspect_failed',
+      details: { allocationId: record.allocationId, nativeId: record.nativeId },
+    });
     if (info === null) {
+      const nameInfo = await runBounded(() => activeRuntime.getInfo(record.name), ctx, {
+        phase: 'identity',
+        code: 'engine_inspect_failed',
+        details: { allocationId: record.allocationId, name: record.name },
+      });
+      if (nameInfo !== null) {
+        fail('engine_identity_conflict', 'A different native box occupies the reserved name.', {
+          allocationId: record.allocationId,
+          nativeId: record.nativeId,
+          reason: 'name_occupied',
+        });
+      }
       fail('engine_box_missing', 'The owned box no longer exists.', {
         allocationId: record.allocationId,
         nativeId: record.nativeId,
       });
     }
     assertInfoIdentity(info, record);
-    const box = await activeRuntime.get(record.nativeId);
+    const box = await runBounded(() => activeRuntime.get(record.nativeId), ctx, {
+      phase: 'identity',
+      code: 'engine_inspect_failed',
+      details: { allocationId: record.allocationId, nativeId: record.nativeId },
+    });
     if (box === null) {
       fail('engine_box_missing', 'The owned box handle is unavailable.', {
         allocationId: record.allocationId,
         nativeId: record.nativeId,
       });
     }
-    assertBoxShape(box, record.name);
-    return { normalized, record, box, runtime: activeRuntime };
+    assertBoxShape(box, record.name, record.nativeId);
+    return { normalized, record, box, runtime: activeRuntime, info };
   }
 
   async function ensureProbe() {
@@ -889,16 +1511,19 @@ function createBoxliteAdapter(options) {
     return result;
   }
 
-  function buildSdkOptions(profile, preparedNetwork) {
+  function buildSdkOptions(network) {
     return {
       image,
       cpus: limits.cpus,
       memoryMib: limits.memoryMib,
       diskSizeGb: limits.diskSizeGb,
       network:
-        preparedNetwork === undefined
+        network.mode === 'disabled'
           ? { outbound: { mode: 'disabled' }, inbound: { mode: 'disabled' } }
-          : preparedNetwork,
+          : {
+              outbound: { mode: 'enabled', allowNet: [...network.allowNet] },
+              inbound: { mode: 'disabled' },
+            },
       volumes: [],
       ports: [],
       env: [],
@@ -909,8 +1534,82 @@ function createBoxliteAdapter(options) {
     };
   }
 
-  async function collectExecution(execution, { timeoutMs, maxOutputBytes, signal, terminationGraceMs }) {
-    const startedAt = Date.now();
+  function operationIdFor(kind, allocationId, launchGeneration, configHash) {
+    return `${kind}-${hashOf({ kind, allocationId, launchGeneration, configHash }).slice(0, 32)}`;
+  }
+
+  async function prepareBoundary(record) {
+    if (!networkBoundary) {
+      fail('engine_network_boundary_unavailable', 'A verified host network boundary is not available.', {
+        allocationId: record.allocationId,
+        nativeId: record.nativeId,
+        networkMode: 'boundary',
+      });
+    }
+    const launch = {
+      allocationId: record.allocationId,
+      launchGeneration: record.launchGeneration,
+      name: record.name,
+      image,
+      limits: { ...limits },
+      configHash: record.configHash,
+    };
+    let prepared;
+    try {
+      prepared = await networkBoundary.prepare(launch);
+    } catch {
+      fail('engine_network_boundary_prepare_failed', 'Network boundary preparation failed.', {
+        allocationId: record.allocationId,
+        launchGeneration: record.launchGeneration,
+        uncertain: true,
+      });
+    }
+    const network = validateBoundaryNetwork(prepared && prepared.network);
+    return Object.freeze({
+      mode: 'boundary',
+      allowNet: Object.freeze([...network.outbound.allowNet]),
+      grantHash: hashOf({
+        allocationId: record.allocationId,
+        launchGeneration: record.launchGeneration,
+        name: record.name,
+        network,
+      }),
+    });
+  }
+
+  async function cleanupNative(activeRuntime, record) {
+    if (!record.nativeId) {
+      return false;
+    }
+    await boundedPromise(
+      Promise.resolve().then(() => activeRuntime.remove(record.nativeId, true)),
+      execLimits.terminationGraceMs
+    );
+    const outcome = await boundedPromise(
+      Promise.resolve().then(() => activeRuntime.getInfo(record.nativeId)),
+      execLimits.terminationGraceMs
+    );
+    return outcome.status === 'ok' && outcome.value === null;
+  }
+
+  async function cleanupLateExecution(execution, graceMs) {
+    if (!execution || typeof execution !== 'object' || typeof execution.kill !== 'function') {
+      return;
+    }
+    try {
+      const killed = await boundedPromise(
+        Promise.resolve().then(() => execution.kill()),
+        graceMs
+      );
+      if (killed.status === 'ok' && typeof execution.wait === 'function') {
+        await boundedPromise(Promise.resolve().then(() => execution.wait()), graceMs);
+      }
+    } catch {
+      // Late cleanup is best effort; the dispatch is already reported uncertain.
+    }
+  }
+
+  async function collectExecution(execution, { deadlineAt, maxOutputBytes, signal, terminationGraceMs }) {
     let stdout = '';
     let stderr = '';
     let totalBytes = 0;
@@ -922,53 +1621,15 @@ function createBoxliteAdapter(options) {
     let stopped = false;
     let streamError = null;
     let killPromise = null;
-
-    function requestKill() {
-      if (!killPromise) {
-        killPromise = Promise.resolve()
-          .then(() => execution.kill())
-          .catch(() => {});
-      }
-      return killPromise;
-    }
-
-    const timeoutTimer = setTimeout(() => {
-      if (!waitSettled) {
-        timedOut = true;
-        killed = true;
-        void requestKill();
-      }
-    }, timeoutMs);
-
+    let killTimedOut = false;
     let abortListener = null;
-    if (signal) {
-      abortListener = () => {
-        if (!waitSettled) {
-          cancelled = true;
-          killed = true;
-          void requestKill();
-        }
-      };
-      signal.addEventListener('abort', abortListener, { once: true });
-      if (signal.aborted && !waitSettled) {
-        cancelled = true;
-        killed = true;
-        void requestKill();
-      }
-    }
+    let timeoutTimer = null;
+    let readDeadlineTimer = null;
+    let stopReadResolve;
 
-    let stdoutReader = null;
-    let stderrReader = null;
-    try {
-      stdoutReader = await execution.stdout();
-    } catch {
-      stdoutReader = null;
-    }
-    try {
-      stderrReader = await execution.stderr();
-    } catch {
-      stderrReader = null;
-    }
+    const stopRead = new Promise((resolve) => {
+      stopReadResolve = resolve;
+    });
 
     const waitPromise = Promise.resolve()
       .then(() => execution.wait())
@@ -983,64 +1644,152 @@ function createBoxliteAdapter(options) {
         }
       );
 
-    async function read(reader, append) {
-      if (!reader || typeof reader.next !== 'function') {
-        return;
+    function requestKill() {
+      if (!killPromise) {
+        killPromise = boundedPromise(
+          Promise.resolve().then(() => execution.kill()),
+          terminationGraceMs
+        ).then((outcome) => {
+          if (outcome.status !== 'ok') {
+            killTimedOut = true;
+          }
+        });
       }
-      while (!stopped) {
-        let chunk;
-        try {
-          chunk = await reader.next();
-        } catch (error) {
-          if (!killed && !stopped) {
-            streamError = error;
-          }
-          return;
-        }
-        if (stopped) {
-          return;
-        }
-        if (chunk === null) {
-          return;
-        }
-        if (typeof chunk !== 'string') {
-          streamError = new BoxliteEngineError(
-            'engine_exec_stream_failed',
-            'Execution stream returned a non-string chunk.'
-          );
-          return;
-        }
-        const buffer = Buffer.from(chunk, 'utf8');
-        if (totalBytes + buffer.length > maxOutputBytes) {
-          const remaining = maxOutputBytes - totalBytes;
-          if (remaining > 0) {
-            append(buffer.subarray(0, remaining).toString('utf8'));
-          }
-          totalBytes = maxOutputBytes;
-          truncated = true;
-          if (!waitSettled) {
-            killed = true;
-            void requestKill();
-          }
-          return;
-        }
-        totalBytes += buffer.length;
-        append(chunk);
+      return killPromise;
+    }
+
+    function markKilled() {
+      killed = true;
+      stopped = true;
+      stopReadResolve();
+      void requestKill();
+    }
+
+    function cleanup() {
+      stopped = true;
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+      }
+      if (readDeadlineTimer) {
+        clearTimeout(readDeadlineTimer);
+      }
+      if (abortListener && signal) {
+        signal.removeEventListener('abort', abortListener);
       }
     }
 
-    let readDeadlineTimer = null;
-    const readDeadline = new Promise((resolve) => {
-      readDeadlineTimer = setTimeout(() => {
-        if (!waitSettled) {
-          killed = true;
-          void requestKill();
-        }
-        resolve();
-      }, timeoutMs + terminationGraceMs);
-    });
+    async function observationFailure(message, stream) {
+      markKilled();
+      await boundedPromise(waitPromise, terminationGraceMs);
+      throw new BoxliteEngineError('engine_exec_observation_failed', message, {
+        uncertain: true,
+        stream,
+        killed: true,
+        killTimedOut,
+      });
+    }
 
     try {
+      if (signal) {
+        abortListener = () => {
+          if (!waitSettled) {
+            cancelled = true;
+            markKilled();
+          }
+        };
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted && !waitSettled) {
+          cancelled = true;
+          markKilled();
+        }
+      }
+
+      timeoutTimer = setTimeout(() => {
+        if (!waitSettled) {
+          timedOut = true;
+          markKilled();
+        }
+      }, Math.max(0, deadlineAt - Date.now()));
+
+      const stdoutOutcome = await boundedPromise(
+        Promise.resolve().then(() => execution.stdout()),
+        Math.max(0, deadlineAt - Date.now())
+      );
+      if (stdoutOutcome.status !== 'ok') {
+        await observationFailure('Execution output could not be observed.', 'stdout');
+      }
+      const stdoutReader = stdoutOutcome.value;
+      if (!stdoutReader || typeof stdoutReader.next !== 'function') {
+        await observationFailure('Execution output stream is invalid.', 'stdout');
+      }
+
+      const stderrOutcome = await boundedPromise(
+        Promise.resolve().then(() => execution.stderr()),
+        Math.max(0, deadlineAt - Date.now())
+      );
+      if (stderrOutcome.status !== 'ok') {
+        await observationFailure('Execution error output could not be observed.', 'stderr');
+      }
+      const stderrReader = stderrOutcome.value;
+      if (!stderrReader || typeof stderrReader.next !== 'function') {
+        await observationFailure('Execution error stream is invalid.', 'stderr');
+      }
+
+      async function read(reader, append) {
+        while (!stopped) {
+          let chunk;
+          try {
+            chunk = await reader.next();
+          } catch {
+            if (!killed && !stopped) {
+              streamError = new BoxliteEngineError(
+                'engine_exec_stream_failed',
+                'Execution stream failed.'
+              );
+            }
+            return;
+          }
+          if (stopped) {
+            return;
+          }
+          if (chunk === null) {
+            return;
+          }
+          if (typeof chunk !== 'string') {
+            streamError = new BoxliteEngineError(
+              'engine_exec_stream_failed',
+              'Execution stream returned a non-string chunk.'
+            );
+            return;
+          }
+          const buffer = Buffer.from(chunk, 'utf8');
+          if (totalBytes + buffer.length > maxOutputBytes) {
+            const remaining = maxOutputBytes - totalBytes;
+            if (remaining > 0) {
+              append(buffer.subarray(0, remaining).toString('utf8'));
+            }
+            totalBytes = maxOutputBytes;
+            truncated = true;
+            if (!waitSettled) {
+              markKilled();
+            }
+            return;
+          }
+          totalBytes += buffer.length;
+          append(chunk);
+        }
+      }
+
+      const readDeadline = new Promise((resolve) => {
+        readDeadlineTimer = setTimeout(() => {
+          if (!waitSettled) {
+            timedOut = true;
+            markKilled();
+          }
+          resolve();
+        }, Math.max(0, deadlineAt + terminationGraceMs - Date.now()));
+      });
+
       await Promise.race([
         Promise.all([
           read(stdoutReader, (chunk) => {
@@ -1051,102 +1800,93 @@ function createBoxliteAdapter(options) {
           }),
         ]),
         readDeadline,
+        stopRead,
       ]);
-    } finally {
-      stopped = true;
-      clearTimeout(readDeadlineTimer);
-    }
 
-    if (streamError) {
-      if (!killed) {
-        killed = true;
-        await requestKill();
+      if (streamError) {
+        await observationFailure('Execution stream failed.', 'output');
       }
-      clearTimeout(timeoutTimer);
-      if (abortListener && signal) {
-        signal.removeEventListener('abort', abortListener);
-      }
-      await Promise.race([
-        waitPromise,
-        new Promise((resolve) => setTimeout(resolve, terminationGraceMs)),
-      ]);
-      throw streamError instanceof BoxliteEngineError
-        ? streamError
-        : new BoxliteEngineError('engine_exec_stream_failed', 'Execution stream failed.');
-    }
 
-    const elapsed = Date.now() - startedAt;
-    const waitBudgetMs = killed
-      ? terminationGraceMs
-      : Math.max(0, timeoutMs + terminationGraceMs - elapsed);
-    let waitTimer = null;
-    const waitDeadline = new Promise((resolve) => {
-      waitTimer = setTimeout(() => resolve({ type: 'deadline' }), waitBudgetMs);
-    });
-    let outcome;
-    try {
-      outcome = await Promise.race([waitPromise, waitDeadline]);
-    } finally {
-      clearTimeout(waitTimer);
-      clearTimeout(timeoutTimer);
-      if (abortListener && signal) {
-        signal.removeEventListener('abort', abortListener);
-      }
-    }
-
-    if (outcome.type === 'deadline') {
-      throw new BoxliteEngineError(
-        'engine_termination_unverified',
-        'Execution did not terminate within the allowed time.'
-      );
-    }
-
-    let exitCode = -1;
-    let errorMessage;
-    if (outcome.type === 'result') {
-      const value = outcome.value;
-      if (!value || typeof value !== 'object' || !Number.isInteger(value.exitCode)) {
+      const waitBudget = killed
+        ? terminationGraceMs
+        : Math.max(0, deadlineAt + terminationGraceMs - Date.now());
+      const waitOutcome = await boundedPromise(waitPromise, waitBudget);
+      if (waitOutcome.status === 'timeout') {
+        markKilled();
         throw new BoxliteEngineError(
-          'engine_exec_invalid_result',
-          'Execution returned an invalid result.'
+          'engine_termination_unverified',
+          'Execution did not terminate within the allowed time.',
+          { uncertain: true, timedOut, cancelled, killed, killTimedOut }
         );
       }
-      exitCode = value.exitCode;
+
+      const outcome = waitOutcome.value;
+      if (outcome.type === 'error') {
+        if (!killed) {
+          markKilled();
+        }
+        throw new BoxliteEngineError(
+          'engine_termination_unverified',
+          'Execution termination could not be observed.',
+          { uncertain: true, reason: 'wait_failed', timedOut, cancelled, killed, killTimedOut }
+        );
+      }
+
+      const value = outcome.value;
+      if (!value || typeof value !== 'object' || !Number.isInteger(value.exitCode)) {
+        throw new BoxliteEngineError('engine_exec_invalid_result', 'Execution returned an invalid result.', {
+          uncertain: true,
+        });
+      }
+      const exitCode = value.exitCode;
+      let errorMessage;
       if (value.errorMessage !== undefined) {
         if (typeof value.errorMessage !== 'string') {
           throw new BoxliteEngineError(
             'engine_exec_invalid_result',
-            'Execution returned an invalid error message.'
+            'Execution returned an invalid error message.',
+            { uncertain: true }
           );
         }
-        errorMessage = value.errorMessage;
+        errorMessage =
+          value.errorMessage.length > MAX_ERROR_MESSAGE_LENGTH
+            ? value.errorMessage.slice(0, MAX_ERROR_MESSAGE_LENGTH)
+            : value.errorMessage;
       }
-    } else if (!killed) {
-      throw new BoxliteEngineError('engine_exec_failed', 'Execution failed.');
-    } else {
-      errorMessage = 'Execution terminated after cancellation.';
-    }
 
-    let executionId;
-    try {
-      const id = await execution.id();
-      if (typeof id === 'string' && id.length > 0) {
-        executionId = id;
+      let executionId;
+      const idBudget = Math.min(
+        ID_READ_TIMEOUT_MS,
+        Math.max(0, deadlineAt - Date.now())
+      );
+      if (idBudget > 0) {
+        const idOutcome = await boundedPromise(
+          Promise.resolve().then(() => execution.id()),
+          idBudget
+        );
+        if (
+          idOutcome.status === 'ok' &&
+          typeof idOutcome.value === 'string' &&
+          idOutcome.value.length > 0 &&
+          idOutcome.value.length <= MAX_NATIVE_ID_LENGTH
+        ) {
+          executionId = idOutcome.value;
+        }
       }
-    } catch {
-      // The execution id is informative, not required.
-    }
 
-    return Object.freeze({
-      exitCode,
-      stdout,
-      stderr,
-      truncated,
-      timedOut,
-      cancelled,
-      ...(errorMessage === undefined ? {} : { errorMessage }),
-      ...(executionId === undefined ? {} : { executionId }),
-    });
+      return Object.freeze({
+        exitCode,
+        stdout,
+        stderr,
+        truncated,
+        timedOut,
+        cancelled,
+        ...(errorMessage === undefined ? {} : { errorMessage }),
+        ...(executionId === undefined ? {} : { executionId }),
+      });
+    } finally {
+      cleanup();
+    }
   }
 
   const adapter = {
@@ -1190,12 +1930,18 @@ function createBoxliteAdapter(options) {
           const activeRuntime = await getRuntime();
           await activeRuntime.listInfo();
         } catch {
-          return Object.freeze({ available: false, version,
-            capabilities: Object.freeze([]), reason: 'runtime_unavailable' });
+          return Object.freeze({
+            available: false,
+            version,
+            capabilities: Object.freeze([]),
+            reason: 'runtime_unavailable',
+          });
         }
         const capabilities = [...BASE_CAPABILITIES];
         if (stagingDir !== undefined) {
-          capabilities.push('import', 'export');
+          // Export remains available; archive import is withheld because the
+          // stock SDK cannot prove safe effective settings for an imported box.
+          capabilities.push('export');
         }
         if (networkBoundary) {
           capabilities.push('network-boundary');
@@ -1237,6 +1983,21 @@ function createBoxliteAdapter(options) {
         }
       }
 
+      const config = buildConfig(profile);
+      const configHash = hashOf(config);
+      const operationId = operationIdFor(
+        'create',
+        allocationId,
+        launchGeneration,
+        configHash
+      );
+      const fingerprint = hashOf({
+        kind: 'create',
+        allocationId,
+        launchGeneration,
+        configHash,
+      });
+
       loadState();
       const existing = records.get(allocationId);
       if (existing && existing.launchGeneration !== launchGeneration) {
@@ -1246,137 +2007,394 @@ function createBoxliteAdapter(options) {
           receivedGeneration: launchGeneration,
         });
       }
-
-      let preparedNetwork;
-      if (profile.network.mode === 'boundary') {
-        const launch = {
-          allocationId,
-          launchGeneration,
-          name,
-          image,
-          limits: { ...limits },
-        };
-        let prepared;
-        try {
-          prepared = await networkBoundary.prepare(launch);
-        } catch {
-          fail('network_boundary_prepare_failed', 'Network boundary preparation failed.', {
+      if (existing) {
+        if (existing.status === 'legacy' || !existing.config || !existing.configHash) {
+          fail('engine_config_unverified', 'The allocation configuration cannot be verified.', {
             allocationId,
-            launchGeneration,
+            nativeId: existing.nativeId,
+            status: existing.status,
           });
         }
-        preparedNetwork = validateBoundaryNetwork(prepared && prepared.network);
+        if (existing.configHash !== configHash) {
+          fail('engine_config_mismatch', 'Allocation configuration differs from the recorded launch.', {
+            allocationId,
+            launchGeneration,
+            expectedConfigHash: existing.configHash,
+            receivedConfigHash: configHash,
+          });
+        }
+        if (existing.status === 'cleanup-pending') {
+          fail('engine_allocation_cleanup_pending', 'Allocation cleanup is still pending.', {
+            allocationId,
+            nativeId: existing.nativeId,
+            status: existing.status,
+            retryable: false,
+          });
+        }
       }
 
       const activeRuntime = await getRuntime();
-      const sdkOptions = buildSdkOptions(profile, preparedNetwork);
-      let result;
-      try {
-        result = await activeRuntime.getOrCreate(sdkOptions, name);
-      } catch (error) {
-        throw new BoxliteEngineError('engine_create_failed', 'BoxLite allocation failed.', {
-          allocationId,
-          launchGeneration,
-          name,
-          cause: error,
+
+      if (!existing) {
+        const collision = await runBounded(() => activeRuntime.getInfo(name), undefined, {
+          phase: 'create',
+          code: 'engine_inspect_failed',
+          details: { allocationId, name },
         });
-      }
-      assertGetOrCreateResult(result);
-      assertBoxShape(result.box, name);
-      const nativeId = result.box.id;
-
-      if (existing && existing.nativeId !== nativeId) {
-        fail('engine_identity_mismatch', 'Allocated box does not match the persisted native id.', {
-          allocationId,
-          expectedNativeId: existing.nativeId,
-          receivedNativeId: nativeId,
-        });
-      }
-
-      const record = Object.freeze({
-        allocationId,
-        launchGeneration,
-        name,
-        nativeId,
-        createdAt: existing ? existing.createdAt : new Date().toISOString(),
-      });
-
-      const info = await result.box.info();
-      assertInfoIdentity(info, record);
-
-      if (profile.network.mode === 'boundary') {
-        let verified;
-        try {
-          verified = await networkBoundary.verify({
+        if (collision !== null) {
+          fail('engine_intent_conflict', 'The reserved name is occupied without a durable allocation intent.', {
             allocationId,
             launchGeneration,
             name,
-            nativeId,
-            created: result.created === true,
-          });
-        } catch {
-          if (result.created === true) {
-            try {
-              await activeRuntime.remove(nativeId, true);
-            } catch {
-              // Keep the failure visible; cleanup is best effort.
-            }
-          }
-          fail('network_boundary_verify_failed', 'Network boundary verification failed.', {
-            allocationId,
-            launchGeneration,
-            nativeId,
+            retryable: false,
           });
         }
-        if (verified !== true) {
-          if (result.created === true) {
-            try {
-              await activeRuntime.remove(nativeId, true);
-            } catch {
-              // Keep the failure visible; cleanup is best effort.
-            }
+        const pending = makeRecord({
+          allocationId,
+          launchGeneration,
+          name,
+          nativeId: null,
+          createdAt: new Date().toISOString(),
+          status: 'pending',
+          created: null,
+          operationId,
+          fingerprint,
+          config,
+          configHash,
+          network: profile.network.mode === 'disabled' ? { mode: 'disabled' } : null,
+          lastError: null,
+        });
+        commitRecord(pending);
+      }
+
+      let record = records.get(allocationId);
+      let createdNow = false;
+      let box = null;
+      let info = null;
+
+      if (record.status === 'pending' && !record.nativeId) {
+        const found = await runBounded(() => activeRuntime.getInfo(name), undefined, {
+          phase: 'create',
+          code: 'engine_inspect_failed',
+          details: { allocationId, name },
+        });
+        if (found !== null) {
+          if (!record.network) {
+            fail('engine_config_unverified', 'The allocation grant cannot be verified.', {
+              allocationId,
+              name,
+              uncertain: true,
+            });
           }
-          fail('network_boundary_unverified', 'Network boundary verification was refused.', {
+          if (found.name !== name || typeof found.id !== 'string' || found.id.length === 0) {
+            fail('engine_identity_conflict', 'The reserved name maps to an unexpected native object.', {
+              allocationId,
+              name,
+            });
+          }
+          const handle = await runBounded(() => activeRuntime.get(found.id), undefined, {
+            phase: 'create',
+            code: 'engine_inspect_failed',
+            details: { allocationId, name },
+          });
+          if (handle === null) {
+            fail('engine_box_missing', 'The recorded native allocation is unavailable.', {
+              allocationId,
+              name,
+            });
+          }
+          assertBoxShape(handle, name, found.id);
+          const adopted = makeRecord({
+            ...record,
+            nativeId: found.id,
+            status: 'allocated',
+            created: true,
+          });
+          commitRecord(adopted);
+          record = records.get(allocationId);
+          box = handle;
+          info = found;
+        }
+      }
+
+      if (!box && record.nativeId) {
+        const found = await runBounded(() => activeRuntime.getInfo(record.nativeId), undefined, {
+          phase: 'create',
+          code: 'engine_inspect_failed',
+          details: { allocationId, nativeId: record.nativeId },
+        });
+        if (found === null) {
+          const nameInfo = await runBounded(() => activeRuntime.getInfo(name), undefined, {
+            phase: 'create',
+            code: 'engine_inspect_failed',
+            details: { allocationId, name },
+          });
+          if (nameInfo !== null) {
+            fail('engine_identity_conflict', 'The reserved name is occupied by a different native box.', {
+              allocationId,
+              nativeId: record.nativeId,
+              reason: 'name_occupied',
+            });
+          }
+          fail('engine_box_missing', 'The recorded native box no longer exists; no replacement was created.', {
+            allocationId,
+            nativeId: record.nativeId,
+            retryable: false,
+          });
+        }
+        assertInfoIdentity(found, record);
+        const handle = await runBounded(() => activeRuntime.get(record.nativeId), undefined, {
+          phase: 'create',
+          code: 'engine_inspect_failed',
+          details: { allocationId, nativeId: record.nativeId },
+        });
+        if (handle === null) {
+          fail('engine_box_missing', 'The recorded native box handle is unavailable.', {
+            allocationId,
+            nativeId: record.nativeId,
+            retryable: false,
+          });
+        }
+        assertBoxShape(handle, record.name, record.nativeId);
+        box = handle;
+        info = found;
+      }
+
+      if (!box) {
+        if (!record.network) {
+          const prepared = await prepareBoundary(record);
+          const withGrant = makeRecord({ ...record, network: prepared });
+          try {
+            commitRecord(withGrant);
+          } catch (error) {
+            fail('engine_state_write_failed', 'Engine state could not be written before allocation.', {
+              allocationId,
+              launchGeneration,
+              phase: 'grant',
+            });
+          }
+          record = records.get(allocationId);
+        }
+
+        let result;
+        try {
+          result = await activeRuntime.getOrCreate(buildSdkOptions(record.network), name);
+        } catch {
+          const uncertain = makeRecord({
+            ...record,
+            status: 'pending',
+            lastError: 'engine_create_failed',
+          });
+          tryCommitRecord(uncertain);
+          fail('engine_create_failed', 'BoxLite allocation failed.', {
             allocationId,
             launchGeneration,
-            nativeId,
+            name,
+            operationId,
+            uncertain: true,
+            retryable: true,
+            state: 'pending',
+          });
+        }
+        assertGetOrCreateResult(result);
+        assertBoxShape(result.box, name);
+        createdNow = result.created === true;
+        const allocated = makeRecord({
+          ...record,
+          nativeId: result.box.id,
+          status: 'allocated',
+          created: result.created === true,
+          lastError: null,
+        });
+        try {
+          commitRecord(allocated);
+        } catch (error) {
+          fail('engine_state_write_failed', 'Engine state could not be written after allocation.', {
+            allocationId,
+            launchGeneration,
+            name,
+            nativeId: result.box.id,
+            uncertain: true,
+            retryable: true,
+            state: 'pending',
+          });
+        }
+        record = records.get(allocationId);
+        box = result.box;
+        info = null;
+      }
+
+      if (!info) {
+        try {
+          info = await box.info();
+        } catch {
+          const unverified = makeRecord({
+            ...record,
+            status: 'allocated',
+            lastError: 'engine_create_unverified',
+          });
+          tryCommitRecord(unverified);
+          fail('engine_create_unverified', 'Allocated box could not be verified.', {
+            allocationId,
+            launchGeneration,
+            name,
+            nativeId: record.nativeId,
+            uncertain: true,
+            retryable: true,
+          });
+        }
+      }
+      assertInfoIdentity(info, record);
+      assertEffectiveConfig(record, info);
+
+      if (record.config.networkMode === 'boundary') {
+        const wasOwned = record.status === 'owned';
+        const running = info.state.running === true;
+        let verified = false;
+        try {
+          verified =
+            (await networkBoundary.verify({
+              allocationId: record.allocationId,
+              launchGeneration: record.launchGeneration,
+              name: record.name,
+              nativeId: record.nativeId,
+              network: record.network,
+              grantHash: record.network.grantHash,
+              configHash: record.configHash,
+              running,
+              pid: info.state.pid ?? null,
+              created: record.created === true,
+            })) === true;
+        } catch {
+          verified = false;
+        }
+        if (!verified) {
+          if (wasOwned) {
+            const fenced = await fenceBox(box);
+            tryCommitRecord(
+              makeRecord({
+                ...record,
+                lastError: 'engine_network_unverified',
+              })
+            );
+            fail('engine_network_unverified', 'Network boundary verification was refused.', {
+              allocationId,
+              launchGeneration,
+              name,
+              nativeId: record.nativeId,
+              uncertain: true,
+              fenced,
+              cleanup: 'fenced',
+              retryable: false,
+            });
+          }
+          const pendingCleanup = makeRecord({
+            ...record,
+            status: 'cleanup-pending',
+            lastError: 'engine_network_unverified',
+          });
+          tryCommitRecord(pendingCleanup);
+          record = records.get(record.allocationId) ?? pendingCleanup;
+          const gone = await cleanupNative(activeRuntime, record);
+          if (gone) {
+            try {
+              deleteRecord(record.allocationId);
+            } catch {
+              // The primary verification diagnostic is more useful.
+            }
+          }
+          fail('engine_network_unverified', 'Network boundary verification was refused.', {
+            allocationId,
+            launchGeneration,
+            name,
+            nativeId: record.nativeId,
+            uncertain: true,
+            cleanup: gone ? 'observed_absent' : 'pending',
+            retryable: false,
           });
         }
       }
 
-      records.set(allocationId, record);
-      saveState();
+      const owned = makeRecord({
+        ...record,
+        status: 'owned',
+        lastError: null,
+      });
+      try {
+        commitRecord(owned);
+      } catch (error) {
+        fail('engine_state_write_failed', 'Engine state could not be written after verification.', {
+          allocationId,
+          launchGeneration,
+          name,
+          nativeId: owned.nativeId,
+          uncertain: true,
+          retryable: true,
+          state: 'allocated',
+        });
+      }
+      record = records.get(allocationId);
       return Object.freeze({
         allocationId,
         launchGeneration,
         name,
-        nativeId,
-        created: result.created === true,
+        nativeId: record.nativeId,
+        created: createdNow,
+        operationId: record.operationId,
+        status: record.status,
       });
     },
 
     async inspect(ref) {
       requireOpen();
-      const { record, box } = await resolveBox(ref);
-      const info = await box.info();
-      assertInfoIdentity(info, record);
+      const { record, info } = await resolveBox(ref, { requireConfig: true });
+      assertEffectiveConfig(record, info);
       return sanitizeInfo(info, record);
     },
 
     async start(ref) {
       requireOpen();
-      const { record, box } = await resolveBox(ref);
-      await box.start();
-      const info = await box.info();
-      assertInfoIdentity(info, record);
-      return sanitizeInfo(info, record);
+      const { record, box, info } = await resolveBox(ref, { requireConfig: true });
+      assertEffectiveConfig(record, info);
+      let current = info;
+      if (current.state.running !== true) {
+        await verifyActivation(record, current, null, { ctx: undefined, running: false, created: false });
+        await runBounded(() => box.start(), undefined, {
+          phase: 'start',
+          code: 'engine_start_failed',
+          details: { allocationId: record.allocationId, nativeId: record.nativeId },
+        });
+        current = await runBounded(() => box.info(), undefined, {
+          phase: 'start',
+          code: 'engine_inspect_failed',
+          details: { allocationId: record.allocationId, nativeId: record.nativeId },
+        });
+        assertInfoIdentity(current, record);
+        assertEffectiveConfig(record, current);
+        if (current.state.running !== true) {
+          fail('engine_start_unverified', 'BoxLite box is not running after start.', {
+            allocationId: record.allocationId,
+            nativeId: record.nativeId,
+          });
+        }
+      }
+      await verifyActivation(record, current, box, { running: true, created: false });
+      return sanitizeInfo(current, record);
     },
 
     async stop(ref) {
       requireOpen();
       const { record, box } = await resolveBox(ref);
-      await box.stop();
-      const info = await box.info();
+      await runBounded(() => box.stop(), undefined, {
+        phase: 'stop',
+        code: 'engine_stop_failed',
+        details: { allocationId: record.allocationId, nativeId: record.nativeId },
+      });
+      const info = await runBounded(() => box.info(), undefined, {
+        phase: 'stop',
+        code: 'engine_inspect_failed',
+        details: { allocationId: record.allocationId, nativeId: record.nativeId },
+      });
       assertInfoIdentity(info, record);
       if (info.state && info.state.running === true) {
         fail('engine_stop_unverified', 'BoxLite box is still running after stop.', {
@@ -1390,11 +2408,18 @@ function createBoxliteAdapter(options) {
     async destroy(ref) {
       requireOpen();
       const { normalized, record } = recordForRef(ref);
-      const activeRuntime = await getRuntime();
-      const info = await activeRuntime.getInfo(record.nativeId);
+      const activeRuntime = await runBounded(() => getRuntime(), undefined, {
+        phase: 'destroy',
+        code: 'engine_unavailable',
+        details: {},
+      });
+      const info = await runBounded(() => activeRuntime.getInfo(record.nativeId), undefined, {
+        phase: 'destroy',
+        code: 'engine_inspect_failed',
+        details: { allocationId: record.allocationId, nativeId: record.nativeId },
+      });
       if (info === null) {
-        records.delete(normalized.allocationId);
-        saveState();
+        deleteRecord(normalized.allocationId);
         return Object.freeze({
           destroyed: true,
           alreadyGone: true,
@@ -1405,23 +2430,77 @@ function createBoxliteAdapter(options) {
         });
       }
       assertInfoIdentity(info, record);
-      const box = await activeRuntime.get(record.nativeId);
-      if (box !== null) {
-        assertBoxShape(box, record.name);
-        if (info.state && info.state.running === true) {
-          await box.stop();
+      if (info.state && info.state.running === true) {
+        const box = await runBounded(() => activeRuntime.get(record.nativeId), undefined, {
+          phase: 'destroy',
+          code: 'engine_inspect_failed',
+          details: { allocationId: record.allocationId, nativeId: record.nativeId },
+        });
+        if (box !== null) {
+          assertBoxShape(box, record.name, record.nativeId);
+          await runBounded(() => box.stop(), undefined, {
+            phase: 'destroy',
+            code: 'engine_stop_failed',
+            details: { allocationId: record.allocationId, nativeId: record.nativeId },
+          });
         }
       }
-      await activeRuntime.remove(record.nativeId, true);
-      const remaining = await activeRuntime.getInfo(record.nativeId);
+      try {
+        await runBounded(() => activeRuntime.remove(record.nativeId, true), undefined, {
+          phase: 'destroy',
+          code: 'engine_destroy_failed',
+          details: { allocationId: record.allocationId, nativeId: record.nativeId },
+        });
+      } catch (error) {
+        tryCommitRecord(
+          makeRecord({
+            ...record,
+            status: 'cleanup-pending',
+            lastError: error.code,
+          })
+        );
+        throw error;
+      }
+      let remaining;
+      try {
+        remaining = await runBounded(
+          () => activeRuntime.getInfo(record.nativeId),
+          undefined,
+          {
+            phase: 'destroy',
+            code: 'engine_inspect_failed',
+            details: { allocationId: record.allocationId, nativeId: record.nativeId },
+          }
+        );
+      } catch {
+        tryCommitRecord(
+          makeRecord({
+            ...record,
+            status: 'cleanup-pending',
+            lastError: 'engine_destroy_unverified',
+          })
+        );
+        fail('engine_destroy_unverified', 'Removal could not be observed.', {
+          allocationId: record.allocationId,
+          nativeId: record.nativeId,
+          uncertain: true,
+        });
+      }
       if (remaining !== null) {
+        tryCommitRecord(
+          makeRecord({
+            ...record,
+            status: 'cleanup-pending',
+            lastError: 'engine_destroy_unverified',
+          })
+        );
         fail('engine_destroy_unverified', 'BoxLite box still exists after removal.', {
           allocationId: record.allocationId,
           nativeId: record.nativeId,
+          uncertain: true,
         });
       }
-      records.delete(normalized.allocationId);
-      saveState();
+      deleteRecord(normalized.allocationId);
       return Object.freeze({
         destroyed: true,
         alreadyGone: false,
@@ -1435,8 +2514,16 @@ function createBoxliteAdapter(options) {
     async listOwned() {
       requireOpen();
       loadState();
-      const activeRuntime = await getRuntime();
-      const infos = await activeRuntime.listInfo();
+      const activeRuntime = await runBounded(() => getRuntime(), undefined, {
+        phase: 'list',
+        code: 'engine_unavailable',
+        details: {},
+      });
+      const infos = await runBounded(() => activeRuntime.listInfo(), undefined, {
+        phase: 'list',
+        code: 'engine_list_failed',
+        details: {},
+      });
       if (!Array.isArray(infos)) {
         fail('engine_runtime_invalid', 'BoxLite listInfo returned an invalid result.');
       }
@@ -1448,6 +2535,9 @@ function createBoxliteAdapter(options) {
       }
       const owned = [];
       for (const record of records.values()) {
+        if (!record.nativeId) {
+          continue;
+        }
         const info = byId.get(record.nativeId);
         if (!info || info.name !== record.name || info.id !== record.nativeId) {
           continue;
@@ -1490,23 +2580,118 @@ function createBoxliteAdapter(options) {
       if (signal && signal.aborted) {
         fail('engine_cancelled', 'Execution was cancelled before it started.');
       }
-      const probe = await ensureProbe();
-      if (tty && !probe.capabilities.includes('pty')) {
-        fail('unsupported_capability', 'BoxLite PTY execution is not available.');
+
+      const deadlineAt = Date.now() + timeoutMs;
+      const ctx = { deadlineAt };
+
+      function ensureActive() {
+        if (signal && signal.aborted) {
+          fail('engine_cancelled', 'Execution was cancelled before it started.');
+        }
+        if (Date.now() >= deadlineAt) {
+          throw deadlineError('preflight', false);
+        }
       }
-      const { box } = await resolveBox(ref);
-      const execution = await box.exec(
-        argv[0],
-        argv.slice(1),
-        null,
-        tty,
-        String(guestUid),
-        Math.ceil(timeoutMs / 1000),
-        workingDir
+
+      ensureActive();
+      const probe = await runBounded(() => ensureProbe(), ctx, {
+        phase: 'preflight',
+        code: 'engine_unavailable',
+        details: {},
+      });
+      if (tty && !probe.capabilities.includes('pty')) {
+        fail('unsupported_capability', 'BoxLite tty command execution is not available.');
+      }
+
+      ensureActive();
+      const resolved = await resolveBox(ref, { ctx, requireConfig: true });
+      ensureActive();
+      let current = resolved.info;
+      assertEffectiveConfig(resolved.record, current);
+
+      if (current.state.running !== true) {
+        await verifyActivation(resolved.record, current, null, { ctx: ctx, running: false, created: false });
+        ensureActive();
+        await runBounded(() => resolved.box.start(), ctx, {
+          phase: 'activation',
+          code: 'engine_start_failed',
+          details: {
+            allocationId: resolved.record.allocationId,
+            nativeId: resolved.record.nativeId,
+          },
+          uncertain: true,
+        });
+        current = await runBounded(() => resolved.box.info(), ctx, {
+          phase: 'activation',
+          code: 'engine_inspect_failed',
+          details: {
+            allocationId: resolved.record.allocationId,
+            nativeId: resolved.record.nativeId,
+          },
+          uncertain: true,
+        });
+        assertInfoIdentity(current, resolved.record);
+        assertEffectiveConfig(resolved.record, current);
+        if (current.state.running !== true) {
+          fail('engine_start_unverified', 'BoxLite box is not running after implicit start.', {
+            allocationId: resolved.record.allocationId,
+            nativeId: resolved.record.nativeId,
+          });
+        }
+      }
+
+      await verifyActivation(resolved.record, current, resolved.box, {
+        ctx,
+        running: true,
+        created: false,
+      });
+      ensureActive();
+
+      let abandoned = false;
+      const dispatchPromise = Promise.resolve().then(() =>
+        resolved.box.exec(
+          argv[0],
+          argv.slice(1),
+          null,
+          tty,
+          String(guestUid),
+          Math.ceil(timeoutMs / 1000),
+          workingDir
+        )
       );
-      assertExecutionShape(execution);
+      const dispatchOutcome = await boundedPromise(
+        dispatchPromise,
+        Math.max(0, deadlineAt - Date.now())
+      );
+      if (dispatchOutcome.status === 'timeout') {
+        abandoned = true;
+        dispatchPromise.then(
+          (handle) => {
+            if (abandoned) {
+              void cleanupLateExecution(handle, execLimits.terminationGraceMs);
+            }
+          },
+          () => {}
+        );
+        throw deadlineError('dispatch', true);
+      }
+      if (dispatchOutcome.status === 'error') {
+        fail('engine_exec_dispatch_failed', 'BoxLite execution dispatch failed.', {
+          allocationId: resolved.record.allocationId,
+          nativeId: resolved.record.nativeId,
+          uncertain: true,
+          dispatched: true,
+        });
+      }
+      const execution = dispatchOutcome.value;
+      try {
+        assertExecutionShape(execution);
+      } catch (error) {
+        await cleanupLateExecution(execution, execLimits.terminationGraceMs);
+        throw error;
+      }
       return collectExecution(execution, {
-        timeoutMs,
+        deadlineAt,
         maxOutputBytes,
         signal,
         terminationGraceMs: execLimits.terminationGraceMs,
@@ -1518,65 +2703,15 @@ function createBoxliteAdapter(options) {
       if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
         fail('invalid_input', 'importBox requires an object.');
       }
-      if (stagingDir === undefined) {
-        fail('staging_unavailable', 'No trusted staging directory is configured.');
-      }
-      ensurePrivateDirectory(stagingDir, 'unsafe_staging', 'Staging directory');
-      const archivePath = assertStagingChild(stagingDir, spec.archivePath, {
-        mustExist: true,
-        label: 'Import archive',
-      });
-      const allocationId = normalizeAllocationId(
-        spec.allocationId === undefined ? crypto.randomUUID() : spec.allocationId
+      // The stock SDK import signature accepts only an archive and a name and
+      // exposes no sanitized create options. Effective network, lifecycle and
+      // resource settings therefore cannot be proved, so archive import is
+      // deliberately withheld. Workspace byte transfer is a separate service.
+      fail(
+        'engine_import_unsupported',
+        'Archive import is unavailable because safe effective settings cannot be proved.',
+        { retryable: false }
       );
-      const launchGeneration = normalizeLaunchGeneration(
-        spec.launchGeneration === undefined ? 1 : spec.launchGeneration
-      );
-      const name = allocationName(allocationId, launchGeneration);
-      await ensureProbe();
-      loadState();
-      const existing = records.get(allocationId);
-      if (existing) {
-        if (existing.launchGeneration !== launchGeneration) {
-          fail('engine_generation_mismatch', 'Launch generation does not match the current launch.', {
-            allocationId,
-            expectedGeneration: existing.launchGeneration,
-            receivedGeneration: launchGeneration,
-          });
-        }
-        fail('engine_already_allocated', 'Allocation is already recorded; destroy it before importing.');
-      }
-      const activeRuntime = await getRuntime();
-      let box;
-      try {
-        box = await activeRuntime.importBox(archivePath, name);
-      } catch (error) {
-        throw new BoxliteEngineError('engine_import_failed', 'BoxLite import failed.', {
-          allocationId,
-          launchGeneration,
-          name,
-          cause: error,
-        });
-      }
-      assertBoxShape(box, name);
-      const record = Object.freeze({
-        allocationId,
-        launchGeneration,
-        name,
-        nativeId: box.id,
-        createdAt: new Date().toISOString(),
-      });
-      const info = await box.info();
-      assertInfoIdentity(info, record);
-      records.set(allocationId, record);
-      saveState();
-      return Object.freeze({
-        allocationId,
-        launchGeneration,
-        name,
-        nativeId: record.nativeId,
-        imported: true,
-      });
     },
 
     async exportBox(ref, spec = {}) {
@@ -1592,8 +2727,12 @@ function createBoxliteAdapter(options) {
         mustExist: false,
         label: 'Export destination',
       });
-      const { box } = await resolveBox(ref);
-      await box.export(destinationPath);
+      const { record, box } = await resolveBox(ref);
+      await runBounded(() => box.export(destinationPath), undefined, {
+        phase: 'export',
+        code: 'engine_export_failed',
+        details: { allocationId: record.allocationId, nativeId: record.nativeId },
+      });
       const stat = lstatOrNull(destinationPath);
       if (!stat || !stat.isFile() || stat.isSymbolicLink()) {
         fail('engine_export_unverified', 'BoxLite export did not produce a regular file.');
@@ -1603,18 +2742,21 @@ function createBoxliteAdapter(options) {
 
     async close() {
       if (closed) {
-        return;
+        return Object.freeze({ closed: true, cleanup: 'ok' });
       }
       closed = true;
+      releaseHome();
       const activeRuntime = runtime;
       runtime = null;
+      let cleanup = 'ok';
       if (activeRuntime && typeof activeRuntime.close === 'function') {
         try {
           activeRuntime.close();
         } catch {
-          // Closing is best effort and must not mask the caller's work.
+          cleanup = 'failed';
         }
       }
+      return Object.freeze({ closed: true, cleanup });
     },
   };
 
