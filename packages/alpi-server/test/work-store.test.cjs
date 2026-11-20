@@ -1184,3 +1184,85 @@ test('a stop request retains quota and native identity until engine removal is o
   assert.equal(restarting.observedState, 'stopped');
   assert.equal(restarting.desiredState, 'running');
 });
+
+test('poll bounds and rows come from the same SQLite snapshot during pruning', t => {
+  const directory = tempDirectory(t, 'poll-snapshot');
+  const reader = openWorkStore(directory, { maxEvents: 2 });
+  const writer = openWorkStore(directory, { maxEvents: 2 });
+  t.after(() => { reader.close(); writer.close(); });
+  reader.db.exec('PRAGMA journal_mode=WAL');
+  const append = () => writer.appendEvent(ALPHA_RUNNER, { type: 'progress' });
+  append(); append();
+  // WAL lets the peer commit after the metadata read and before the rows read.
+  const prepare = reader.db.prepare.bind(reader.db);
+  let committed = false;
+  reader.db.prepare = function(sql) {
+    if (!committed && sql.includes('SELECT * FROM events')) { committed = true; append(); }
+    return prepare(sql);
+  };
+  const old = reader.pollEvents(ALPHA_OBSERVER, { afterSeq: 0 });
+  assert.equal(committed, true);
+  assert.deepEqual(old.events.map(e => e.seq), [1, 2]);
+  assert.equal(old.lastSeq, 2);
+  const current = reader.pollEvents(ALPHA_OBSERVER, { afterSeq: 0 });
+  assert.deepEqual(current.events.map(e => e.seq), [2, 3]);
+  assert.equal(current.gap, true);
+});
+
+test('every dispatch key preserves all JSON object keys through restart', t => {
+  const directory = tempDirectory(t, 'job-key');
+  let store = openWorkStore(directory);
+  t.after(() => store.close());
+  const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'json-box' });
+  const payload = JSON.parse('{"nested":{"__proto__":"original"}}');
+  const input = { requestId: 'key', workspaceId, payload };
+  const first = store.submitJob(ALPHA_RUNNER, input);
+  store.close();
+  store = openWorkStore(directory);
+  assert.deepEqual(store.submitJob(ALPHA_RUNNER, input).payload, payload);
+  assert.equal(store.submitJob(ALPHA_RUNNER, input).jobId, first.jobId);
+  assert.throws(() => store.submitJob(ALPHA_RUNNER, { ...input, payload: { nested: {} } }), assertCode('idempotency_conflict'));
+});
+
+test('store clients get typed retryable database errors and cannot renew retired workspaces', t => {
+  const directory = tempDirectory(t, 'busy-read');
+  const store = openWorkStore(directory);
+  const peer = openWorkStore(directory);
+  t.after(() => { store.close(); peer.close(); });
+  const box = reserve(store, ALPHA_OPERATOR, { requestId: 'box' });
+  const job = store.submitJob(ALPHA_OPERATOR, { requestId: 'job', workspaceId: box.workspaceId });
+  const lease = store.acquireLease(ALPHA_OPERATOR, { workspaceId: box.workspaceId });
+  const ref = { sandboxId: box.sandboxId, generation: box.generation };
+  store.db.exec('PRAGMA busy_timeout=0');
+  peer.db.exec('BEGIN EXCLUSIVE');
+  try {
+    assert.throws(() => store.startSandbox(ALPHA_OPERATOR, ref), assertCode('store_busy'));
+    assert.throws(() => store.pollJobEvents(ALPHA_OPERATOR, { jobId: job.jobId }), assertCode('store_busy'));
+  } finally { peer.db.exec('ROLLBACK'); }
+  store.recordObserved(ALPHA_OPERATOR, { ...ref, observedState: 'removed' });
+  store.discardSandbox(ALPHA_OPERATOR, { sandboxId: box.sandboxId });
+  assert.throws(() => store.renewLease(ALPHA_OPERATOR, lease), assertCode('not_found'));
+});
+
+test('a legacy project journal migrates with explicit gaps and fences historical writer labels', t => {
+  const directory = tempDirectory(t, 'legacy-state');
+  let store = openWorkStore(directory, { maxEvents: 2 });
+  t.after(() => store.close());
+  const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'legacy' });
+  const old = store.acquireLease(ALPHA_RUNNER, { workspaceId, holder: 'label' });
+  const job = store.submitJob(ALPHA_RUNNER, { workspaceId, requestId: 'job' });
+  for (let i = 0; i < 3; i++) store.appendEvent(ALPHA_RUNNER, { type: 'progress', jobId: job.jobId });
+  store.db.exec(`DROP INDEX events_per_job;
+    ALTER TABLE events DROP COLUMN job_seq;
+    ALTER TABLE jobs DROP COLUMN last_event_seq;
+    ALTER TABLE workspace_leases DROP COLUMN holder_client_id;`);
+  store.close();
+  store = openWorkStore(directory, { maxEvents: 2 });
+  const page = store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId });
+  assert.equal(page.gap, true);
+  assert.deepEqual(page.events.map(item => item.seq), [2, 3]);
+  store.appendEvent(ALPHA_RUNNER, { type: 'progress', jobId: job.jobId });
+  assert.equal(store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId, afterSeq: 3 }).nextSeq, 4);
+  assert.throws(() => store.validateLease(ALPHA_RUNNER, old), assertCode('lease_missing'));
+  assert.ok(store.acquireLease(ALPHA_RUNNER, { workspaceId }).epoch > old.epoch);
+});

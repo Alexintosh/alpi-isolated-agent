@@ -127,19 +127,17 @@ function translateError(error) {
   return new WorkStoreError('store_error', 'Work store operation failed.');
 }
 
-function runImmediate(db, operation) {
-  db.exec('BEGIN IMMEDIATE');
+function transact(db, operation, readOnly = false) {
+  try {
+    db.exec(readOnly ? 'BEGIN' : 'BEGIN IMMEDIATE');
+  } catch (error) { throw translateError(error); }
   try {
     const result = operation();
     db.exec('COMMIT');
     return result;
   } catch (error) {
-    try {
-      db.exec('ROLLBACK');
-    } catch {
-      // SQLite may already have rolled the transaction back.
-    }
-    throw error;
+    try { db.exec('ROLLBACK'); } catch { /* SQLite may already have rolled back. */ }
+    throw translateError(error);
   }
 }
 
@@ -284,7 +282,9 @@ function canonicalize(value, depth) {
   }
   if (typeof value === 'object') {
     const keys = Object.keys(value).sort();
-    const result = {};
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== null && prototype !== Object.prototype) invalidInput();
+    const result = Object.create(null);
     for (const key of keys) {
       if (key.length === 0 || key.length > 128) {
         invalidInput();
@@ -465,7 +465,7 @@ function assertPrivateDatabaseFile(stat) {
 }
 
 function initializeSchema(db) {
-  runImmediate(db, () => {
+  transact(db, () => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -934,7 +934,7 @@ class WorkStore {
     const payloadHash = digestOf(canonicalJson(normalized, MAX_JSON_BYTES));
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const existing = this._checkIdempotency(
           principal.project,
           principal.clientId,
@@ -1098,7 +1098,7 @@ class WorkStore {
     const generation = normalizePositiveInteger(body.generation);
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._activeSandbox(principal.project, sandboxId);
         if (!row) {
           notFound();
@@ -1157,7 +1157,7 @@ class WorkStore {
     }
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._activeSandbox(principal.project, sandboxId);
         if (!row) {
           notFound();
@@ -1213,7 +1213,7 @@ class WorkStore {
     const generation = normalizeOptionalPositiveInteger(body.generation);
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._activeSandbox(principal.project, sandboxId);
         if (!row) {
           notFound();
@@ -1250,7 +1250,7 @@ class WorkStore {
     const body = normalizeInputObject(input);
     const id = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
     const generation = normalizePositiveInteger(body.generation);
-    return runImmediate(this.db, () => {
+    return transact(this.db, () => {
       const row = this._activeSandbox(principal.project, id);
       if (!row) notFound();
       if (generation !== row.generation) fail('generation_conflict', 'Sandbox generation is stale.');
@@ -1284,7 +1284,7 @@ class WorkStore {
         : normalizeText(body.digest, MAX_EXPORT_DIGEST_LENGTH);
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._activeSandbox(principal.project, sandboxId);
         if (!row) {
           notFound();
@@ -1335,7 +1335,7 @@ class WorkStore {
     );
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._sandbox(principal.project, sandboxId);
         if (!row) {
           notFound();
@@ -1395,7 +1395,7 @@ class WorkStore {
         : normalizeText(body.reason, MAX_REASON_LENGTH);
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._sandbox(principal.project, sandboxId);
         if (!row) {
           notFound();
@@ -1497,7 +1497,7 @@ class WorkStore {
     );
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const existing = this._checkIdempotency(
           principal.project,
           principal.clientId,
@@ -1629,7 +1629,7 @@ class WorkStore {
         : canonicalJson(body.detail, MAX_DETAIL_BYTES);
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._job(principal.project, jobId);
         if (!row) {
           notFound();
@@ -1690,7 +1690,7 @@ class WorkStore {
     );
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         if (sandboxId !== null && !this._activeSandbox(
           principal.project,
           sandboxId
@@ -1802,7 +1802,7 @@ class WorkStore {
       invalidInput();
     }
 
-    try {
+    return transact(this.db, () => {
       const meta = this.db
         .prepare(
           'SELECT first_seq, last_seq FROM event_meta WHERE project = ?'
@@ -1811,11 +1811,11 @@ class WorkStore {
       if (!meta) {
         return {
           events: [],
-          nextSeq: afterSeq,
+          nextSeq: 0,
           firstSeq: 1,
           lastSeq: 0,
           gap: false,
-          reset: false,
+          reset: afterSeq > 0,
         };
       }
 
@@ -1853,9 +1853,7 @@ class WorkStore {
         gap,
         reset,
       };
-    } catch (error) {
-      throw translateError(error);
-    }
+    }, true);
   }
 
   pollJobEvents(principalInput, input) {
@@ -1866,7 +1864,7 @@ class WorkStore {
     const after = body.afterSeq ?? 0;
     const limit = body.limit ?? Math.min(DEFAULT_POLL_LIMIT, this._maxEvents);
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > this._maxEvents) invalidInput();
-    return runImmediate(this.db, () => {
+    return transact(this.db, () => {
       const job = this._job(principal.project, jobId);
       if (!job) notFound();
       const lastSeq = job.last_event_seq;
@@ -1879,7 +1877,7 @@ class WorkStore {
       ).all(jobId, from, limit);
       const events = rows.map(row => ({ ...eventReceipt(row), seq: row.job_seq }));
       return { events, firstSeq, lastSeq, nextSeq: events.at(-1)?.seq ?? lastSeq, reset, gap };
-    });
+    }, true);
   }
 
   /**
@@ -1913,7 +1911,7 @@ class WorkStore {
     }
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         if (!this._workspace(principal.project, workspaceId)) {
           notFound();
         }
@@ -2038,7 +2036,8 @@ class WorkStore {
     }
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
+        if (!this._workspace(principal.project, workspaceId)) notFound();
         const row = this._lease(principal.project, workspaceId);
         if (!row || row.holder === null) {
           fail('lease_missing', 'Workspace lease is missing.');
@@ -2085,7 +2084,7 @@ class WorkStore {
     const epoch = normalizePositiveInteger(body.epoch);
 
     try {
-      return runImmediate(this.db, () => {
+      return transact(this.db, () => {
         const row = this._lease(principal.project, workspaceId);
         if (!row) {
           fail('lease_missing', 'Workspace lease is missing.');
