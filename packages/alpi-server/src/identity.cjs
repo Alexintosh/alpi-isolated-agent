@@ -5,6 +5,14 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const {
+  ProcessLockError,
+  acquireProcessGuard,
+  claimLegacyMetadata,
+  sleepSync,
+  unlinkOwnLegacyOwner,
+} = require('./process-lock.cjs');
+
 const TLS_DIRECTORY = 'tls';
 const CERT_FILE = 'cert.pem';
 const KEY_FILE = 'key.pem';
@@ -162,133 +170,50 @@ function identityPaths(stateDir) {
   };
 }
 
-function sleepSync(milliseconds) {
-  Atomics.wait(
-    new Int32Array(new SharedArrayBuffer(4)),
-    0,
-    0,
-    milliseconds
-  );
-}
-
-function readLockOwner(lockPath) {
-  try {
-    const raw = fs.readFileSync(lockPath, 'utf8');
-    const lines = raw.split('\n');
-    if ((lines[0] || '').trim() !== LOCK_MAGIC) {
-      return null;
-    }
-    const pidText = (lines[1] || '').trim();
-    if (!/^\d+$/.test(pidText)) {
-      return null;
-    }
-    const pid = Number(pidText);
-    if (!Number.isSafeInteger(pid) || pid <= 0) {
-      return null;
-    }
-    return { pid };
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      return { missing: true };
-    }
-    throw error;
-  }
-}
-
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return Boolean(error && error.code === 'EPERM');
-  }
-}
-
-function acquireIdentityLock(lockPath) {
+/**
+ * Serialize identity publication with an OS-released SQLite guard and, while
+ * that guard is held, claim the legacy advisory metadata file. A competing
+ * process (including an older version that only knows the metadata file) is
+ * observed before any cleanup; nothing is removed while its owner is alive.
+ */
+function acquireIdentityOwnership(lockPath) {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
 
   for (;;) {
-    let descriptor = null;
+    const remaining = Math.max(1, deadline - Date.now());
+    let guard;
     try {
-      descriptor = fs.openSync(lockPath, 'wx', 0o600);
-      fs.writeFileSync(
-        descriptor,
-        `${LOCK_MAGIC}\n${process.pid}\n${Date.now()}\n`,
-        'utf8'
-      );
-      fs.fsyncSync(descriptor);
-      fs.closeSync(descriptor);
-      return;
+      guard = acquireProcessGuard(lockPath, {
+        timeoutMs: remaining,
+        pollMs: LOCK_POLL_MS,
+      });
     } catch (error) {
-      if (descriptor !== null) {
-        try {
-          fs.closeSync(descriptor);
-        } catch {
-          // Ignore close failures while reporting the acquisition error.
-        }
-      }
-      if (!error || error.code !== 'EEXIST') {
-        fail('identity_unavailable', 'TLS identity is unavailable.');
-      }
-    }
-
-    const owner = readLockOwner(lockPath);
-    if (owner && owner.missing) {
-      continue;
-    }
-
-    // An empty or unreadable lock file is treated as an in-progress owner.
-    // If it remains unreadable for longer than a generation could plausibly
-    // take, recover it instead of blocking forever.
-    if (!owner) {
-      const lockStat = lstatOrNull(lockPath);
-      const age = lockStat ? Date.now() - lockStat.mtimeMs : Infinity;
-      if (age > LOCK_STALE_MS) {
-        try {
-          fs.unlinkSync(lockPath);
-        } catch (error) {
-          if (!error || error.code !== 'ENOENT') {
-            fail('identity_unavailable', 'TLS identity is unavailable.');
-          }
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) {
+      if (error instanceof ProcessLockError && error.code === 'lock_busy') {
         fail('identity_busy', 'TLS identity is busy.');
       }
-      sleepSync(LOCK_POLL_MS);
-      continue;
+      fail('identity_unavailable', 'TLS identity is unavailable.');
     }
 
-    if (!processIsAlive(owner.pid)) {
-      try {
-        fs.unlinkSync(lockPath);
-      } catch (error) {
-        if (!error || error.code !== 'ENOENT') {
-          fail('identity_unavailable', 'TLS identity is unavailable.');
-        }
+    let claimed;
+    try {
+      claimed = claimLegacyMetadata(lockPath, LOCK_MAGIC, LOCK_STALE_MS);
+    } catch (error) {
+      guard.release();
+      if (error instanceof ProcessLockError) {
+        fail('identity_unavailable', 'TLS identity is unavailable.');
       }
-      continue;
+      throw error;
     }
 
+    if (claimed) {
+      return guard;
+    }
+
+    guard.release();
     if (Date.now() >= deadline) {
       fail('identity_busy', 'TLS identity is busy.');
     }
     sleepSync(LOCK_POLL_MS);
-  }
-}
-
-function releaseIdentityLock(lockPath) {
-  const owner = readLockOwner(lockPath);
-  if (!owner || owner.missing || owner.pid !== process.pid) {
-    return;
-  }
-  try {
-    fs.unlinkSync(lockPath);
-  } catch (error) {
-    if (!error || error.code !== 'ENOENT') {
-      throw error;
-    }
   }
 }
 
@@ -551,7 +476,7 @@ function ensureIdentity(stateDir) {
     const paths = identityPaths(resolvedDir);
     ensurePrivateSubdirectory(resolvedDir, TLS_DIRECTORY);
 
-    acquireIdentityLock(paths.lockPath);
+    const guard = acquireIdentityOwnership(paths.lockPath);
     try {
       const existing = loadExistingIdentity(paths);
       const identity = existing || generateIdentity(paths);
@@ -564,7 +489,11 @@ function ensureIdentity(stateDir) {
         fingerprint: identity.fingerprint,
       };
     } finally {
-      releaseIdentityLock(paths.lockPath);
+      try {
+        unlinkOwnLegacyOwner(paths.lockPath, LOCK_MAGIC);
+      } finally {
+        guard.release();
+      }
     }
   } catch (error) {
     if (error instanceof IdentityError) {

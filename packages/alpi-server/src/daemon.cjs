@@ -11,6 +11,16 @@ const {
   PairingStoreError,
 } = require('./pairing-store.cjs');
 const { ensureIdentity, IdentityError } = require('./identity.cjs');
+const {
+  ProcessLockError,
+  acquireProcessGuard,
+  lstatOrNull,
+  processIsAlive,
+  readLegacyOwner,
+  unlinkLegacyOwner,
+  unlinkOwnLegacyOwner,
+  writeLegacyOwner,
+} = require('./process-lock.cjs');
 
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
 const DEFAULT_PORT = 7443;
@@ -26,6 +36,7 @@ const MAX_HEADER_BYTES = 16 * 1024;
 const ADMIN_SOCKET_NAME = 'admin.sock';
 const ADMIN_LOCK_NAME = 'admin.sock.lock';
 const ADMIN_LOCK_MAGIC = 'alpi-admin-v1';
+const ADMIN_LOCK_STALE_MS = 10_000;
 
 const DEFAULT_LIMITS = Object.freeze({
   windowMs: 60_000,
@@ -70,26 +81,6 @@ function currentUid() {
     return process.getuid();
   }
   return null;
-}
-
-function lstatOrNull(target) {
-  try {
-    return fs.lstatSync(target);
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
-function sleepSync(milliseconds) {
-  Atomics.wait(
-    new Int32Array(new SharedArrayBuffer(4)),
-    0,
-    0,
-    milliseconds
-  );
 }
 
 function normalizeStateDir(value) {
@@ -902,176 +893,109 @@ function probeUnixSocket(socketPath, timeoutMs = 500) {
   });
 }
 
-function readAdminLockOwner(lockPath) {
+/**
+ * Confirm that an existing administration socket is dead, then remove exactly
+ * the socket instance that was probed. The SQLite guard is held by the caller,
+ * so a competing startup cannot bind a replacement between the probe and the
+ * unlink.
+ */
+async function reclaimStaleAdminSocket(socketPath) {
+  const before = lstatOrNull(socketPath);
+  if (!before) {
+    return;
+  }
+  if (!before.isSocket()) {
+    fail(
+      'admin_socket_unavailable',
+      'Admin socket path is occupied by another file.'
+    );
+  }
+  const probe = await probeUnixSocket(socketPath);
+  if (probe !== 'stale') {
+    fail('admin_socket_busy', 'Admin socket is busy.');
+  }
+  const after = lstatOrNull(socketPath);
+  if (!after) {
+    return;
+  }
+  if (!after.isSocket()) {
+    fail(
+      'admin_socket_unavailable',
+      'Admin socket path is occupied by another file.'
+    );
+  }
+  if (after.dev !== before.dev || after.ino !== before.ino) {
+    fail('admin_socket_busy', 'Admin socket is busy.');
+  }
   try {
-    const raw = fs.readFileSync(lockPath, 'utf8');
-    const lines = raw.split('\n');
-    if ((lines[0] || '').trim() !== ADMIN_LOCK_MAGIC) {
-      return null;
-    }
-    const pidText = (lines[1] || '').trim();
-    if (!/^\d+$/.test(pidText)) {
-      return null;
-    }
-    const pid = Number(pidText);
-    if (!Number.isSafeInteger(pid) || pid <= 0) {
-      return null;
-    }
-    return { pid };
+    fs.unlinkSync(socketPath);
   } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      return { missing: true };
+    if (!error || error.code !== 'ENOENT') {
+      fail('admin_socket_unavailable', 'Admin socket is unavailable.');
     }
+  }
+}
+
+/**
+ * Acquire the lifetime administration guard. The SQLite guard is held until
+ * the server has closed both listeners, so stale metadata/socket cleanup and
+ * normal acquisition cannot interleave. Live legacy owners are observed and
+ * refused; their socket and metadata are never removed.
+ */
+async function acquireAdminOwnership(socketPath, lockPath) {
+  let guard;
+  try {
+    guard = acquireProcessGuard(lockPath, { failFast: true, timeoutMs: 0 });
+  } catch (error) {
+    if (error instanceof ProcessLockError && error.code === 'lock_busy') {
+      fail('admin_socket_busy', 'Admin socket is busy.');
+    }
+    fail('admin_socket_unavailable', 'Admin socket is unavailable.');
+  }
+
+  try {
+    const owner = readLegacyOwner(lockPath, ADMIN_LOCK_MAGIC);
+    if (!owner.missing) {
+      if (owner.malformed) {
+        if (owner.ageMs <= ADMIN_LOCK_STALE_MS) {
+          // A legacy owner may still be writing its metadata. Never remove it
+          // while it could be live.
+          fail('admin_socket_busy', 'Admin socket is busy.');
+        }
+      } else if (processIsAlive(owner.pid)) {
+        fail('admin_socket_busy', 'Admin socket is busy.');
+      }
+      // The recorded owner is gone (or its metadata is old and unreadable).
+      // Under the guard, confirm the socket is dead before removing either
+      // resource.
+      await reclaimStaleAdminSocket(socketPath);
+      unlinkLegacyOwner(lockPath);
+    }
+
+    // A socket can outlive its metadata, for example when a legacy process was
+    // killed between binding and recording ownership.
+    await reclaimStaleAdminSocket(socketPath);
+
+    if (!writeLegacyOwner(lockPath, ADMIN_LOCK_MAGIC)) {
+      fail('admin_socket_busy', 'Admin socket is busy.');
+    }
+    return guard;
+  } catch (error) {
+    guard.release();
     throw error;
   }
 }
 
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return Boolean(error && error.code === 'EPERM');
-  }
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-async function acquireAdminLock(socketPath, lockPath) {
-  const deadline = Date.now() + 10_000;
-
-  for (;;) {
-    let descriptor = null;
-    try {
-      descriptor = fs.openSync(lockPath, 'wx', 0o600);
-      fs.writeFileSync(
-        descriptor,
-        `${ADMIN_LOCK_MAGIC}\n${process.pid}\n${Date.now()}\n`,
-        'utf8'
-      );
-      fs.fsyncSync(descriptor);
-      fs.closeSync(descriptor);
-      return { lockPath, pid: process.pid };
-    } catch (error) {
-      if (descriptor !== null) {
-        try {
-          fs.closeSync(descriptor);
-        } catch {
-          // Ignore close failures while reporting the acquisition error.
-        }
-      }
-      if (!error || error.code !== 'EEXIST') {
-        fail('admin_socket_unavailable', 'Admin socket is unavailable.');
-      }
-    }
-
-    const owner = readAdminLockOwner(lockPath);
-    if (owner && owner.missing) {
-      continue;
-    }
-    if (!owner) {
-      // An empty or unreadable lock file may be a lock being written by
-      // another process. Wait briefly, then recover it if it is old and no
-      // live socket owns the path.
-      const lockStat = lstatOrNull(lockPath);
-      const age = lockStat ? Date.now() - lockStat.mtimeMs : Infinity;
-      if (age > 10_000) {
-        const probe = await probeUnixSocket(socketPath);
-        if (probe !== 'stale') {
-          fail('admin_socket_busy', 'Admin socket is busy.');
-        }
-        const socketStat = lstatOrNull(socketPath);
-        if (socketStat) {
-          if (!socketStat.isSocket()) {
-            fail(
-              'admin_socket_unavailable',
-              'Admin socket path is occupied by another file.'
-            );
-          }
-          try {
-            fs.unlinkSync(socketPath);
-          } catch (error) {
-            if (!error || error.code !== 'ENOENT') {
-              fail('admin_socket_unavailable', 'Admin socket is unavailable.');
-            }
-          }
-        }
-        try {
-          fs.unlinkSync(lockPath);
-        } catch (error) {
-          if (!error || error.code !== 'ENOENT') {
-            fail('admin_socket_unavailable', 'Admin socket is unavailable.');
-          }
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        fail('admin_socket_busy', 'Admin socket is busy.');
-      }
-      await delay(50);
-      continue;
-    }
-    if (processIsAlive(owner.pid)) {
-      fail('admin_socket_busy', 'Admin socket is busy.');
-    }
-
-    // The recorded owner is gone. Never remove a socket that still accepts
-    // connections; only replace a confirmed stale socket.
-    const probe = await probeUnixSocket(socketPath);
-    if (probe !== 'stale') {
-      fail('admin_socket_busy', 'Admin socket is busy.');
-    }
-
-    const socketStat = lstatOrNull(socketPath);
-    if (socketStat) {
-      if (!socketStat.isSocket()) {
-        fail(
-          'admin_socket_unavailable',
-          'Admin socket path is occupied by another file.'
-        );
-      }
-      try {
-        fs.unlinkSync(socketPath);
-      } catch (error) {
-        if (!error || error.code !== 'ENOENT') {
-          fail('admin_socket_unavailable', 'Admin socket is unavailable.');
-        }
-      }
-    }
-
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (error) {
-      if (!error || error.code !== 'ENOENT') {
-        fail('admin_socket_unavailable', 'Admin socket is unavailable.');
-      }
-    }
-
-    if (Date.now() >= deadline) {
-      fail('admin_socket_busy', 'Admin socket is busy.');
-    }
-  }
-}
-
-function releaseAdminLock(lockRecord) {
+function releaseAdminOwnership(lockRecord) {
   if (!lockRecord) {
     return;
   }
-  const owner = readAdminLockOwner(lockRecord.lockPath);
-  if (!owner || owner.missing || owner.pid !== lockRecord.pid) {
-    return;
-  }
   try {
-    fs.unlinkSync(lockRecord.lockPath);
-  } catch (error) {
-    if (!error || error.code !== 'ENOENT') {
-      // Best-effort cleanup; the lock is process-scoped and stale locks are
-      // reclaimed after verifying the recorded owner is gone.
-    }
+    unlinkOwnLegacyOwner(lockRecord.lockPath, ADMIN_LOCK_MAGIC);
+  } catch {
+    // Best-effort metadata cleanup; the guard still protects the socket.
+  } finally {
+    lockRecord.release();
   }
 }
 
@@ -1112,31 +1036,142 @@ function unlinkOwnedAdminSocket(record) {
   }
 }
 
-function closeHttpServer(server) {
+function waitForSocketClosed(socket, timeoutMs = 2000) {
+  if (!socket || socket.destroyed) {
+    return Promise.resolve();
+  }
   return new Promise((resolve) => {
-    if (!server || !server.listening) {
-      resolve();
-      return;
-    }
     let settled = false;
-    const done = () => {
+    const finish = () => {
       if (settled) {
         return;
       }
       settled = true;
+      clearTimeout(timer);
       resolve();
     };
-    try {
-      server.close(() => done());
+    const timer = setTimeout(() => {
+      // destroy() makes the transport unusable; the close event may still be
+      // pending on a platform-specific path.
+      try {
+        socket.destroy();
+      } catch {
+        // Ignore teardown failures while completing shutdown.
+      }
+      finish();
+    }, timeoutMs);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    socket.once('close', finish);
+  });
+}
+
+/**
+ * Own every accepted transport socket, including connections that have not
+ * completed TLS negotiation and therefore never reached the HTTP parser.
+ * closeAllConnections() alone does not see those pre-HTTP sockets.
+ */
+function createSocketTracker() {
+  const sockets = new Set();
+  const track = (socket) => {
+    if (!socket) {
+      return;
+    }
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  };
+  return {
+    attach(server) {
+      server.on('connection', track);
+      server.on('secureConnection', track);
+      server.on('request', (req) => track(req.socket));
+      server.on('clientError', (error, socket) => track(socket));
+      server.on('tlsClientError', (error, socket) => track(socket));
+      return server;
+    },
+    snapshot() {
+      return [...sockets];
+    },
+  };
+}
+
+function closeHttpServer(server, tracker) {
+  return new Promise((resolve) => {
+    if (!server) {
+      resolve();
+      return;
+    }
+    const sockets = tracker ? tracker.snapshot() : [];
+    let finished = false;
+    let timer = null;
+
+    const finish = () => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      resolve();
+    };
+
+    const destroySockets = () => {
+      for (const socket of sockets) {
+        try {
+          socket.destroy();
+        } catch {
+          // Ignore teardown failures; the socket is unusable either way.
+        }
+      }
       if (typeof server.closeAllConnections === 'function') {
-        server.closeAllConnections();
+        try {
+          server.closeAllConnections();
+        } catch {
+          // Ignore teardown failures.
+        }
       }
-      const timer = setTimeout(done, 5000);
-      if (typeof timer.unref === 'function') {
-        timer.unref();
-      }
+    };
+
+    const socketsClosed = Promise.all(
+      sockets.map((socket) => waitForSocketClosed(socket))
+    );
+    const complete = () => {
+      socketsClosed.then(finish, finish);
+    };
+
+    if (!server.listening) {
+      destroySockets();
+      complete();
+      return;
+    }
+
+    server.once('close', () => {
+      destroySockets();
+      complete();
+    });
+    try {
+      server.close(() => {
+        // The close callback fires once the listener is shut and all tracked
+        // connections have ended.
+      });
     } catch {
-      done();
+      destroySockets();
+      complete();
+      return;
+    }
+
+    destroySockets();
+    // Safety net: destroy() has already made every transport unusable, so if
+    // the listener's close event is delayed, report completion only after all
+    // tracked sockets are confirmed closed.
+    timer = setTimeout(() => {
+      destroySockets();
+      complete();
+    }, 5000);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
     }
   });
 }
@@ -1184,6 +1219,7 @@ async function startServer(options) {
   let shuttingDown = false;
   let closeChain = Promise.resolve();
   let signalTimer = null;
+  const socketTracker = createSocketTracker();
 
   const signalHandler = () => {
     if (shuttingDown) {
@@ -1212,22 +1248,36 @@ async function startServer(options) {
 
   const close = () => {
     closeChain = closeChain.then(async () => {
-      removeSignalHandlers();
-      await closeHttpServer(httpsServer);
-      httpsServer = null;
-      await closeHttpServer(adminServer);
-      adminServer = null;
-      unlinkOwnedAdminSocket(socketRecord);
-      socketRecord = null;
-      releaseAdminLock(lockRecord);
-      lockRecord = null;
-      if (store) {
-        try {
-          store.close();
-        } catch {
-          // Ignore store close failures during shutdown.
+      try {
+        const httpsToClose = httpsServer;
+        const adminToClose = adminServer;
+        httpsServer = null;
+        adminServer = null;
+
+        // Close both listeners together, destroying every tracked transport
+        // (including pre-HTTP TLS sockets) before the administration lock and
+        // the store are relinquished.
+        await Promise.all([
+          closeHttpServer(httpsToClose, socketTracker),
+          closeHttpServer(adminToClose, socketTracker),
+        ]);
+
+        unlinkOwnedAdminSocket(socketRecord);
+        socketRecord = null;
+        releaseAdminOwnership(lockRecord);
+        lockRecord = null;
+        if (store) {
+          try {
+            store.close();
+          } catch {
+            // Ignore store close failures during shutdown.
+          }
+          store = null;
         }
-        store = null;
+      } finally {
+        // Keep a signal-triggered force-exit deadline until both listeners and
+        // every owned socket are actually closed.
+        removeSignalHandlers();
       }
     });
     return closeChain;
@@ -1246,31 +1296,10 @@ async function startServer(options) {
       throw new DaemonError('shutting_down', 'Server is shutting down.');
     }
 
-    lockRecord = await acquireAdminLock(adminSocketPath, adminLockPath);
+    lockRecord = await acquireAdminOwnership(adminSocketPath, adminLockPath);
 
     if (shuttingDown) {
       throw new DaemonError('shutting_down', 'Server is shutting down.');
-    }
-
-    const existingSocket = lstatOrNull(adminSocketPath);
-    if (existingSocket) {
-      if (!existingSocket.isSocket()) {
-        fail(
-          'admin_socket_unavailable',
-          'Admin socket path is occupied by another file.'
-        );
-      }
-      const probe = await probeUnixSocket(adminSocketPath);
-      if (probe !== 'stale') {
-        fail('admin_socket_busy', 'Admin socket is busy.');
-      }
-      try {
-        fs.unlinkSync(adminSocketPath);
-      } catch (error) {
-        if (!error || error.code !== 'ENOENT') {
-          fail('admin_socket_unavailable', 'Admin socket is unavailable.');
-        }
-      }
     }
 
     const serverId = store.serverId;
@@ -1292,6 +1321,7 @@ async function startServer(options) {
     adminServer.requestTimeout = REQUEST_TIMEOUT_MS;
     adminServer.headersTimeout = REQUEST_TIMEOUT_MS;
     attachSocketGuards(adminServer);
+    socketTracker.attach(adminServer);
 
     try {
       await listenHttpServer(adminServer, { path: adminSocketPath });
@@ -1322,6 +1352,7 @@ async function startServer(options) {
     httpsServer.headersTimeout = REQUEST_TIMEOUT_MS;
     httpsServer.keepAliveTimeout = 5000;
     attachSocketGuards(httpsServer);
+    socketTracker.attach(httpsServer);
 
     try {
       await listenHttpServer(httpsServer, {

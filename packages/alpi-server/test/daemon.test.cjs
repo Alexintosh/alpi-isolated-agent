@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const https = require('node:https');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
@@ -18,23 +19,20 @@ const {
 } = require('../src/admin-client.cjs');
 
 const SOURCE_IDENTITY = path.resolve(__dirname, '../src/identity.cjs');
+const SOURCE_DAEMON = path.resolve(__dirname, '../src/daemon.cjs');
 const BIN = path.resolve(__dirname, '../bin/alpi-server.cjs');
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INVITE_TTL_MS = 5 * 60 * 1000;
 
-function tempDirectory(t, label) {
-  // Keep the path short so the Unix administration socket stays within the
-  // portable path limit on macOS.
-  const directory = fs.mkdtempSync(
-    path.join(os.tmpdir(), `alpi-daemon-${label}-`)
-  );
-  fs.chmodSync(directory, 0o700);
-  t.after(() => {
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-  return directory;
+function tempDirectory(t) {
+  // Linux /tmp is shared. Give the state directory a trusted private parent.
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'alpi-d-'));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const state = path.join(parent, 's');
+  fs.mkdirSync(state, { mode: 0o700 });
+  return state;
 }
 
 function startTestServer(t, options) {
@@ -90,11 +88,17 @@ function requestHttps(origin, options = {}) {
         });
         response.on('end', () => {
           const body = Buffer.concat(chunks).toString('utf8');
+          const peer =
+            response.socket &&
+            typeof response.socket.getPeerCertificate === 'function'
+              ? response.socket.getPeerCertificate()
+              : null;
           resolve({
             status: response.statusCode,
             headers: response.headers,
             body,
             json: parseJson(body),
+            peerFingerprint: peer ? peer.fingerprint256 : undefined,
           });
         });
         response.on('error', reject);
@@ -237,6 +241,93 @@ function runNode(workerCode, args) {
     });
     child.on('error', () => resolve({ code: -1, stdout }));
     child.on('close', (code) => resolve({ code, stdout }));
+  });
+}
+
+function spawnWorker(workerCode, args) {
+  const child = spawn(process.execPath, ['-e', workerCode, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  });
+  const state = {
+    child,
+    stdout: '',
+    stderr: '',
+  };
+  child.stdout.on('data', (chunk) => {
+    state.stdout += chunk.toString('utf8');
+  });
+  child.stderr.on('data', (chunk) => {
+    state.stderr += chunk.toString('utf8');
+  });
+  return state;
+}
+
+function waitForWorkerOutput(state, predicate, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (handler, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      state.child.stdout.removeListener('data', onData);
+      handler(value);
+    };
+    const check = () => {
+      const line = state.stdout
+        .split('\n')
+        .find((entry) => predicate(entry));
+      if (line !== undefined) {
+        finish(resolve, line);
+      }
+    };
+    const onData = () => check();
+    const timer = setTimeout(() => {
+      finish(
+        reject,
+        new Error(
+          `timed out waiting for worker output; stdout=${state.stdout} stderr=${state.stderr}`
+        )
+      );
+    }, timeoutMs);
+    state.child.stdout.on('data', onData);
+    check();
+  });
+}
+
+function connectTcp(port, host = '127.0.0.1') {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ port, host });
+    const onError = (error) => {
+      socket.removeListener('connect', onConnect);
+      reject(error);
+    };
+    const onConnect = () => {
+      socket.removeListener('error', onError);
+      socket.on('error', () => {
+        // A peer reset is expected during shutdown; the close event follows.
+      });
+      resolve(socket);
+    };
+    socket.once('error', onError);
+    socket.once('connect', onConnect);
+  });
+}
+
+function waitForClientClose(socket, timeoutMs = 5000) {
+  if (socket.destroyed) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('client socket did not close'));
+    }, timeoutMs);
+    socket.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
 }
 
@@ -1163,4 +1254,217 @@ test('pair issue fails safely when the administration socket is absent', async (
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /Administration socket is unavailable/);
   assert.equal(/invitation/i.test(result.stderr), false);
+});
+
+test('simultaneous stale administration recovery leaves one live owner and endpoint', async (t) => {
+  const directory = tempDirectory(t, 'stale-recovery');
+  const socketPath = path.join(directory, 'admin.sock');
+
+  // Leave a socket bound by a process that died without unlinking it, plus a
+  // legacy metadata file naming that same dead owner.
+  const socketWorker = `
+const net = require('node:net');
+const server = net.createServer();
+server.listen(process.argv[1], () => {
+  process.stdout.write('ready', () => {
+    process.kill(process.pid, 'SIGKILL');
+  });
+});
+`;
+  const socketResult = await runNode(socketWorker, [socketPath]);
+  assert.equal(socketResult.stdout, 'ready');
+  assert.equal(fs.existsSync(socketPath), true);
+
+  const deadChild = spawn(process.execPath, ['-e', ''], {
+    stdio: 'ignore',
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  });
+  const deadExit = await waitForExit(deadChild);
+  assert.equal(deadExit.code, 0);
+  fs.writeFileSync(
+    path.join(directory, 'admin.sock.lock'),
+    `${ADMIN_LOCK_MAGIC}\n${deadChild.pid}\n${Date.now()}\n`,
+    { mode: 0o600 }
+  );
+
+  const worker = `
+const { startServer } = require(${JSON.stringify(SOURCE_DAEMON)});
+startServer({ stateDir: process.argv[1], port: 0 })
+  .then((server) => {
+    process.stdout.write('READY ' + JSON.stringify({
+      origin: server.origin,
+      serverId: server.serverId,
+      fingerprint: server.fingerprint,
+    }) + '\\n');
+  })
+  .catch((error) => {
+    process.stdout.write('ERROR ' + (error && error.code) + '\\n');
+  });
+`;
+  const first = spawnWorker(worker, [directory]);
+  const second = spawnWorker(worker, [directory]);
+  t.after(() => {
+    for (const state of [first, second]) {
+      if (state.child.exitCode === null) {
+        state.child.kill('SIGKILL');
+      }
+    }
+  });
+
+  const isResult = (line) =>
+    line.startsWith('READY ') || line.startsWith('ERROR ');
+  const lines = await Promise.all([
+    waitForWorkerOutput(first, isResult),
+    waitForWorkerOutput(second, isResult),
+  ]);
+  const ready = lines.filter((line) => line.startsWith('READY '));
+  const errors = lines.filter((line) => line.startsWith('ERROR '));
+  assert.equal(ready.length, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0], 'ERROR admin_socket_busy');
+
+  const info = JSON.parse(ready[0].slice('READY '.length));
+  const certPem = fs.readFileSync(
+    path.join(directory, 'tls', 'cert.pem'),
+    'utf8'
+  );
+  const persisted = new crypto.X509Certificate(certPem);
+  assert.equal(info.fingerprint, persisted.fingerprint256);
+
+  const identity = await requestHttps(info.origin, { path: '/v1/identity' });
+  assert.equal(identity.status, 200);
+  assert.equal(identity.json.serverId, info.serverId);
+  assert.equal(identity.peerFingerprint, persisted.fingerprint256);
+
+  const envelope = await issuePairing({
+    stateDir: directory,
+    project: 'recovered',
+    role: 'observer',
+  });
+  assertToken(envelope.invitation);
+  assert.equal(envelope.serverId, info.serverId);
+  assert.equal(fs.existsSync(socketPath), true);
+
+  const winner = first.stdout.includes('READY ') ? first : second;
+  winner.child.kill('SIGTERM');
+  const exit = await waitForExit(winner.child);
+  assert.equal(exit.code, 0);
+  assert.equal(fs.existsSync(socketPath), false);
+  assert.equal(fs.existsSync(path.join(directory, 'admin.sock.lock')), false);
+  // The OS-released guard database is persistent and never deleted.
+  assert.equal(
+    fs.existsSync(path.join(directory, 'admin.sock.lock.sqlite')),
+    true
+  );
+});
+
+test('simultaneous stale identity recovery publishes one certificate', async (t) => {
+  const directory = tempDirectory(t, 'stale-identity-recovery');
+  const deadChild = spawn(process.execPath, ['-e', ''], {
+    stdio: 'ignore',
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  });
+  const deadExit = await waitForExit(deadChild);
+  assert.equal(deadExit.code, 0);
+  fs.writeFileSync(
+    path.join(directory, 'identity.lock'),
+    `alpi-identity-v1\n${deadChild.pid}\n${Date.now()}\n`,
+    { mode: 0o600 }
+  );
+
+  const worker = `
+const { ensureIdentity } = require(${JSON.stringify(SOURCE_IDENTITY)});
+try {
+  const identity = ensureIdentity(process.argv[1]);
+  process.stdout.write(identity.fingerprint);
+} catch (error) {
+  process.stdout.write('ERROR:' + (error && error.code));
+  process.exitCode = 1;
+}
+`;
+  const results = await Promise.all(
+    Array.from({ length: 4 }, () => runNode(worker, [directory]))
+  );
+  const fingerprints = results.map((result) => {
+    assert.equal(result.code, 0);
+    assert.ok(!result.stdout.startsWith('ERROR:'));
+    return result.stdout;
+  });
+  assert.equal(new Set(fingerprints).size, 1);
+
+  const certPem = fs.readFileSync(
+    path.join(directory, 'tls', 'cert.pem'),
+    'utf8'
+  );
+  assert.equal(
+    new crypto.X509Certificate(certPem).fingerprint256,
+    fingerprints[0]
+  );
+  assert.equal(fs.existsSync(path.join(directory, 'identity.lock')), false);
+  assert.equal(
+    fs.existsSync(path.join(directory, 'identity.lock.sqlite')),
+    true
+  );
+});
+
+test('close destroys a pre-handshake TLS connection and both listeners', async (t) => {
+  const directory = tempDirectory(t, 'pre-tls-shutdown');
+  const server = await startServer({
+    stateDir: directory,
+    port: 0,
+    handleSignals: false,
+  });
+  t.after(async () => {
+    await server.close().catch(() => {});
+  });
+
+  const sockets = await Promise.all([
+    connectTcp(server.port),
+    connectTcp(server.port),
+  ]);
+  const started = Date.now();
+  await server.close();
+  const elapsed = Date.now() - started;
+
+  await Promise.all(sockets.map((socket) => waitForClientClose(socket)));
+  for (const socket of sockets) {
+    assert.equal(socket.destroyed, true);
+  }
+  assert.ok(elapsed < 3000, `close took ${elapsed}ms`);
+  assert.equal(fs.existsSync(path.join(directory, 'admin.sock')), false);
+  assert.equal(fs.existsSync(path.join(directory, 'admin.sock.lock')), false);
+
+  await assert.rejects(connectTcp(server.port), (error) => {
+    return error.code === 'ECONNREFUSED';
+  });
+  await assert.rejects(
+    issuePairing({ stateDir: directory, project: 'gone', role: 'observer' })
+  );
+});
+
+test('SIGTERM shutdown with a pre-handshake TLS connection stays bounded', async (t) => {
+  const directory = tempDirectory(t, 'signal-pre-tls');
+  const serve = spawnCli(['serve', '--state-dir', directory, '--port', '0']);
+  t.after(() => {
+    if (serve.child.exitCode === null) {
+      serve.child.kill('SIGKILL');
+    }
+  });
+
+  const origin = await waitForListening(serve);
+  const port = Number(new URL(origin).port);
+  const socket = await connectTcp(port);
+
+  const started = Date.now();
+  serve.child.kill('SIGTERM');
+  const exit = await waitForExit(serve.child, 15000);
+  const elapsed = Date.now() - started;
+
+  assert.equal(exit.code, 0);
+  assert.ok(elapsed < 8000, `signal shutdown took ${elapsed}ms`);
+  await waitForClientClose(socket);
+  assert.equal(socket.destroyed, true);
+  assert.equal(fs.existsSync(path.join(directory, 'admin.sock')), false);
+  assert.equal(fs.existsSync(path.join(directory, 'admin.sock.lock')), false);
+  assert.equal(fs.existsSync(path.join(directory, 'identity.lock')), false);
 });
