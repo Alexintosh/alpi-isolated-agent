@@ -33,6 +33,11 @@ test('paired resource calls use the enrolled role and project and observe revoca
     runtimeInventory: async () => { reads++; return []; },
     openResources: async () => ({
       async execute({ name, params, body, principal }) {
+        if (name === 'getJob') {
+          const error = new Error('private backend error');
+          error.code = 'not_found';
+          throw error;
+        }
         invocations.push({ name, params, body, principal });
         return { project: principal.project, name };
       },
@@ -53,6 +58,7 @@ test('paired resource calls use the enrolled role and project and observe revoca
   const runner = await enroll('runner');
   assert.deepEqual(await observer.client.requestResource('listSandboxes'), { project: 'test-project', name: 'listSandboxes' });
   await assert.rejects(observer.client.requestResource('createSandbox', {}, {}), { statusCode: 403 });
+  await assert.rejects(observer.client.requestResource('getJob', { jobId: randomUUID() }), { statusCode: 404 });
   const sandboxId = randomUUID();
   await runner.client.requestResource('stopSandbox', { sandboxId }, { requestId: randomUUID() });
   assert.equal(reads, 2);

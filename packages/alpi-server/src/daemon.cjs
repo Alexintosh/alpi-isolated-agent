@@ -541,6 +541,15 @@ function respondHttpError(req, res, error) {
   sendJson(res, status, { error: code });
 }
 
+const resourceStatus = Object.freeze({
+  invalid_input: 400, forbidden: 403, not_found: 404,
+  lease_held: 409, lease_missing: 409, lease_stale: 409, lease_expired: 409,
+  generation_conflict: 409, invalid_transition: 409, idempotency_conflict: 409,
+  payload_too_large: 413, quota_exceeded: 429,
+  profile_unavailable: 503, model_unavailable: 503, unavailable_engine: 503,
+  runtime_unavailable: 503, service_unavailable: 503, store_busy: 503, store_unavailable: 503,
+});
+
 function createHttpsHandler(context) {
   return async (req, res) => {
     try {
@@ -665,7 +674,13 @@ async function routeHttps(req, res, context) {
     const body = req.method === 'POST' ? requireObject(await readJsonBody(req, 64 * 1024)) : {};
     // Recheck after an asynchronous body read. The callback also fences long-lived writers.
     principal = authenticate();
-    const result = await context.resources.execute({ name: route.name, params: route.params, body, principal, authenticate });
+    let result;
+    try {
+      result = await context.resources.execute({ name: route.name, params: route.params, body, principal, authenticate });
+    } catch (error) {
+      if (Object.hasOwn(resourceStatus, error?.code)) throw new HttpError(resourceStatus[error.code], error.code);
+      throw error;
+    }
     authenticate();
     return sendJson(res, 200, result);
   } catch (error) {
