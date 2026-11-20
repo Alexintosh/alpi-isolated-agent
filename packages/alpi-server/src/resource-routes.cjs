@@ -15,6 +15,12 @@ const operations = [
   ['getEvents', 'GET', 'jobs/:jobId/events/:after', 'observer'],
   ['sendMessage', 'POST', 'jobs/:jobId/messages', 'runner'],
   ['cancelJob', 'POST', 'jobs/:jobId/cancel', 'runner'],
+  ['beginUpload', 'POST', 'artifacts', 'runner'],
+  ['appendChunk', 'POST', 'artifacts/:artifactId/chunks', 'runner'],
+  ['finishUpload', 'POST', 'artifacts/:artifactId/finish', 'runner'],
+  ['getArtifact', 'GET', 'artifacts/:artifactId', 'observer'],
+  ['readChunk', 'GET', 'artifacts/:artifactId/chunks/:offset', 'runner'],
+  ['acknowledge', 'POST', 'artifacts/:artifactId/acknowledge', 'runner'],
   ['importArtifact', 'POST', 'sandboxes/:sandboxId/imports', 'runner'],
   ['exportArtifact', 'POST', 'sandboxes/:sandboxId/exports', 'runner'],
   ['issueTicket', 'POST', 'sandboxes/:sandboxId/terminal-tickets', 'operator'],
@@ -24,7 +30,7 @@ const roles = Object.freeze({ observer: 1, runner: 2, operator: 3 });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function validPart(key, value) {
-  if (key === 'after') {
+  if (key === 'after' || key === 'offset') {
     return typeof value === 'string' && /^(0|[1-9][0-9]{0,15})$/.test(value) && Number.isSafeInteger(Number(value));
   }
   return typeof value === 'string' && uuid.test(value);

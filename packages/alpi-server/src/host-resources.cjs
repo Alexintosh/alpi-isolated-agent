@@ -1,5 +1,6 @@
 'use strict';
 
+const { openArtifactStore } = require('./artifact-store.cjs');
 const { openWorkStore } = require('./work-store.cjs');
 
 const maxEventPageBytes = 48 * 1024;
@@ -31,9 +32,37 @@ function publicEvents(page, after) {
 
 function openHostResources({ stateDir, limits, services = {} }) {
   const store = openWorkStore(stateDir, { limits });
+  let artifacts;
+  try {
+    artifacts = openArtifactStore(stateDir);
+    artifacts.collectGarbage();
+  } catch (error) {
+    artifacts?.close();
+    store.close();
+    throw error;
+  }
+  let nextCollection = Date.now() + 60000;
+  const artifactFields = {
+    beginUpload: ['requestId', 'totalLength', 'sha256'], appendChunk: ['offset', 'data'],
+    finishUpload: [], getArtifact: [], readChunk: [], acknowledge: [],
+  };
   return {
     async execute(request) {
       const { name, principal, params } = request;
+      if (Object.hasOwn(artifactFields, name)) {
+        const fields = artifactFields[name];
+        const body = request.body;
+        if (Object.keys(body).length !== fields.length || fields.some(key => !Object.hasOwn(body, key))) {
+          throw Object.assign(new Error('Unexpected artifact request.'), { code: 'invalid_input' });
+        }
+        if (name === 'beginUpload' && Date.now() >= nextCollection) {
+          artifacts.collectGarbage();
+          nextCollection = Date.now() + 60000;
+        }
+        const input = { ...body, ...params, project: principal.project };
+        if (name === 'readChunk') input.offset = Number(params.offset);
+        return artifacts[name](input);
+      }
       switch (name) {
         case 'listSandboxes':
           return { sandboxes: store.listSandboxes(principal) };
@@ -51,7 +80,7 @@ function openHostResources({ stateDir, limits, services = {} }) {
             { code: name === 'createSandbox' ? 'profile_unavailable' : 'service_unavailable' });
       }
     },
-    close() { store.close(); },
+    close() { try { artifacts.close(); } finally { store.close(); } },
   };
 }
 

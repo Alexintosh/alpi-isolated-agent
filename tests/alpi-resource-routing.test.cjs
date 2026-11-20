@@ -112,3 +112,44 @@ test('paired observer follows a persisted job after restart using its own cursor
     await assert.rejects(other.requestResource('getJob', { jobId: job.jobId }), { statusCode: 404 });
   } finally { await server.close(); }
 });
+
+test('paired artifact client transfers a tree in verified chunks and acknowledges receipt', async () => {
+  const { openHostResources } = require('../packages/alpi-server/src/host-resources.cjs');
+  const { ArtifactsClient, createHttpApi } = require('../packages/alpi-client/src/artifacts.cjs');
+  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'aa-'));
+  const stateDir = path.join(root, 'state');
+  let server;
+  try {
+    server = await startServer({ stateDir, port: 0, handleSignals: false, openResources: openHostResources });
+    async function enroll(project, role) {
+      const invite = await issuePairing({ stateDir, project, role });
+      const endpoint = { origin: server.origin, fingerprint: invite.fingerprint };
+      const { credential } = await requestJson({ ...endpoint, method: 'POST', path: '/v1/pair/exchange',
+        body: { invitation: invite.invitation, name: role } });
+      return createHttpApi({ requestJson, ...endpoint, credential });
+    }
+    const api = await enroll('alpha', 'runner');
+    const other = await enroll('beta', 'runner');
+    const reader = await enroll('alpha', 'observer');
+    const client = new ArtifactsClient({ api, allowedRoots: [root], python: '/usr/bin/python3' });
+    const source = path.join(root, 'source');
+    await fs.mkdir(source);
+    const bytes = Buffer.alloc(70000, 70);
+    await fs.writeFile(path.join(source, 'sample'), bytes);
+    const upload = await client.uploadTree({ source, requestId: randomUUID() });
+    const { artifactId } = upload;
+    assert.ok(upload.streamLength > 32768);
+    assert.equal((await reader.getArtifact({ artifactId })).sha256, upload.sha256);
+    await assert.rejects(reader.readChunk({ artifactId, offset: 0 }), { statusCode: 403 });
+    await assert.rejects(other.getArtifact({ artifactId }), { statusCode: 404 });
+    const downloaded = await client.downloadTree({ artifactId, projectRoot: root, name: 'received' });
+    assert.equal(downloaded.sha256, upload.sha256);
+    assert.equal(downloaded.acknowledged, false);
+    assert.deepEqual(await fs.readFile(path.join(downloaded.destination, 'source', 'sample')), bytes);
+    await client.acknowledge({ artifactId });
+    assert.ok((await api.getArtifact({ artifactId })).acknowledgedAt);
+  } finally {
+    if (server) await server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
