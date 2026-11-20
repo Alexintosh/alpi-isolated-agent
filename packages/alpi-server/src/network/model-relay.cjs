@@ -431,16 +431,17 @@ function headerBytes(req) {
   return total;
 }
 
-// Rejected requests must not be allowed to stream an unbounded body. Drain at
-// most one configured request body, then destroy the socket.
-function drainRejected(req, maxBytes) {
-  let bytes = 0;
-  req.on('data', (chunk) => {
-    bytes += chunk.length;
-    if (bytes > maxBytes) req.destroy();
-  });
-  req.on('error', () => {});
-  req.resume();
+// No body is needed for a rejected request. Stop reading this connection and
+// bound the time allowed for its small, fixed error response to flush.
+function rejectRequest(req, res, status, code, timeoutMs) {
+  const socket = req.socket;
+  socket.pause();
+  res.setHeader('connection', 'close');
+  const timer = setTimeout(() => socket.destroy(), timeoutMs);
+  timer.unref();
+  socket.once('close', () => clearTimeout(timer));
+  res.once('finish', () => socket.destroy());
+  sendError(res, status, code);
 }
 
 const ALLOWED_OPTIONS = new Set([
@@ -545,7 +546,7 @@ async function createModelRelay(options) {
     if (!context.req.destroyed) {
       context.req.destroy();
     }
-    if (!context.res.writableEnded && !context.res.destroyed) {
+    if (!context.res.writableFinished && !context.res.destroyed) {
       context.res.destroy();
     }
     finalize(context, true);
@@ -555,7 +556,7 @@ async function createModelRelay(options) {
     if (context.settled) return;
     if (!context.res.headersSent) {
       sendError(context.res, status, code);
-    } else if (!context.res.writableEnded && !context.res.destroyed) {
+    } else if (!context.res.writableFinished && !context.res.destroyed) {
       context.res.destroy();
     }
     finalize(context, true);
@@ -690,7 +691,7 @@ async function createModelRelay(options) {
         upstreamRes.destroy();
         if (!context.res.headersSent) {
           sendError(context.res, 502, 'response_too_large');
-        } else if (!context.res.writableEnded && !context.res.destroyed) {
+        } else if (!context.res.writableFinished && !context.res.destroyed) {
           context.res.destroy();
         }
         finalize(context, true);
@@ -730,7 +731,6 @@ async function createModelRelay(options) {
           context.res.setHeader('x-content-type-options', 'nosniff');
         }
         context.res.end(output);
-        finalize(context, false);
       });
       upstreamRes.pipe(redactor);
     });
@@ -744,62 +744,51 @@ async function createModelRelay(options) {
 
   const server = http.createServer((req, res) => {
     if (state.closed) {
-      sendError(res, 503, 'relay_closed');
-      req.resume();
+      rejectRequest(req, res, 503, 'relay_closed', limits.bodyTimeoutMs);
       return;
     }
     if (!state.enabled) {
-      sendError(res, 503, state.fencedReason ? 'relay_fenced' : 'relay_disabled');
-      req.resume();
+      rejectRequest(req, res, 503, state.fencedReason ? 'relay_fenced' : 'relay_disabled', limits.bodyTimeoutMs);
       return;
     }
     if (req.method !== 'POST') {
       res.setHeader('allow', 'POST');
-      sendError(res, 405, 'method_not_allowed');
-      req.resume();
+      rejectRequest(req, res, 405, 'method_not_allowed', limits.bodyTimeoutMs);
       return;
     }
     if (req.url !== MODEL_RELAY_ENDPOINT) {
-      sendError(res, 404, 'not_found');
-      req.resume();
+      rejectRequest(req, res, 404, 'not_found', limits.bodyTimeoutMs);
       return;
     }
     if (typeof req.url !== 'string' || Buffer.byteLength(req.url) > limits.maxUrlBytes) {
-      sendError(res, 414, 'not_found');
-      req.resume();
+      rejectRequest(req, res, 414, 'not_found', limits.bodyTimeoutMs);
       return;
     }
     if (!isJsonContentType(req.headers['content-type'])) {
-      sendError(res, 415, 'unsupported_content_type');
-      req.resume();
+      rejectRequest(req, res, 415, 'unsupported_content_type', limits.bodyTimeoutMs);
       return;
     }
     if (headerBytes(req) > limits.maxHeaderBytes) {
-      sendError(res, 431, 'bad_request');
-      req.resume();
+      rejectRequest(req, res, 431, 'bad_request', limits.bodyTimeoutMs);
       return;
     }
     const contentLength = req.headers['content-length'];
     if (contentLength !== undefined) {
       if (!/^\d+$/.test(String(contentLength))) {
-        sendError(res, 400, 'bad_request');
-        req.resume();
+        rejectRequest(req, res, 400, 'bad_request', limits.bodyTimeoutMs);
         return;
       }
       if (Number(contentLength) > limits.maxBodyBytes) {
-        sendError(res, 413, 'body_too_large');
-        req.resume();
+        rejectRequest(req, res, 413, 'body_too_large', limits.bodyTimeoutMs);
         return;
       }
     }
     if (state.inboundActive >= limits.maxInboundRequests) {
-      sendError(res, 429, 'too_many_requests');
-      req.resume();
+      rejectRequest(req, res, 429, 'too_many_requests', limits.bodyTimeoutMs);
       return;
     }
     if (state.pendingBodies >= limits.maxPendingBodies) {
-      sendError(res, 429, 'too_many_pending');
-      req.resume();
+      rejectRequest(req, res, 429, 'too_many_pending', limits.bodyTimeoutMs);
       return;
     }
 
@@ -822,7 +811,7 @@ async function createModelRelay(options) {
       if (context.settled) return;
       if (!context.res.headersSent) {
         sendError(context.res, 504, 'request_timeout');
-      } else if (!context.res.writableEnded && !context.res.destroyed) {
+      } else if (!context.res.writableFinished && !context.res.destroyed) {
         context.res.destroy();
       }
       finalize(context, true);

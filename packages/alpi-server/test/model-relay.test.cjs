@@ -1100,3 +1100,71 @@ test('accepts an IPv6 IP-literal upstream when loopback IPv6 is available', asyn
   assert.equal(response.status, 200);
   assert.match(response.body, /\[DONE\]/);
 });
+
+test('outstanding JSON delivery remains owned through finish, fence or deadline', { timeout: 8000 }, async t => {
+  const { Writable, Readable } = require('node:stream');
+  const { once } = require('node:events');
+  const root = makeTempDirectory(t);
+  const upstream = await startHttpServer(t, (req, res) => {
+    req.resume();
+    res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+  });
+  // Drive the real HTTP handler with a Writable whose delivery callback we control.
+  const original = http.createServer;
+  let handler;
+  const mock = t.mock.method(http, 'createServer', function (listener) {
+    handler = listener;
+    return original.call(http, listener);
+  });
+  const relay = await createRelay(t, relayOptions(root, upstream, { limits: { requestTimeoutMs: 750 } }));
+  mock.mock.restore();
+  const ready = { generation: 1, ironReady: true, callbackReady: true };
+  await relay.allow(ready);
+  for (const action of ['fence', 'deadline', 'finish']) {
+    const body = Buffer.from(chatBody({ stream: false }));
+    const req = Object.assign(Readable.from([body]), {
+      method: 'POST', url: ENDPOINT, rawHeaders: [], headers: { 'content-type': 'application/json' },
+    });
+    const pending = Promise.withResolvers();
+    const res = new Writable({ write(_chunk, _encoding, callback) { pending.resolve(callback); } });
+    res.setHeader = () => {};
+    Object.defineProperty(res, 'headersSent', { get: () => res.writableEnded });
+    const closed = once(res, 'close');
+    handler(req, res);
+    const flush = await pending.promise;
+    assert.equal(res.writableEnded, true);
+    assert.equal(res.writableFinished, false);
+    assert.equal(relay.status().activeRequests, 1);
+    if (action === 'fence') relay.fence('iron_fault');
+    if (action === 'finish') flush();
+    await closed;
+    assert.equal(res.writableFinished, action === 'finish');
+    assert.equal(relay.status().activeRequests, 0);
+    assert.equal(relay.status().activeInference, 0);
+    if (action === 'fence') await relay.allow(ready);
+  }
+});
+
+test('early HTTP rejection flushes its error and closes the connection before upload completion', {
+  timeout: 5000,
+}, async t => {
+  const { once } = require('node:events');
+  const root = makeTempDirectory(t);
+  const relay = await createRelay(t, relayOptions(root, { host: '127.0.0.1', port: 1 }));
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  const req = http.request({ agent, socketPath: relay.socketPath, method: 'POST', path: ENDPOINT,
+    headers: { 'content-type': 'application/json', 'content-length': '128' } });
+  t.after(() => req.destroy());
+  const response = once(req, 'response');
+  req.write('{');
+  const [res] = await response;
+  const socketClosed = once(req.socket, 'close');
+  const parts = [];
+  for await (const chunk of res) parts.push(chunk);
+  assert.equal(res.statusCode, 503);
+  assert.equal(JSON.parse(Buffer.concat(parts)).error.code, 'relay_disabled');
+  assert.equal(res.headers.connection, 'close');
+  await socketClosed;
+  assert.equal(relay.status().pendingBodies, 0);
+});
