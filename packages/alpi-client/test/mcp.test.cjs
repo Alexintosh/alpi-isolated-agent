@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
-const { PassThrough } = require('node:stream');
+const { PassThrough, Readable, Writable } = require('node:stream');
 const { test } = require('node:test');
 
 const { MAX_INPUT_BYTES, runMcp } = require('../src/mcp.cjs');
@@ -395,6 +395,138 @@ test('drains buffered requests after EOF beyond the in-flight limit', async () =
   for (const response of responses) {
     assert.equal(response.result.isError, undefined);
   }
+});
+
+test('drains coalesced complete frames after EOF beyond the in-flight limit', async () => {
+  const input = new Readable({ read() {} });
+  const output = new PassThrough();
+  output.setEncoding('utf8');
+
+  const messages = [];
+  let text = '';
+  output.on('data', (chunk) => {
+    text += chunk;
+    let newline = text.indexOf('\n');
+    while (newline !== -1) {
+      const line = text.slice(0, newline);
+      text = text.slice(newline + 1);
+      if (line.trim().length > 0) {
+        messages.push(JSON.parse(line));
+      }
+      newline = text.indexOf('\n');
+    }
+  });
+
+  const done = runMcp({
+    getCapabilities: async () => capabilities(),
+    input,
+    output,
+  });
+
+  const requests = [];
+  for (let id = 1; id <= 20; id += 1) {
+    requests.push(JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      method: 'tools/call',
+      params: { name: 'alpi_capabilities' },
+    }));
+  }
+  input.push(`${requests.join('\n')}\n`);
+  input.push(null);
+  await done;
+
+  const responses = messages.filter(
+    (message) => message.id >= 1 && message.id <= 20,
+  );
+  assert.equal(responses.length, 20);
+  assert.equal(messages.some((message) => message.id === null), false);
+  for (const response of responses) {
+    assert.equal(response.result.isError, undefined);
+  }
+});
+
+test('waits for delayed output writes and rejects deferred failures', async () => {
+  class DelayedWritable extends Writable {
+    constructor({ delayMs = 30, fail = false } = {}) {
+      super();
+      this.delayMs = delayMs;
+      this.fail = fail;
+      this.callbacks = 0;
+      this.chunks = [];
+    }
+
+    _write(chunk, _encoding, callback) {
+      this.chunks.push(Buffer.from(chunk));
+      setTimeout(() => {
+        this.callbacks += 1;
+        callback(this.fail ? new Error('late write failure') : null);
+      }, this.delayMs);
+    }
+  }
+
+  const ping = '{"jsonrpc":"2.0","id":1,"method":"ping"}\n';
+
+  const successInput = new PassThrough();
+  const successOutput = new DelayedWritable({ delayMs: 30 });
+  const successDone = runMcp({
+    getCapabilities: async () => capabilities(),
+    input: successInput,
+    output: successOutput,
+  });
+  successInput.write(ping);
+  successInput.end();
+  await successDone;
+
+  assert.equal(successOutput.callbacks, 1);
+  assert.equal(successOutput.chunks.length, 1);
+  assert.equal(successOutput.listenerCount('error'), 0);
+  assert.equal(successOutput.listenerCount('close'), 0);
+  assert.equal(successInput.listenerCount('data'), 0);
+  assert.equal(successInput.listenerCount('end'), 0);
+  assert.equal(successInput.listenerCount('close'), 0);
+  assert.equal(successInput.listenerCount('error'), 0);
+
+  const failedInput = new PassThrough();
+  const failedOutput = new DelayedWritable({ delayMs: 30, fail: true });
+  const failedDone = runMcp({
+    getCapabilities: async () => capabilities(),
+    input: failedInput,
+    output: failedOutput,
+  });
+  failedInput.write(ping);
+  failedInput.end();
+  await assert.rejects(failedDone, /MCP stream failure/);
+
+  assert.equal(failedOutput.callbacks, 1);
+  assert.equal(failedOutput.listenerCount('error'), 0);
+  assert.equal(failedOutput.listenerCount('close'), 0);
+  assert.equal(failedInput.listenerCount('data'), 0);
+  assert.equal(failedInput.listenerCount('end'), 0);
+  assert.equal(failedInput.listenerCount('close'), 0);
+  assert.equal(failedInput.listenerCount('error'), 0);
+
+  const lateInput = new PassThrough();
+  const lateOutput = new DelayedWritable({ delayMs: 80 });
+  const lateDone = runMcp({
+    getCapabilities: async () => capabilities(),
+    input: lateInput,
+    output: lateOutput,
+  });
+  lateInput.write(ping);
+  lateInput.end();
+  const lateError = setTimeout(() => {
+    lateOutput.destroy(new Error('late stream failure'));
+  }, 10);
+  await assert.rejects(lateDone, /MCP stream failure/);
+  clearTimeout(lateError);
+
+  assert.equal(lateOutput.listenerCount('error'), 0);
+  assert.equal(lateOutput.listenerCount('close'), 0);
+  assert.equal(lateInput.listenerCount('data'), 0);
+  assert.equal(lateInput.listenerCount('end'), 0);
+  assert.equal(lateInput.listenerCount('close'), 0);
+  assert.equal(lateInput.listenerCount('error'), 0);
 });
 
 test('handles streams that ended or failed before the bridge attached', async () => {

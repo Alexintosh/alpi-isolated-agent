@@ -155,6 +155,7 @@ async function runMcp(options) {
   let drainReject = null;
   let outQueue = [];
   const pending = new Map();
+  const pendingWrites = new Set();
 
   let resolveDone;
   let rejectDone;
@@ -183,6 +184,11 @@ async function runMcp(options) {
       const reject = drainReject;
       drainReject = null;
       reject(new Error('Output failed.'));
+    }
+    // A pending write callback may never run once the stream is gone, so
+    // settle every owned write before rejecting the bridge.
+    for (const rejectWrite of Array.from(pendingWrites)) {
+      rejectWrite(new Error('Output failed.'));
     }
     rejectDone(new Error('MCP stream failure.'));
   }
@@ -232,19 +238,24 @@ async function runMcp(options) {
   }
 
   function maybeResume() {
+    if (failed || finished) {
+      return;
+    }
+    // After EOF the input cannot be resumed, but buffered complete frames
+    // still need pumping once capacity frees up. Check this before the paused
+    // branch because inputPaused can remain set when EOF arrives.
+    if (inputEnded) {
+      if (buffer.length > 0 &&
+          inflight < MAX_INFLIGHT &&
+          outQueue.length < MAX_OUTPUT_QUEUE) {
+        pump();
+      }
+      return;
+    }
     if (inputPaused &&
         inflight < MAX_INFLIGHT &&
         outQueue.length < MAX_OUTPUT_QUEUE) {
       resumeInput();
-      return;
-    }
-    // After EOF the input is no longer paused, but buffered complete frames
-    // still need pumping once capacity frees up.
-    if (inputEnded &&
-        buffer.length > 0 &&
-        inflight < MAX_INFLIGHT &&
-        outQueue.length < MAX_OUTPUT_QUEUE) {
-      pump();
     }
   }
 
@@ -281,6 +292,35 @@ async function runMcp(options) {
     });
   }
 
+  function startWrite(line) {
+    let settle;
+    const completion = new Promise((resolve, reject) => {
+      let settled = false;
+      settle = (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        pendingWrites.delete(settle);
+        if (error) {
+          reject(error instanceof Error ? error : new Error('Output write failed.'));
+        } else {
+          resolve();
+        }
+      };
+      pendingWrites.add(settle);
+    });
+
+    let ok;
+    try {
+      ok = output.write(line, (error) => settle(error));
+    } catch (error) {
+      settle(error);
+      return { completion, ok: false };
+    }
+    return { completion, ok };
+  }
+
   async function drainOutput() {
     if (writing || failed) {
       return;
@@ -289,9 +329,14 @@ async function runMcp(options) {
     try {
       while (outQueue.length > 0 && !failed) {
         const line = outQueue.shift();
-        const ok = output.write(line);
+        const { completion, ok } = startWrite(line);
+        // A truthy return only means the chunk was accepted into the stream's
+        // buffer. Delivery is the callback, so wait for it even when the
+        // caller is not asked to back off.
         if (ok === false) {
-          await waitForDrain();
+          await Promise.all([completion, waitForDrain()]);
+        } else {
+          await completion;
         }
       }
     } catch {
@@ -503,7 +548,18 @@ async function runMcp(options) {
 
         const newline = buffer.indexOf(0x0a);
         if (newline === -1) {
-          if (buffer.length > MAX_INPUT_BYTES) {
+          if (inputEnded) {
+            // All complete frames have been drained at this point. Treat only
+            // the remaining suffix as the final frame, once capacity allows.
+            if (buffer.length > MAX_INPUT_BYTES) {
+              buffer = Buffer.alloc(0);
+              enqueue(errorResponse(null, PARSE_ERROR, 'Message too large.'));
+            } else if (buffer.length > 0) {
+              const trailing = buffer;
+              buffer = Buffer.alloc(0);
+              processFrame(trailing);
+            }
+          } else if (buffer.length > MAX_INPUT_BYTES) {
             buffer = Buffer.alloc(0);
             discarding = true;
             enqueue(errorResponse(null, PARSE_ERROR, 'Message too large.'));
@@ -568,16 +624,10 @@ async function runMcp(options) {
     if (discarding) {
       discarding = false;
       buffer = Buffer.alloc(0);
-    } else if (buffer.length > 0) {
-      const trailing = buffer;
-      buffer = Buffer.alloc(0);
-      if (trailing.length > MAX_INPUT_BYTES) {
-        enqueue(errorResponse(null, PARSE_ERROR, 'Message too large.'));
-      } else {
-        processFrame(trailing);
-      }
     }
 
+    // Leave buffered frames intact: pump drains complete frames as capacity
+    // returns and only then treats the unterminated suffix as the final frame.
     pump();
     checkDone();
   }

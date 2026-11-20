@@ -8,6 +8,7 @@ const https = require('node:https');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const tls = require('node:tls');
 const { test, after } = require('node:test');
 
 const { requestJson } = require('../src/transport.cjs');
@@ -31,27 +32,105 @@ function opensslTime(date) {
   ].join('');
 }
 
-function makeCertificate(name, daysBefore, daysAfter) {
-  const keyPath = path.join(TMP, `${name}-key.pem`);
-  const certPath = path.join(TMP, `${name}-cert.pem`);
+function makeCertificateWithCa(name, daysBefore, daysAfter, keyPath, certPath) {
   const now = Date.now();
   const notBefore = new Date(now + daysBefore * 24 * 60 * 60 * 1000);
   const notAfter = new Date(now + daysAfter * 24 * 60 * 60 * 1000);
+  const caDir = path.join(TMP, `${name}-ca`);
 
+  fs.mkdirSync(path.join(caDir, 'newcerts'), { recursive: true });
+  fs.writeFileSync(path.join(caDir, 'index.txt'), '');
+  fs.writeFileSync(path.join(caDir, 'serial'), '1000\n');
+
+  const caKeyPath = path.join(caDir, 'ca-key.pem');
+  const caCertPath = path.join(caDir, 'ca-cert.pem');
   execFileSync('openssl', [
     'req',
     '-x509',
-    '-newkey',
-    'rsa:2048',
+    '-newkey', 'rsa:2048',
+    '-nodes',
+    '-keyout', caKeyPath,
+    '-out', caCertPath,
+    '-subj', '/CN=Alpi Test CA',
+    '-days', '3650',
+    '-addext', 'basicConstraints=critical,CA:TRUE',
+  ], { stdio: 'ignore' });
+
+  const csrPath = path.join(caDir, `${name}-csr.pem`);
+  execFileSync('openssl', [
+    'req',
+    '-new',
+    '-newkey', 'rsa:2048',
     '-nodes',
     '-keyout', keyPath,
-    '-out', certPath,
+    '-out', csrPath,
     '-subj', '/CN=localhost',
-    '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
-    '-addext', 'basicConstraints=critical,CA:TRUE',
-    '-not_before', opensslTime(notBefore),
-    '-not_after', opensslTime(notAfter),
   ], { stdio: 'ignore' });
+
+  const configPath = path.join(caDir, 'openssl.cnf');
+  fs.writeFileSync(configPath, [
+    '[ ca ]',
+    'default_ca = CA_default',
+    '',
+    '[ CA_default ]',
+    `dir = ${caDir}`,
+    'database = $dir/index.txt',
+    'new_certs_dir = $dir/newcerts',
+    'certificate = $dir/ca-cert.pem',
+    'private_key = $dir/ca-key.pem',
+    'serial = $dir/serial',
+    'default_days = 365',
+    'default_md = sha256',
+    'policy = policy_any',
+    'unique_subject = no',
+    '',
+    '[ policy_any ]',
+    'commonName = supplied',
+    '',
+    '[ v3_leaf ]',
+    'basicConstraints = critical,CA:TRUE',
+    'subjectAltName = DNS:localhost,IP:127.0.0.1',
+    '',
+  ].join('\n'));
+
+  execFileSync('openssl', [
+    'ca',
+    '-batch',
+    '-config', configPath,
+    '-in', csrPath,
+    '-out', certPath,
+    '-startdate', opensslTime(notBefore),
+    '-enddate', opensslTime(notAfter),
+    '-extensions', 'v3_leaf',
+    '-notext',
+    '-md', 'sha256',
+  ], { stdio: 'ignore' });
+}
+
+function makeCertificate(name, daysBefore, daysAfter) {
+  const keyPath = path.join(TMP, `${name}-key.pem`);
+  const certPath = path.join(TMP, `${name}-cert.pem`);
+
+  if (daysBefore <= 0 && daysAfter > 0) {
+    // Portable normal-valid fixture: -not_before/-not_after are unavailable
+    // in the Debian OpenSSL 3.0 req command, but -days is supported.
+    execFileSync('openssl', [
+      'req',
+      '-x509',
+      '-newkey', 'rsa:2048',
+      '-nodes',
+      '-keyout', keyPath,
+      '-out', certPath,
+      '-subj', '/CN=localhost',
+      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+      '-addext', 'basicConstraints=critical,CA:TRUE',
+      '-days', String(Math.max(1, Math.ceil(daysAfter))),
+    ], { stdio: 'ignore' });
+  } else {
+    // Expired and not-yet-valid fixtures need explicit dates. openssl ca
+    // supports -startdate/-enddate on both OpenSSL 3.0 and newer releases.
+    makeCertificateWithCa(name, daysBefore, daysAfter, keyPath, certPath);
+  }
 
   const key = fs.readFileSync(keyPath);
   const cert = fs.readFileSync(certPath);
@@ -107,6 +186,35 @@ async function startHttpsServer(fixture, handler) {
   return {
     server,
     origin: `https://127.0.0.1:${server.address().port}`,
+  };
+}
+
+async function startRawTlsServer(fixture, onRequest) {
+  const sockets = new Set();
+  const server = tls.createServer({ key: fixture.key, cert: fixture.cert }, (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    socket.once('data', () => onRequest(socket));
+  });
+  server.on('tlsClientError', (_error, socket) => socket.destroy());
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
+  return {
+    server,
+    origin: `https://127.0.0.1:${server.address().port}`,
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise((resolve) => server.close(() => resolve()));
+    },
   };
 }
 
@@ -652,6 +760,66 @@ test('accepts a response body of exactly 64 KiB', async () => {
     assert.equal(result.data.length, payloadLength);
   } finally {
     await closeServer(server);
+  }
+});
+
+test('accepts a small fragmented header with a coalesced body over 16 KiB', async () => {
+  const fixture = makeCertificate('fragmented-header', -1, 1);
+  const payloadLength = 20 * 1024;
+  const body = JSON.stringify({ data: 'x'.repeat(payloadLength) });
+  assert.ok(Buffer.byteLength(body) > 16 * 1024);
+  assert.ok(Buffer.byteLength(body) <= 64 * 1024);
+
+  const raw = await startRawTlsServer(fixture, (socket) => {
+    socket.write('HTTP/1.1 200 OK\r\n');
+    socket.write('Content-Type: application/json\r\n');
+    socket.write(`Content-Length: ${Buffer.byteLength(body)}\r\n`);
+    setTimeout(() => {
+      socket.write(`\r\n${body}`);
+    }, 20);
+  });
+
+  try {
+    const result = await requestJson({
+      origin: raw.origin,
+      fingerprint: fixture.fingerprint,
+      method: 'GET',
+      path: '/v1/capabilities',
+      timeoutMs: 3000,
+    });
+    assert.equal(result.data.length, payloadLength);
+  } finally {
+    await raw.close();
+  }
+});
+
+test('still rejects a response header prefix over 16 KiB', async () => {
+  const fixture = makeCertificate('oversized-header', -1, 1);
+  const body = '{"ok":true}';
+  const raw = await startRawTlsServer(fixture, (socket) => {
+    socket.write('HTTP/1.1 200 OK\r\n');
+    socket.write(`X-Fill: ${'a'.repeat(17 * 1024)}\r\n`);
+    socket.write('Content-Type: application/json\r\n');
+    socket.write(`Content-Length: ${Buffer.byteLength(body)}\r\n`);
+    socket.write(`\r\n${body}`);
+  });
+
+  try {
+    await assert.rejects(
+      requestJson({
+        origin: raw.origin,
+        fingerprint: fixture.fingerprint,
+        method: 'GET',
+        path: '/v1/capabilities',
+        timeoutMs: 3000,
+      }),
+      (error) => {
+        assert.equal(error.code, 'RESPONSE_TOO_LARGE');
+        return true;
+      },
+    );
+  } finally {
+    await raw.close();
   }
 });
 

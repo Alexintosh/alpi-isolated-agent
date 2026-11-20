@@ -578,12 +578,18 @@ async function requestJson(options) {
 
       if (!headersParsed) {
         headerBuffer = Buffer.concat([headerBuffer, chunk]);
-        if (headerBuffer.length > MAX_HEADER_BYTES) {
-          fail(invalid('RESPONSE_TOO_LARGE', 'Response headers exceed the 16 KiB limit'));
-          return;
-        }
         const headerEnd = headerBuffer.indexOf('\r\n\r\n');
         if (headerEnd === -1) {
+          // No delimiter yet: only the accumulated header prefix is bounded.
+          if (headerBuffer.length > MAX_HEADER_BYTES) {
+            fail(invalid('RESPONSE_TOO_LARGE', 'Response headers exceed the 16 KiB limit'));
+          }
+          return;
+        }
+        // The delimiter is part of the header prefix; body bytes that share
+        // this read must not be charged against the header limit.
+        if (headerEnd + 4 > MAX_HEADER_BYTES) {
+          fail(invalid('RESPONSE_TOO_LARGE', 'Response headers exceed the 16 KiB limit'));
           return;
         }
 
