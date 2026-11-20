@@ -34,12 +34,16 @@ test('control packages install offline and expose their commands outside the che
     assert.ok(files.includes('src/shared/file-stream.py'));
     if (name === 'alpi-server') {
       assert.ok(files.includes('src/shared/artifact-download.cjs'));
+      for (const required of ['src/runtime/network-policy.cjs', 'src/runtime/owned-process.cjs',
+        'src/protocol/iron-transform.proto', 'src/protocol/IRON-LICENSE', 'profiles/iron-callback/npm-shrinkwrap.json',
+        'profiles/iron-callback/callback-runtime.cjs', 'profiles/iron-callback/package.json']) assert.ok(files.includes(required));
+
       for (const recipe of ['Dockerfile', 'guest-session.cjs', 'package.json', 'npm-shrinkwrap.json']) {
         assert.ok(files.includes('profiles/pi-dev/' + recipe));
       }
     }
     if (name === 'alpi-client') assert.ok(files.includes('skills/alpi-server/SKILL.md'));
-    assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/|profiles\/pi-dev\/|skills\/alpi-server\/SKILL\.md$)/.test(file)), files.join('\n'));
+    assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/|profiles\/(?:pi-dev|iron-callback)\/|skills\/alpi-server\/SKILL\.md$)/.test(file)), files.join('\n'));
     t.diagnostic(name + ' packed bytes: ' + pkg.size);
     archives.push(path.join(temp, pkg.filename));
   }

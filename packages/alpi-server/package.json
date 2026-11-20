@@ -21,7 +21,10 @@
     "profiles/pi-dev/Dockerfile",
     "profiles/pi-dev/guest-session.cjs",
     "profiles/pi-dev/package.json",
-    "profiles/pi-dev/npm-shrinkwrap.json"
+    "profiles/pi-dev/npm-shrinkwrap.json",
+    "profiles/iron-callback/package.json",
+    "profiles/iron-callback/npm-shrinkwrap.json",
+    "profiles/iron-callback/callback-runtime.cjs"
   ],
   "scripts": {
     "test": "node --test test/*.test.cjs"

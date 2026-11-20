@@ -92,6 +92,23 @@ async function runPairingWorkflow(t, server, client, { installRuntime = false } 
       server, 'runtime', 'install', '--state-dir', state, '--engine', 'boxlite',
     ], { env, timeout: 180000 });
     const installed = JSON.parse(installation.stdout);
+    assert.match(installed.ironCallback.digest, /^[0-9a-f]{64}$/);
+    const packageRoot = path.resolve(path.dirname(await fs.realpath(server)), '..');
+    const { createIronLifecycle, IRON_SHA256 } = require(path.join(packageRoot, 'src/network/iron.cjs'));
+    let fenceCount = 0;
+    const policy = createIronLifecycle({ stateDir: state, environmentId: 'package-smoke',
+      ironBinary: installed.paths.ironProxy, ironSha256: IRON_SHA256,
+      callbackProfileDir: path.join(state, 'runtimes/callbacks', installed.ironCallback.digest),
+      connector: { address: '192.0.2.1', port: 8080 }, model: 'fixture', relay: { fence() { fenceCount++; } } });
+    try {
+      await policy.start();
+      assert.equal(policy.healthy(), true);
+      assert.ok(policy.status().pid > 0);
+    } finally {
+      await policy.stop();
+    }
+    assert.equal(policy.healthy(), false);
+    assert.ok(fenceCount > 0);
     const doctor = await run(process.execPath, [server, 'doctor', '--runtime', '--state-dir', state], { env });
     const diagnosis = JSON.parse(doctor.stdout);
     assert.equal(diagnosis.active.id, installed.set);

@@ -265,6 +265,8 @@ async function runRuntime(action, args) {
       profile = (await loadHostProfiles(values.profiles)).installedProfile(engine, values.profile);
     }
     result = await installer.installRuntime({ stateDir, engine });
+    const { digest } = await require('../src/network/callback-install.cjs').ensureIronCallback(stateDir);
+    result.ironCallback = { digest };
     if (profile) result.profile = await require('../src/profile-image.cjs').ensureImage({ stateDir, profile });
   } else if (action === 'rollback') {
     result = await installer.rollbackRuntime({ stateDir });
