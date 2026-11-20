@@ -1,0 +1,36 @@
+{
+  "component": "boxlite-native",
+  "version": "0.14.1",
+  "platform": "linux",
+  "architecture": "x64",
+  "publisher": "boxlite-ai",
+  "license": "Apache-2.0",
+  "url": "https://github.com/boxlite-ai/boxlite/releases/download/v0.14.1/boxlite-ai-boxlite-linux-x64-gnu-0.14.1.tgz",
+  "allowedHosts": [
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com"
+  ],
+  "bytes": 41301842,
+  "sha256": "99fc7319641170959b07c50261346f12450913178e5348f6b0d9e0138f19cd9f",
+  "files": [
+    {
+      "path": "package/package.json",
+      "bytes": 848,
+      "mode": "0644",
+      "sha256": "00f9e247e0f88f35f3f3ccd529991fff87b613d8ccc16f545b0e912208e2cb0d"
+    },
+    {
+      "path": "package/README.md",
+      "bytes": 113,
+      "mode": "0644",
+      "sha256": "9863fd23e979248eaab14b6ca8a9f8e9de4b9d8054bc0cffbdf70fb0d84bd8e2"
+    },
+    {
+      "path": "package/boxlite.linux-x64-gnu.node",
+      "bytes": 117357456,
+      "mode": "0644",
+      "sha256": "4a5891ad754406ced2340832d878d86a92af93ef075e1bee2405d79180268695"
+    }
+  ]
+}

@@ -1,0 +1,420 @@
+{
+  "component": "boxlite-sdk",
+  "version": "0.14.1",
+  "platform": "linux",
+  "architecture": "x64",
+  "publisher": "boxlite-ai",
+  "license": "Apache-2.0",
+  "url": "https://github.com/boxlite-ai/boxlite/releases/download/v0.14.1/boxlite-ai-boxlite-0.14.1.tgz",
+  "allowedHosts": [
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com"
+  ],
+  "bytes": 79333,
+  "sha256": "b13a73148e01e080bfe8f81b6fd25e01908d01501bf906229213abe2c59e555d",
+  "files": [
+    {
+      "path": "package/dist/agents.js",
+      "bytes": 6684,
+      "mode": "0644",
+      "sha256": "c17979b0003ce1fe3f8208413bd1467dfd8db087b14e672a05bf6601a4062479"
+    },
+    {
+      "path": "package/native/boxlite.js",
+      "bytes": 26324,
+      "mode": "0644",
+      "sha256": "1bc2362e876094c253afb94fa3873ed22a60d08e65c47fe60e822798083ba648"
+    },
+    {
+      "path": "package/dist/browserbox.js",
+      "bytes": 18929,
+      "mode": "0644",
+      "sha256": "fc66b2a89571ffd90be99330f7ea26d328e95d4ad267e0fac3f27c117ae57860"
+    },
+    {
+      "path": "package/dist/codebox.js",
+      "bytes": 4792,
+      "mode": "0644",
+      "sha256": "c696a82c31698a199b7b0c73315e17c668767d2cc7d234f0ce43d812ae1cfeb8"
+    },
+    {
+      "path": "package/dist/computerbox.js",
+      "bytes": 12112,
+      "mode": "0644",
+      "sha256": "ef67d075cf4f7d4582c4651609ef6da6160ca0424247f9ab60bd692062853343"
+    },
+    {
+      "path": "package/dist/constants.js",
+      "bytes": 1415,
+      "mode": "0644",
+      "sha256": "4aa20e6d84918a939ed3a4c068857d3c12ccf533a73a2a69b397c38930d366d4"
+    },
+    {
+      "path": "package/dist/copy.js",
+      "bytes": 43,
+      "mode": "0644",
+      "sha256": "b0e28964be09371511214159935435a781fc84015dc612b97993332279b87ab5"
+    },
+    {
+      "path": "package/dist/credential.js",
+      "bytes": 770,
+      "mode": "0644",
+      "sha256": "f29608118dc8c32493fc1cc0bb99f4cc7b2372304ebbdd66acce297ddc9c93a8"
+    },
+    {
+      "path": "package/dist/errors.js",
+      "bytes": 4563,
+      "mode": "0644",
+      "sha256": "02465ab94f1fc37dfac7ce89220a3ff8edaa7cd490a39073a2d218c1c2d1f713"
+    },
+    {
+      "path": "package/dist/exec.js",
+      "bytes": 43,
+      "mode": "0644",
+      "sha256": "b98c571572e34cbbc14c200088abb094b4bc4e072f34850abb10ebe9a7a6f623"
+    },
+    {
+      "path": "package/dist/index.js",
+      "bytes": 1754,
+      "mode": "0644",
+      "sha256": "aec61071411c99ce6010972f6da08395999c9ea2c00a3d57606d54d83636c2c1"
+    },
+    {
+      "path": "package/dist/interactivebox.js",
+      "bytes": 7956,
+      "mode": "0644",
+      "sha256": "85a3fcf719c373fcdb4aad03e6083afae0844a1fa174775a7926b5611f76ee96"
+    },
+    {
+      "path": "package/dist/native-contracts.js",
+      "bytes": 55,
+      "mode": "0644",
+      "sha256": "ccb618851e23eeee708c2a35936d03af04b7e2a5ac3fc91ac4c17ebcb42b2efc"
+    },
+    {
+      "path": "package/dist/native.js",
+      "bytes": 1941,
+      "mode": "0644",
+      "sha256": "07d87702dbfd675b4f21be0733ca5c03cfc80ff731cdcee866be9b48075786db"
+    },
+    {
+      "path": "package/dist/options.js",
+      "bytes": 849,
+      "mode": "0644",
+      "sha256": "bc47aea09bf93d03ebda43833cab50b8d61fa53e9451a6c22588f8bfee284d7b"
+    },
+    {
+      "path": "package/dist/simplebox.js",
+      "bytes": 22611,
+      "mode": "0644",
+      "sha256": "cf9f0c1f78f38ec6c6e6d0881add9bc7c0c24499d778a8549ae8d9559322d1a7"
+    },
+    {
+      "path": "package/dist/skillbox.js",
+      "bytes": 13573,
+      "mode": "0644",
+      "sha256": "16cb7cfe0b71be2b64f5e99756027f25abaa24aeb2bdf69257ede0ff8cc5c520"
+    },
+    {
+      "path": "package/package.json",
+      "bytes": 2719,
+      "mode": "0644",
+      "sha256": "4c29dd8b5af6132427d6abf047b91d32cdc727493c1219aa7a790ffca1371186"
+    },
+    {
+      "path": "package/dist/agents.d.ts.map",
+      "bytes": 5484,
+      "mode": "0644",
+      "sha256": "d4028a9fc4d4ebac2a339cfa964d96ab644e7844fafc78eaa6e25a706347a95b"
+    },
+    {
+      "path": "package/dist/agents.js.map",
+      "bytes": 7208,
+      "mode": "0644",
+      "sha256": "1605aaa9f66d17640bf3af13ca1b0cb8004e321e58a995e583b86a060e5cd358"
+    },
+    {
+      "path": "package/dist/browserbox.d.ts.map",
+      "bytes": 1764,
+      "mode": "0644",
+      "sha256": "50ccfd47d2c243ff938b241ca4276cd0206909146732fe92970c313d01b0cb1b"
+    },
+    {
+      "path": "package/dist/browserbox.js.map",
+      "bytes": 9939,
+      "mode": "0644",
+      "sha256": "609e34ffccfe97b165a7c72efab529eaad14c1385725fd79be59c7ae40fe184c"
+    },
+    {
+      "path": "package/dist/codebox.d.ts.map",
+      "bytes": 763,
+      "mode": "0644",
+      "sha256": "8c859a3798a56ab9f2321956b73a4af7d821fc70752c8f08c8edb49a82264c30"
+    },
+    {
+      "path": "package/dist/codebox.js.map",
+      "bytes": 1678,
+      "mode": "0644",
+      "sha256": "1db9c826c37efe93e9e18cd990f7aba05e56b8af6559b3e0e4771d0c7b91a9ae"
+    },
+    {
+      "path": "package/dist/computerbox.d.ts.map",
+      "bytes": 1922,
+      "mode": "0644",
+      "sha256": "55db804e9448bd35a9c6201027bd728ee2552dd3c1eba2b820ad2ce3812590c9"
+    },
+    {
+      "path": "package/dist/computerbox.js.map",
+      "bytes": 6178,
+      "mode": "0644",
+      "sha256": "0a17304d05120b7c64fbed23628494bec55547ba8d78650c755b132624624627"
+    },
+    {
+      "path": "package/dist/constants.d.ts.map",
+      "bytes": 748,
+      "mode": "0644",
+      "sha256": "f35ee151221c0b6dd1fafcd520b258b23a63f7823b0e86eb914ec32e6818a883"
+    },
+    {
+      "path": "package/dist/constants.js.map",
+      "bytes": 1045,
+      "mode": "0644",
+      "sha256": "b380d88333aee8682cbdfb57212257074f8bd2e0acb9610ce73585c915231103"
+    },
+    {
+      "path": "package/dist/copy.d.ts.map",
+      "bytes": 274,
+      "mode": "0644",
+      "sha256": "ad7a647d1126f86f24fe9724280caa92cb010f4d0af8e7eb6a8d83880602a685"
+    },
+    {
+      "path": "package/dist/copy.js.map",
+      "bytes": 100,
+      "mode": "0644",
+      "sha256": "cd572aa8223e96a6a35c42a65dae951f5fd0a5e9bc8158f040d68b43ae387b97"
+    },
+    {
+      "path": "package/dist/credential.d.ts.map",
+      "bytes": 421,
+      "mode": "0644",
+      "sha256": "71120bdadf7236750f5a60e22457be56ad5e6528f1659a022f38246eec1bc59c"
+    },
+    {
+      "path": "package/dist/credential.js.map",
+      "bytes": 237,
+      "mode": "0644",
+      "sha256": "0846a3d371b409ce87414a05b46b611333c02bc5c5f83c09a1d1047f4bd6bcc7"
+    },
+    {
+      "path": "package/dist/errors.d.ts.map",
+      "bytes": 873,
+      "mode": "0644",
+      "sha256": "6abd8573dec92fd2ba69a623b8d307dcb4cabc9182cc3dc2c7e7652c68064efe"
+    },
+    {
+      "path": "package/dist/errors.js.map",
+      "bytes": 2343,
+      "mode": "0644",
+      "sha256": "304228c6fa4b7e9a1a2fc9aabca108508cd995f92801afd95609b9cb9d1a000f"
+    },
+    {
+      "path": "package/dist/exec.d.ts.map",
+      "bytes": 263,
+      "mode": "0644",
+      "sha256": "a59ce427e189af969f23131b6472d9637d0d461845c53563568ad7227bb121ae"
+    },
+    {
+      "path": "package/dist/exec.js.map",
+      "bytes": 100,
+      "mode": "0644",
+      "sha256": "7ffc69948df16088604c8eafb26335d59755400ab11ca6c41e6a33f69ee25509"
+    },
+    {
+      "path": "package/dist/index.d.ts.map",
+      "bytes": 1932,
+      "mode": "0644",
+      "sha256": "8c407c62876db38643bcbef1cc6fb3b68ae184c1a1d90649ea0bb89d83d56b13"
+    },
+    {
+      "path": "package/dist/index.js.map",
+      "bytes": 1134,
+      "mode": "0644",
+      "sha256": "acf749940a7d3e099e54408a424c673ff99f8d2a570a22ce5545c5abe0a4f233"
+    },
+    {
+      "path": "package/dist/interactivebox.d.ts.map",
+      "bytes": 1252,
+      "mode": "0644",
+      "sha256": "752273272724be00ace1e720a99a02bcf4fbac83e325c41953b90aa5bc80b146"
+    },
+    {
+      "path": "package/dist/interactivebox.js.map",
+      "bytes": 4736,
+      "mode": "0644",
+      "sha256": "df2ca505866b87244fa9365f1f6bfbbdc5debf945334cd4e5e6ca0d10b0b9e42"
+    },
+    {
+      "path": "package/dist/native-contracts.d.ts.map",
+      "bytes": 17220,
+      "mode": "0644",
+      "sha256": "18dae2171a82e568fe4979ac2f801e7438f0e4c8eaf3246c5663de16805783a9"
+    },
+    {
+      "path": "package/dist/native-contracts.js.map",
+      "bytes": 124,
+      "mode": "0644",
+      "sha256": "5dd8f72dbd34ec050a8bfba8c3461e7cf93f39b003a74f083097d8a7acf502d4"
+    },
+    {
+      "path": "package/dist/native.d.ts.map",
+      "bytes": 402,
+      "mode": "0644",
+      "sha256": "adad86ff810651c86c239e18de7a3cb901e61b5ae103ee1e1e99dea0d571b63f"
+    },
+    {
+      "path": "package/dist/native.js.map",
+      "bytes": 990,
+      "mode": "0644",
+      "sha256": "e2ebc502f6fde3be1b2f4dd4bace284897a51574a9311d0dca8a62d314587447"
+    },
+    {
+      "path": "package/dist/options.d.ts.map",
+      "bytes": 487,
+      "mode": "0644",
+      "sha256": "6a6b0a01e94d4192430c7ab3eecb4f2e6c83f90f7a57e274475a52c528bb0ea3"
+    },
+    {
+      "path": "package/dist/options.js.map",
+      "bytes": 337,
+      "mode": "0644",
+      "sha256": "5cc2b0d44f17e3bdf2dce3b44bcfd2d940c61a8335909c3017ca21cc867ffedc"
+    },
+    {
+      "path": "package/dist/simplebox.d.ts.map",
+      "bytes": 7490,
+      "mode": "0644",
+      "sha256": "55029ae09ec85fab6668bb1789d7bf8350a59cdf4ff1dba831523f931a6ea576"
+    },
+    {
+      "path": "package/dist/simplebox.js.map",
+      "bytes": 15175,
+      "mode": "0644",
+      "sha256": "ad7c25eea980895397eabad1e6b32ce122af6c20f3687bfd7e1389c80ec56183"
+    },
+    {
+      "path": "package/dist/skillbox.d.ts.map",
+      "bytes": 1659,
+      "mode": "0644",
+      "sha256": "0032189732eeedef10d283d37adb2802b882346d22551bf56ec580df8431b996"
+    },
+    {
+      "path": "package/dist/skillbox.js.map",
+      "bytes": 11081,
+      "mode": "0644",
+      "sha256": "105ddf53ba5b29e73d70cff8e17637b2af9f2cbb650dc3375fc6d871e6728cd6"
+    },
+    {
+      "path": "package/README.md",
+      "bytes": 24545,
+      "mode": "0644",
+      "sha256": "289614caf2bacfa09b403680335589a04cf3ba708079bbafb4a4a59a196bed56"
+    },
+    {
+      "path": "package/dist/agents.d.ts",
+      "bytes": 5268,
+      "mode": "0644",
+      "sha256": "a26535db745ab247cd18813ae01924e93ff0f050467f08acae323daba990d228"
+    },
+    {
+      "path": "package/dist/browserbox.d.ts",
+      "bytes": 6964,
+      "mode": "0644",
+      "sha256": "703ab4ce68db85918589d52d11a3afb441a94f50a8ae671b9285abc745c388b2"
+    },
+    {
+      "path": "package/dist/codebox.d.ts",
+      "bytes": 4066,
+      "mode": "0644",
+      "sha256": "ff124151923f6ac35bf4c4cc16c17feab215a17d4be547cbfa96a2a9288515ab"
+    },
+    {
+      "path": "package/dist/computerbox.d.ts",
+      "bytes": 7512,
+      "mode": "0644",
+      "sha256": "ff3ffd4a2bea5b57faa6da16035b6dd2c3219d967ce8ce1d819e3345b04fa278"
+    },
+    {
+      "path": "package/dist/constants.d.ts",
+      "bytes": 1217,
+      "mode": "0644",
+      "sha256": "0dc7d9917dd747d32b71b8f4012826348616623a2eeeb0c3634a435c23d38297"
+    },
+    {
+      "path": "package/dist/copy.d.ts",
+      "bytes": 586,
+      "mode": "0644",
+      "sha256": "282b2da87857a6cf435e86b863149fafedb0513821c6f03e24359d61b14eb03e"
+    },
+    {
+      "path": "package/dist/credential.d.ts",
+      "bytes": 1186,
+      "mode": "0644",
+      "sha256": "02e051d122b3140082ae7f55f98e5f3fba04f9330ada81cc7a9ca995a7200429"
+    },
+    {
+      "path": "package/dist/errors.d.ts",
+      "bytes": 3103,
+      "mode": "0644",
+      "sha256": "2165a96a0d252747c4ddab08247d7328fb45ef723057bec6acb023c7f8afce3c"
+    },
+    {
+      "path": "package/dist/exec.d.ts",
+      "bytes": 809,
+      "mode": "0644",
+      "sha256": "1e492383bc053f224e1006752ce15f205ae6c3d2ca97b3c9e870a1d9a9883385"
+    },
+    {
+      "path": "package/dist/index.d.ts",
+      "bytes": 2666,
+      "mode": "0644",
+      "sha256": "6f6b12a70a4f9bfc6e3f516ba2d2d3bacf957756d377b0d2be2712f9b835e5d6"
+    },
+    {
+      "path": "package/dist/interactivebox.d.ts",
+      "bytes": 3957,
+      "mode": "0644",
+      "sha256": "bc87d61ae38d66f14632df7661cdb9a2bc6136e0929eb7d5c61536ab9d1a943f"
+    },
+    {
+      "path": "package/dist/native-contracts.d.ts",
+      "bytes": 25568,
+      "mode": "0644",
+      "sha256": "38eaec30f034ec354a2f594a6c139572fff0638e112ba86dbb8bb2fc2c71383e"
+    },
+    {
+      "path": "package/dist/native.d.ts",
+      "bytes": 1327,
+      "mode": "0644",
+      "sha256": "e850e8baad4ab6eb561d95b9b2d399b9874807273ce0ade33c999c6a0e31b71d"
+    },
+    {
+      "path": "package/dist/options.d.ts",
+      "bytes": 1424,
+      "mode": "0644",
+      "sha256": "02928f0d6a064cbcebccc9811b1b093f4a8ef6f29e59af34afb86ea4c3e6842c"
+    },
+    {
+      "path": "package/dist/simplebox.d.ts",
+      "bytes": 17354,
+      "mode": "0644",
+      "sha256": "0bfd588ec4034be28169e2b1007fe1e08a0c2f8b99d88ca914fad62095aca9d0"
+    },
+    {
+      "path": "package/dist/skillbox.d.ts",
+      "bytes": 3653,
+      "mode": "0644",
+      "sha256": "1875f2af0964292785f3d286016e8f7c7eda0e0e4c9b84681c2e481229f34e26"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "alpi-client",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Command-line and MCP client for Alpi Server",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "bin": {
+    "alpi": "bin/alpi.cjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  }
+}

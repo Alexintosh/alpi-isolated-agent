@@ -1,0 +1,21 @@
+[Unit]
+Description=Alpi sandbox control service
+After=network.target
+
+[Service]
+Type=simple
+User=alpi-server
+Group=alpi-server
+StateDirectory=alpi-server
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/local/bin/alpi-server serve --state-dir /var/lib/alpi-server --listen 127.0.0.1 --port 7443
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

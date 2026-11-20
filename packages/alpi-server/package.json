@@ -1,0 +1,25 @@
+{
+  "name": "alpi-server",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Headless Alpi sandbox control service",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "bin": {
+    "alpi-server": "bin/alpi-server.cjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "LICENSE",
+    "deploy/linux/alpi-server.service",
+    "api/control.openapi.yaml",
+    "manifests/"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  }
+}

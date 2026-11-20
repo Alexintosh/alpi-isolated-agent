@@ -1,0 +1,32 @@
+{
+  "component": "iron-proxy",
+  "version": "0.56.0",
+  "platform": "linux",
+  "architecture": "x64",
+  "publisher": "paradigmxyz",
+  "license": "Apache-2.0",
+  "url": "https://github.com/paradigmxyz/iron-proxy/releases/download/v0.56.0/iron-proxy_0.56.0_linux_amd64.tar.gz",
+  "allowedHosts": ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"],
+  "bytes": 16854992,
+  "sha256": "46189e16f3f97319d68bc6a672f0be003bf8d2f2052ccd2be8cac00d8c3346b2",
+  "files": [
+    {
+      "path": "iron-proxy",
+      "bytes": 53481632,
+      "mode": "0755",
+      "sha256": "ffc438b55c104b896a918dca74fb8b016d0b5e84bf12349586d50e07ea5c9b1f"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 10773,
+      "mode": "0644",
+      "sha256": "f1a78af3197c0b00175f19f18a65f537c957ff87c180997cf6a038f8aa6f0906"
+    },
+    {
+      "path": "README.md",
+      "bytes": 44406,
+      "mode": "0644",
+      "sha256": "89bd051abf4fc1f12bf1e40c08ae4006091587a930e5c8d858a8fff3bc30c595"
+    }
+  ]
+}

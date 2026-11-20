@@ -25,6 +25,7 @@ dist/
 /scripts/*
 !/scripts/collect-notices.cjs
 !/scripts/package-personal-app.cjs
+!/scripts/pack-alpi-control.cjs
 !/scripts/build-guest-bundle.cjs
 !/scripts/acquire-browser-tool.cjs
 !/scripts/acquire-host-python.cjs

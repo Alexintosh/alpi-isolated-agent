@@ -1,0 +1,79 @@
+openapi: 3.1.0
+info:
+  title: Alpi Server control API
+  version: 0.1.0
+paths:
+  /v1/identity:
+    get:
+      operationId: getServerIdentity
+      description: The client checks the pinned TLS certificate before comparing this UUID with the console invitation.
+      responses:
+        '200':
+          description: Stable server identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serverId]
+                properties:
+                  serverId: {type: string, format: uuid}
+  /v1/pair/exchange:
+    post:
+      operationId: exchangeInvitation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [invitation, name]
+              properties:
+                invitation: {type: string, writeOnly: true}
+                name: {type: string, minLength: 1, maxLength: 64}
+      responses:
+        '200':
+          description: Project credential returned once after the server commits enrollment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [credential, clientId, project, role, expiresAt]
+                properties:
+                  credential: {type: string}
+                  clientId: {type: string, format: uuid}
+                  project: {type: string}
+                  role: {$ref: '#/components/schemas/Role'}
+                  expiresAt: {type: integer, description: Unix time in milliseconds}
+        '401':
+          description: Invitation unavailable, consumed, or expired
+        '429':
+          description: Enrollment attempts have exceeded the configured limit
+  /v1/capabilities:
+    get:
+      operationId: getCapabilities
+      security:
+        - bearer: []
+      responses:
+        '200':
+          description: Project-scoped host inventory, including hosts with no installed runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serverId, apiVersion, project, role, runtimes]
+                properties:
+                  serverId: {type: string, format: uuid}
+                  apiVersion: {type: integer, const: 1}
+                  project: {type: string}
+                  role: {$ref: '#/components/schemas/Role'}
+                  runtimes: {type: array, items: {type: object}}
+        '401':
+          description: Missing, expired, revoked, or invalid credential
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+  schemas:
+    Role:
+      type: string
+      enum: [observer, runner, operator]
