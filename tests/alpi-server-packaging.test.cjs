@@ -38,7 +38,8 @@ test('control packages install offline and expose their commands outside the che
         assert.ok(files.includes('profiles/pi-dev/' + recipe));
       }
     }
-    assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/|profiles\/pi-dev\/)/.test(file)), files.join('\n'));
+    if (name === 'alpi-client') assert.ok(files.includes('skills/alpi-server/SKILL.md'));
+    assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/|profiles\/pi-dev\/|skills\/alpi-server\/SKILL\.md$)/.test(file)), files.join('\n'));
     t.diagnostic(name + ' packed bytes: ' + pkg.size);
     archives.push(path.join(temp, pkg.filename));
   }
