@@ -8,6 +8,7 @@ const path = require('node:path');
 const { promisify } = require('node:util');
 const execFile = promisify(require('node:child_process').execFile);
 
+const { runPairingWorkflow } = require('./helpers/alpi-server-workflow.cjs');
 const repo = path.resolve(__dirname, '..');
 
 test('control packages install offline and expose their commands outside the checkout', async (t) => {
@@ -49,4 +50,7 @@ test('control packages install offline and expose their commands outside the che
       if (process.platform !== 'linux') assert.equal(host.kvm, 'unsupported-platform');
     }
   }
+  const binDir = path.join(prefix, 'node_modules', '.bin');
+  await t.test('installed MCP verifies identity and observes revocation', { timeout: 25000 }, sub =>
+    runPairingWorkflow(sub, path.join(binDir, 'alpi-server'), path.join(binDir, 'alpi')));
 });

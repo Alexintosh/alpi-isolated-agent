@@ -34,6 +34,9 @@ dist/
 !/scripts/package-host-python.cjs
 /tests/*
 !/tests/*.test.cjs
+!/tests/helpers/
+/tests/helpers/*
+!/tests/helpers/alpi-server-workflow.cjs
 /guest/*
 !/guest/v1/
 !/guest/package-lock.json
