@@ -11,6 +11,9 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
     && npm cache clean --force \
     && install -d -m 0700 -o node -g node /home/node/workspace /home/node/.pi/agent
 
+COPY guest-session.cjs /opt/alpi/pi/guest-session.cjs
+RUN chmod 0555 /opt/alpi/pi/guest-session.cjs
+
 ENV PATH="/opt/alpi/pi/node_modules/.bin:${PATH}"
 ENV PI_CODING_AGENT_DIR=/home/node/.pi/agent
 USER node

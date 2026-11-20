@@ -19,6 +19,7 @@
     "api/control.openapi.yaml",
     "manifests/",
     "profiles/pi-dev/Dockerfile",
+    "profiles/pi-dev/guest-session.cjs",
     "profiles/pi-dev/package.json",
     "profiles/pi-dev/npm-shrinkwrap.json"
   ],

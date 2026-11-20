@@ -34,7 +34,7 @@ test('control packages install offline and expose their commands outside the che
     assert.ok(files.includes('src/shared/file-stream.py'));
     if (name === 'alpi-server') {
       assert.ok(files.includes('src/shared/artifact-download.cjs'));
-      for (const recipe of ['Dockerfile', 'package.json', 'npm-shrinkwrap.json']) {
+      for (const recipe of ['Dockerfile', 'guest-session.cjs', 'package.json', 'npm-shrinkwrap.json']) {
         assert.ok(files.includes('profiles/pi-dev/' + recipe));
       }
     }
