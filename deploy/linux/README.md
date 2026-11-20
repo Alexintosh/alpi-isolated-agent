@@ -53,3 +53,32 @@ codex mcp add alpi-server -- /absolute/path/to/alpi mcp --context gaming-pc
 ```
 
 In a fresh provider session, list the tools and call `alpi_capabilities`. Compare the returned server ID to the one on the Linux console. With only the control package installed, the runtime list should be empty.
+
+## Guest profiles and local models
+
+The server tarball includes the Pi build recipe under `profiles/pi-dev/`. The recipe pins the Linux amd64 base image and Pi dependencies. Build it with an OCI builder and use the resulting registry manifest digest when registering the image. A Docker local image ID identifies the image configuration and cannot substitute for the manifest digest.
+
+The Linux operator can pass `--profiles /etc/alpi/profiles.json` to `serve`. Each profile names its permitted projects, engine, harnesses, model providers and resource ceiling. The following example grants project `demo` access to a Pi profile and one model on a loopback inference service. Replace the image reference and model ID with values from your installation.
+
+```json
+{
+  "version": 1,
+  "providers": [{
+    "name": "gaming-gpu",
+    "models": ["local-coder"],
+    "upstream": { "scheme": "http", "host": "127.0.0.1", "port": 11434 },
+    "concurrency": 2
+  }],
+  "profiles": [{
+    "name": "pi-dev",
+    "engine": "boxlite",
+    "image": "registry.example/alpi/pi-dev@sha256:<registry-manifest-digest>",
+    "projects": ["demo"],
+    "harnesses": ["pi"],
+    "providers": ["gaming-gpu"],
+    "limits": { "vcpus": 2, "memoryMiB": 2048, "diskMiB": 8192 }
+  }]
+}
+```
+
+Run `alpi-server profiles list --config /etc/alpi/profiles.json --project demo` as the service account to inspect the public view. The file must be owned by root or the service account and writable only by its owner. Paired clients see configured profiles for their project on the active engine. The host keeps the inference address and optional systemd credential reference private. Creating a networked sandbox also requires a working engine and a qualified Iron route.
