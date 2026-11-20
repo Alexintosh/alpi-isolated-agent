@@ -277,6 +277,9 @@ function runNode(script, environment) {
 
 function assertInstalledPaths(result, stateDir) {
   assert.equal(result.engine, 'boxlite');
+  assert.equal(result.qualified, undefined);
+  assert.equal(result.capabilities, undefined);
+  assert.equal(result.sandbox, undefined);
   assert.match(result.set, /^boxlite-\d+\.\d+\.\d+-[a-f0-9]{16}$/);
   assert.equal(result.paths.root, path.join(stateDir, 'runtimes', 'releases', result.set));
   assert.ok(fs.statSync(result.paths.root).isDirectory());

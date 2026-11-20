@@ -59,6 +59,12 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function checkAbort(signal) {
+  if (signal && signal.aborted) {
+    throw signal.reason || new DOMException('Aborted', 'AbortError');
+  }
+}
+
 function currentUid() {
   if (typeof process.geteuid === 'function') return process.geteuid();
   if (typeof process.getuid === 'function') return process.getuid();
@@ -88,7 +94,7 @@ function assertStateDirPath(stateDir) {
   }
 }
 
-function assertPrivateDirStat(stat, label) {
+function assertTrustedStateDir(stat, label) {
   if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) {
     fail('state_dir_insecure', `${label} must be a real directory, not a symlink.`);
   }
@@ -98,6 +104,19 @@ function assertPrivateDirStat(stat, label) {
   }
   if ((stat.mode & 0o022) !== 0) {
     fail('state_dir_insecure', `${label} must not be writable by group or others.`);
+  }
+}
+
+function assertPrivateDirStat(stat, label) {
+  if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) {
+    fail('state_dir_insecure', `${label} must be a real directory, not a symlink.`);
+  }
+  const uid = currentUid();
+  if (uid !== null && stat.uid !== uid) {
+    fail('state_dir_insecure', `${label} must be owned by the service user.`);
+  }
+  if ((stat.mode & 0o077) !== 0 || (stat.mode & 0o700) !== 0o700) {
+    fail('state_dir_insecure', `${label} must be a private owner-only directory.`);
   }
 }
 
@@ -121,7 +140,7 @@ async function prepareStateDir(stateDir) {
     await fsp.chmod(root, 0o700);
     stat = await fsp.lstat(root);
   }
-  assertPrivateDirStat(stat, root);
+  assertTrustedStateDir(stat, root);
 
   const runtimes = path.join(root, 'runtimes');
   await ensurePrivateDir(runtimes, 0o700);
@@ -527,7 +546,9 @@ function assertMetadataMatchesManifests(meta, manifests) {
 async function readTextNoFollow(file) {
   const handle = await fsp.open(
     file,
-    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)
+    fs.constants.O_RDONLY |
+      (fs.constants.O_NOFOLLOW || 0) |
+      (fs.constants.O_NONBLOCK || 0)
   );
   try {
     const stat = await handle.stat();
@@ -903,9 +924,7 @@ class TarGzReader {
   }
 
   checkAbort() {
-    if (this.signal && this.signal.aborted) {
-      throw this.signal.reason || new DOMException('Aborted', 'AbortError');
-    }
+    checkAbort(this.signal);
   }
 
   async pull() {
@@ -1055,9 +1074,7 @@ async function writeExtractedFile(reader, destination, expected, signal) {
     const hash = crypto.createHash('sha256');
     let remaining = expected.bytes;
     while (remaining > 0) {
-      if (signal && signal.aborted) {
-        throw signal.reason || new DOMException('Aborted', 'AbortError');
-      }
+      checkAbort(signal);
       const chunk = await reader.readUpTo(Math.min(remaining, 1024 * 1024));
       if (!chunk) {
         fail('archive_invalid', `Tar archive ended before ${expected.path}.`);
@@ -1420,7 +1437,7 @@ async function publishStaging(stagingDirectory, releaseDirectory, runtimes) {
   await fsyncDirectory(path.join(runtimes, 'staging'));
 }
 
-async function withInstallLock(root, timeoutMs, fn) {
+async function withInstallLock(root, timeoutMs, signal, fn) {
   const lockPath = path.join(root, 'runtimes', 'install.lock');
   const deadline = Date.now() + timeoutMs;
   let guard;
@@ -1430,6 +1447,7 @@ async function withInstallLock(root, timeoutMs, fn) {
       break;
     } catch (error) {
       if (error instanceof ProcessLockError && error.code === 'lock_busy') {
+        checkAbort(signal);
         if (Date.now() >= deadline) {
           fail(
             'busy',
@@ -1508,14 +1526,16 @@ async function installRuntime(options = {}) {
   const manifests = await resolveManifests(options.manifests);
   const setId = computeSetId(manifests);
   const { root, runtimes } = await prepareStateDir(options.stateDir);
+  checkAbort(options.signal);
 
-  return withInstallLock(root, lockTimeoutMs, async () => {
+  return withInstallLock(root, lockTimeoutMs, options.signal, async () => {
     await cleanStaging(runtimes);
     await cleanCacheTemps(runtimes);
     await cleanSelectionTemps(runtimes);
     const current = await readSelection(root);
     const existing = await inspectRelease(root, setId, manifests);
     if (existing.valid) {
+      checkAbort(options.signal);
       await selectSet(root, current, setId);
       return buildResult(root, existing.meta);
     }
@@ -1569,6 +1589,7 @@ async function installRuntime(options = {}) {
       if (!verified.valid) {
         fail('runtime_corrupt', `Published runtime set ${setId} failed verification.`);
       }
+      checkAbort(options.signal);
       await selectSet(root, current, setId);
       return buildResult(root, verified.meta);
     } finally {
@@ -1594,7 +1615,7 @@ async function listRuntimes(options = {}) {
   const root = path.resolve(options.stateDir);
   const rootStat = await lstatOrNull(root);
   if (!rootStat) return { active: null, previous: null, runtimes: [] };
-  assertPrivateDirStat(rootStat, root);
+  assertTrustedStateDir(rootStat, root);
 
   const runtimesDirectory = path.join(root, 'runtimes');
   const runtimesStat = await lstatOrNull(runtimesDirectory);
@@ -1687,7 +1708,7 @@ async function rollbackRuntime(options = {}) {
   }
   assertStateDirPath(options.stateDir);
   const { root } = await prepareStateDir(options.stateDir);
-  return withInstallLock(root, DEFAULT_LOCK_TIMEOUT_MS, async () => {
+  return withInstallLock(root, DEFAULT_LOCK_TIMEOUT_MS, undefined, async () => {
     await cleanSelectionTemps(path.join(root, 'runtimes'));
     const current = await readSelection(root);
     if (!current.previous) {
