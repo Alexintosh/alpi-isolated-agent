@@ -31,6 +31,21 @@ Install the client tarball using Node.js 24. Prepare an owner-only directory and
 
 Use the remote console to issue an invitation and transfer its output through a trusted channel into an owner-only file. Treat a lost exchange response as a possibly successful enrollment. Inspect the enrolled clients from the Linux console before issuing a replacement. Confirm the pinned server fingerprint and server ID through the console.
 
+The following example pairs from the provider machine using the existing SSH operator channel. It assumes the tunnel above is running. Run key creation once per encrypted store and keep a private backup. Use separate contexts for automation and interactive administration.
+
+```sh
+export ALPI_CONFIG_DIR="$HOME/.config/alpi"
+export ALPI_CONTEXT_KEY_FILE="$HOME/.local/share/alpi-keys/context.key"
+(umask 077 && mkdir -p "$(dirname "$ALPI_CONTEXT_KEY_FILE")" && set -C && openssl rand 32 > "$ALPI_CONTEXT_KEY_FILE")
+```
+
+Display the server UUID and SHA-256 TLS fingerprint through the trusted Linux console before exchanging the invitation. The one-time envelope contains both values. If SSH sudo needs a password, issue the invitation in an authenticated operator session and transfer the envelope through a private file instead of combining a password prompt with the pipeline.
+
+```sh
+ssh GAMING_PC sudo -n -u alpi-server /usr/local/bin/alpi-server pair issue --state-dir /var/lib/alpi-server --project demo --role runner --expires 5m --origin https://127.0.0.1:7443 | alpi pair --name gaming-pc
+alpi capabilities --context gaming-pc
+```
+
 After pairing a context named `gaming-pc`, register the client with the provider selected in T3. For the Codex provider, use the absolute installed executable:
 
 ```sh
