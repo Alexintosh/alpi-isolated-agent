@@ -82,3 +82,12 @@ The Linux operator can pass `--profiles /etc/alpi/profiles.json` to `serve`. Eac
 ```
 
 Run `alpi-server profiles list --config /etc/alpi/profiles.json --project demo` as the service account to inspect the public view. The file must be owned by root or the service account and writable only by its owner. Paired clients see configured profiles for their project on the active engine. The host keeps the inference address and optional systemd credential reference private. Creating a networked sandbox also requires a working engine and a qualified Iron route.
+
+After configuring the catalog, install the selected host dependencies and warm the pinned image cache using the service account.
+
+```sh
+sudo -u alpi-server alpi-server runtime install --state-dir /var/lib/alpi-server --engine boxlite --profile pi-dev
+sudo -u alpi-server alpi-server doctor --runtime --state-dir /var/lib/alpi-server
+```
+
+The default catalog is `/etc/alpi/profiles.json`. Use `--profiles FILE` with both the install and serve commands for another location. Omitting `--profile` installs the engine and Iron alone. The doctor checks the active files against the package's release manifests and reports KVM device access. Image acquisition uses the local BoxLite SDK and requires a host on which its runtime can open.

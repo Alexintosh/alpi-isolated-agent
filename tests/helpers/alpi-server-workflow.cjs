@@ -92,6 +92,10 @@ async function runPairingWorkflow(t, server, client, { installRuntime = false } 
       server, 'runtime', 'install', '--state-dir', state, '--engine', 'boxlite',
     ], { env, timeout: 180000 });
     const installed = JSON.parse(installation.stdout);
+    const doctor = await run(process.execPath, [server, 'doctor', '--runtime', '--state-dir', state], { env });
+    const diagnosis = JSON.parse(doctor.stdout);
+    assert.equal(diagnosis.active.id, installed.set);
+    assert.equal(diagnosis.verification, 'files-verified');
     const refreshed = await call(5, 'tools/call', toolArgs);
     assert.ok(!refreshed.result.isError);
     const inventory = refreshed.result.structuredContent.runtimes;

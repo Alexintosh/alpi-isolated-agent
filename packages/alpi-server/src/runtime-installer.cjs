@@ -1716,9 +1716,29 @@ async function rollbackRuntime(options = {}) {
   });
 }
 
+// Resolve executable paths for host-side adapters only. Public inventory is metadata;
+// code loading also checks every installed file against the trusted release manifests.
+async function verifyRuntime({ stateDir, set, manifests: suppliedManifests }) {
+  assertStateDirPath(stateDir);
+  const root = path.resolve(stateDir);
+  const manifests = await resolveManifests(suppliedManifests);
+  for (const dir of [root, path.join(root, 'runtimes'), path.join(root, 'runtimes', 'releases')]) {
+    const info = await lstatOrNull(dir);
+    if (!info) fail('runtime_unavailable', 'No verified runtime is installed.');
+    assertPrivateDirStat(info, dir);
+  }
+  const id = set ?? (await readSelection(root)).active;
+  if (!id) fail('runtime_unavailable', 'No runtime is selected.');
+  if (id !== computeSetId(manifests)) fail('runtime_untrusted', 'Missing trusted release manifests for this runtime.');
+  const inspected = await inspectRelease(root, id, manifests);
+  if (!inspected.valid) fail('runtime_corrupt', 'Installed runtime verification failed.');
+  return buildResult(root, inspected.meta);
+}
+
 module.exports = {
   RuntimeInstallerError,
   installRuntime,
   listRuntimes,
   rollbackRuntime,
+  verifyRuntime,
 };

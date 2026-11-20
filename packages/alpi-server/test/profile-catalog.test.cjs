@@ -51,3 +51,21 @@ test('operator file is bounded and read only from a trusted regular file', async
   await fs.writeFile(file, Buffer.alloc(65537));
   await assert.rejects(readProfileCatalog(file), { code: 'invalid_host_config' });
 });
+
+test('profile image install verifies the registry manifest and reuses its cached layers', async () => {
+  const { cachePinnedImage } = require('../src/profile-image.cjs');
+  const image = config().profiles[0].image;
+  const digest = image.split('@')[1];
+  const versions = [];
+  let pulls = 0;
+  const runtime = { images: {
+    async get() { return { versions }; },
+    async pull(ref) { assert.equal(ref, image); pulls++; versions.push({ digest }); },
+  } };
+  assert.equal(await cachePinnedImage(runtime, image), digest);
+  assert.equal(await cachePinnedImage(runtime, image), digest);
+  assert.equal(pulls, 1);
+  await assert.rejects(cachePinnedImage({ images: {
+    get: async () => ({ versions: [] }), pull: async () => ({ configDigest: digest }),
+  } }, image));
+});

@@ -5,7 +5,7 @@ const HELP = `Usage:
   alpi-server --help
   alpi-server doctor --host [--state-dir DIR]
   alpi-server doctor --runtime --state-dir DIR
-  alpi-server runtime install --engine boxlite --state-dir DIR
+  alpi-server runtime install --engine boxlite --state-dir DIR [--profile NAME] [--profiles FILE]
   alpi-server runtime rollback --state-dir DIR
   alpi-server runtime list --state-dir DIR
   alpi-server profiles list --config FILE --project PROJECT
@@ -156,9 +156,8 @@ async function runServe(args) {
 
   const { startServer } = require('../src/daemon.cjs');
   const { listRuntimes } = require('../src/runtime-installer.cjs');
-  const { readProfileCatalog, makeProfileCatalog } = require('../src/profile-catalog.cjs');
-  const catalog = values.profiles ? await readProfileCatalog(values.profiles) :
-    makeProfileCatalog({ version: 1, providers: [], profiles: [] });
+  const { loadHostProfiles } = require('../src/profile-catalog.cjs');
+  const catalog = await loadHostProfiles(values.profiles);
   const { openHostResources } = require('../src/host-resources.cjs');
   const server = await startServer({
     openResources: openHostResources,
@@ -250,7 +249,7 @@ async function runClientsRevoke(args) {
 }
 
 async function runRuntime(action, args) {
-  const allowed = action === 'install' ? ['state-dir', 'engine'] : ['state-dir'];
+  const allowed = action === 'install' ? ['state-dir', 'engine', 'profile', 'profiles'] : ['state-dir'];
   const { values, positionals } = parseOptions(args, new Set(allowed));
   if (positionals.length) throw new CliUsageError('Unexpected runtime argument.');
   const stateDir = requireValue(values, 'state-dir');
@@ -259,11 +258,26 @@ async function runRuntime(action, args) {
   if (action === 'install') {
     const engine = requireValue(values, 'engine');
     if (engine !== 'boxlite') throw new CliUsageError('The available runtime package is boxlite.');
+    if (values.profiles && !values.profile) throw new CliUsageError('--profiles requires a named --profile.');
+    let profile;
+    if (values.profile) {
+      const { loadHostProfiles } = require('../src/profile-catalog.cjs');
+      profile = (await loadHostProfiles(values.profiles)).installedProfile(engine, values.profile);
+    }
     result = await installer.installRuntime({ stateDir, engine });
+    if (profile) result.profile = await require('../src/profile-image.cjs').ensureImage({ stateDir, profile });
   } else if (action === 'rollback') {
     result = await installer.rollbackRuntime({ stateDir });
   } else {
     result = await installer.listRuntimes({ stateDir });
+    if (action === 'doctor') {
+      result.verification = 'no-active-runtime';
+      if (result.active) {
+        await installer.verifyRuntime({ stateDir, set: result.active.id });
+        result.verification = 'files-verified';
+        result.kvm = (await require('../src/host-doctor.cjs').inspectHost(stateDir)).kvm;
+      }
+    }
   }
   process.stdout.write(JSON.stringify(result) + '\n');
 }
@@ -279,6 +293,7 @@ function safeErrorMessage(error) {
     'IdentityError',
     'PairingStoreError',
   ]);
+  if (error.name === 'ProfileError' && error.code === 'profile_unavailable') return 'Profile unavailable. Configure a pinned image in the host profile catalog.';
   if (error.name === 'RuntimeInstallerError' && /^[a-z_]{1,64}$/.test(error.code)) {
     return 'Runtime operation failed (' + error.code + ').';
   }
@@ -319,7 +334,7 @@ async function main(argv) {
   }
 
   if (command === 'doctor' && rest[0] === '--runtime') {
-    return runRuntime('list', rest.slice(1));
+    return runRuntime('doctor', rest.slice(1));
   }
   if (command === 'runtime') {
     if (!['install', 'rollback', 'list'].includes(rest[0])) {

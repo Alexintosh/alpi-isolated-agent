@@ -61,6 +61,11 @@ function makeProfileCatalog(config) {
   }
   return Object.freeze({
     resolve,
+    installedProfile(engine, name) {
+      const profile = profiles.get(name);
+      if (!profile || profile.engine !== engine) throw new ProfileError('profile_unavailable');
+      return profile;
+    },
     modelRoute(project, engine, name, harness, provider, model) {
       const profile = resolve(project, engine, name);
       const route = providers.get(provider);
@@ -101,4 +106,15 @@ async function readProfileCatalog(file) {
   } finally { await fd.close(); }
 }
 
-module.exports = { ProfileError, makeProfileCatalog, readProfileCatalog };
+async function loadHostProfiles(filename) {
+  try {
+    return await readProfileCatalog(filename ?? '/etc/alpi/profiles.json');
+  } catch (error) {
+    if (filename === undefined && error.code === 'ENOENT') {
+      return makeProfileCatalog({ version: 1, profiles: [], providers: [] });
+    }
+    throw error;
+  }
+}
+
+module.exports = { ProfileError, makeProfileCatalog, readProfileCatalog, loadHostProfiles };

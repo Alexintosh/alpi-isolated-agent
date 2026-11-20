@@ -11,6 +11,7 @@ const zlib = require('node:zlib');
 const {
   RuntimeInstallerError,
   installRuntime,
+  verifyRuntime,
   listRuntimes,
   rollbackRuntime,
 } = require('../src/runtime-installer.cjs');
@@ -313,6 +314,8 @@ test('installs a synthetic BoxLite runtime set and exposes bounded records', asy
 
   assertInstalledPaths(result, stateDir);
   assert.equal(result.version, '0.1.0');
+  assert.deepEqual(await verifyRuntime({ stateDir, manifests: release.manifests }), result);
+  await assert.rejects(verifyRuntime({ stateDir }), { code: 'runtime_untrusted' });
   assert.deepEqual(
     result.components.map((component) => component.component),
     COMPONENTS
