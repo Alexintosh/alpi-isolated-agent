@@ -1342,13 +1342,8 @@ function createPiHarness(options) {
       if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
         fail('invalid_input', 'operatorSend requires an object.');
       }
-      const sessionId = assertUuid(spec.nativeSessionId);
-      const session = requireSession(sessionId);
-      if (!session.paused) {
-        fail('not_paused', 'Operator input requires a paused conversation.');
-      }
       return adapter.submit({
-        nativeSessionId: sessionId,
+        nativeSessionId: spec.nativeSessionId,
         requestId: spec.requestId,
         message: spec.message,
         generation: spec.generation,
