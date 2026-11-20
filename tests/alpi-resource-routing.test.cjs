@@ -71,3 +71,44 @@ test('paired resource calls use the enrolled role and project and observe revoca
   await server.close();
   assert.equal(closed, true);
 });
+
+test('paired observer follows a persisted job after restart using its own cursor', async t => {
+  const { openWorkStore } = require('../packages/alpi-server/src/work-store.cjs');
+  const { openHostResources } = require('../packages/alpi-server/src/host-resources.cjs');
+  const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'aj-'));
+  const stateDir = path.join(parent, 's');
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const principal = { project: 'one', clientId: randomUUID(), role: 'runner' };
+  const store = openWorkStore(stateDir);
+  let sandbox, job;
+  try {
+    sandbox = store.reserveSandbox(principal, { requestId: randomUUID(), engine: 'boxlite', engineVersion: '0.14.1',
+      profile: 'pi-dev', imageDigest: 'sha256:' + '1'.repeat(64), resources: { vcpus: 1, memoryMiB: 512, diskMiB: 2048 } });
+    job = store.submitJob(principal, { requestId: randomUUID(), workspaceId: sandbox.workspaceId, payload: { prompt: 'private-input' } });
+    store.appendEvent(principal, { type: 'message', jobId: job.jobId, data: { text: 'result', rawProviderBody: 'hidden' } });
+  } finally { store.close(); }
+  const server = await startServer({ stateDir, port: 0, handleSignals: false, openResources: openHostResources });
+  try {
+    async function clientFor(project) {
+      const invite = await issuePairing({ stateDir, project, role: 'observer' });
+      const endpoint = { origin: server.origin, fingerprint: invite.fingerprint };
+      const response = await requestJson({ ...endpoint, method: 'POST', path: '/v1/pair/exchange',
+        body: { invitation: invite.invitation, name: 'reader' } });
+      return createClient({ ...endpoint, serverId: invite.serverId, project, role: 'observer',
+        credential: response.credential, credentialExpiresAt: response.expiresAt });
+    }
+    const reader = await clientFor('one');
+    const other = await clientFor('two');
+    const listed = await reader.requestResource('listSandboxes');
+    assert.deepEqual(listed.sandboxes.map(item => item.workspaceId), [job.workspaceId]);
+    const status = await reader.requestResource('getJob', { jobId: job.jobId });
+    assert.equal(status.sessionUuid, job.sessionUuid);
+    assert.ok(!JSON.stringify(status).includes('private-input'));
+    const page = await reader.requestResource('getEvents', { jobId: job.jobId, after: '0' });
+    assert.equal(page.events[0].untrustedText, 'result');
+    assert.ok(!JSON.stringify(page).includes('rawProviderBody'));
+    const next = await reader.requestResource('getEvents', { jobId: job.jobId, after: String(page.nextSeq) });
+    assert.deepEqual(next.events, []);
+    await assert.rejects(other.requestResource('getJob', { jobId: job.jobId }), { statusCode: 404 });
+  } finally { await server.close(); }
+});

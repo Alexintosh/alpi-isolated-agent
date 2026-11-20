@@ -41,7 +41,7 @@ async function start(t, executable, args, env) {
   return child;
 }
 
-async function runPairingWorkflow(t, server, client) {
+async function runPairingWorkflow(t, server, client, { installRuntime = false } = {}) {
   const temp = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'alpi-pilot-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));
   const state = path.join(temp, 's');
@@ -86,6 +86,22 @@ async function runPairingWorkflow(t, server, client) {
   assert.equal(caps.serverId, invite.serverId);
   assert.equal(caps.project, 'demo');
   assert.deepEqual(caps.runtimes, []);
+
+  if (installRuntime) {
+    const installation = await run(process.execPath, [
+      server, 'runtime', 'install', '--state-dir', state, '--engine', 'boxlite',
+    ], { env, timeout: 180000 });
+    const installed = JSON.parse(installation.stdout);
+    const refreshed = await call(5, 'tools/call', toolArgs);
+    assert.ok(!refreshed.result.isError);
+    const inventory = refreshed.result.structuredContent.runtimes;
+    const active = inventory.find(item => item.active);
+    assert.ok(active, 'the same MCP process observes runtime activation');
+    assert.equal(active.id, installed.set);
+    assert.equal(active.engine, 'boxlite');
+    assert.deepEqual(active.components.map(item => item.component).sort(), installed.components.map(item => item.component).sort());
+    assert.ok(!JSON.stringify(inventory).includes(state), 'public inventory conceals host paths');
+  }
 
   const listed = await run(process.execPath, [server, 'clients', 'list', '--state-dir', state], { env });
   const entries = JSON.parse(listed.stdout);

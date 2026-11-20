@@ -4,7 +4,12 @@
 const HELP = `Usage:
   alpi-server --help
   alpi-server doctor --host [--state-dir DIR]
-  alpi-server serve --state-dir DIR [--listen HOST] [--port PORT] [--origin URL]
+  alpi-server doctor --runtime --state-dir DIR
+  alpi-server runtime install --engine boxlite --state-dir DIR
+  alpi-server runtime rollback --state-dir DIR
+  alpi-server runtime list --state-dir DIR
+  alpi-server profiles list --config FILE --project PROJECT
+  alpi-server serve --state-dir DIR [--listen HOST] [--port PORT] [--origin URL] [--profiles FILE]
   alpi-server pair issue --state-dir DIR --project PROJECT --role ROLE
                          [--expires 5m] [--origin URL]
   alpi-server clients list --state-dir DIR
@@ -138,7 +143,7 @@ function printHelp() {
 async function runServe(args) {
   const { values, positionals } = parseOptions(
     args,
-    new Set(['state-dir', 'listen', 'port', 'origin'])
+    new Set(['state-dir', 'listen', 'port', 'origin', 'profiles'])
   );
   if (positionals.length > 0) {
     throw new CliUsageError('serve accepts no positional arguments.');
@@ -150,7 +155,19 @@ async function runServe(args) {
   const origin = values.origin;
 
   const { startServer } = require('../src/daemon.cjs');
+  const { listRuntimes } = require('../src/runtime-installer.cjs');
+  const { readProfileCatalog, makeProfileCatalog } = require('../src/profile-catalog.cjs');
+  const catalog = values.profiles ? await readProfileCatalog(values.profiles) :
+    makeProfileCatalog({ version: 1, providers: [], profiles: [] });
+  const { openHostResources } = require('../src/host-resources.cjs');
   const server = await startServer({
+    openResources: openHostResources,
+    runtimeInventory: async principal => {
+      const { runtimes } = await listRuntimes({ stateDir });
+      const configured = catalog.forProject(principal.project);
+      return runtimes.map(record => ({ ...record, configuredProfiles: record.active ?
+        configured.filter(profile => profile.engine === record.engine) : [] }));
+    },
     stateDir,
     listenHost,
     port,
@@ -232,6 +249,25 @@ async function runClientsRevoke(args) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
+async function runRuntime(action, args) {
+  const allowed = action === 'install' ? ['state-dir', 'engine'] : ['state-dir'];
+  const { values, positionals } = parseOptions(args, new Set(allowed));
+  if (positionals.length) throw new CliUsageError('Unexpected runtime argument.');
+  const stateDir = requireValue(values, 'state-dir');
+  const installer = require('../src/runtime-installer.cjs');
+  let result;
+  if (action === 'install') {
+    const engine = requireValue(values, 'engine');
+    if (engine !== 'boxlite') throw new CliUsageError('The available runtime package is boxlite.');
+    result = await installer.installRuntime({ stateDir, engine });
+  } else if (action === 'rollback') {
+    result = await installer.rollbackRuntime({ stateDir });
+  } else {
+    result = await installer.listRuntimes({ stateDir });
+  }
+  process.stdout.write(JSON.stringify(result) + '\n');
+}
+
 function safeErrorMessage(error) {
   if (!error || typeof error.message !== 'string') {
     return 'Command failed.';
@@ -243,6 +279,9 @@ function safeErrorMessage(error) {
     'IdentityError',
     'PairingStoreError',
   ]);
+  if (error.name === 'RuntimeInstallerError' && /^[a-z_]{1,64}$/.test(error.code)) {
+    return 'Runtime operation failed (' + error.code + ').';
+  }
   if (safeNames.has(error.name)) {
     return error.message;
   }
@@ -262,6 +301,14 @@ async function main(argv) {
   const command = argv[0];
   const rest = argv.slice(1);
 
+  if (command === 'profiles' && rest[0] === 'list') {
+    const { values, positionals } = parseOptions(rest.slice(1), new Set(['config', 'project']));
+    if (positionals.length) throw new CliUsageError('Unexpected profiles argument.');
+    const { readProfileCatalog } = require('../src/profile-catalog.cjs');
+    const catalog = await readProfileCatalog(requireValue(values, 'config'));
+    process.stdout.write(JSON.stringify(catalog.forProject(requireValue(values, 'project'))) + '\n');
+    return;
+  }
   if (command === 'doctor' && rest[0] === '--host') {
     const { values, positionals } = parseOptions(rest.slice(1), new Set(['state-dir']));
     if (positionals.length) throw new CliUsageError('doctor --host accepts no positional arguments.');
@@ -271,6 +318,15 @@ async function main(argv) {
     return;
   }
 
+  if (command === 'doctor' && rest[0] === '--runtime') {
+    return runRuntime('list', rest.slice(1));
+  }
+  if (command === 'runtime') {
+    if (!['install', 'rollback', 'list'].includes(rest[0])) {
+      throw new CliUsageError('Expected runtime install, list or rollback.');
+    }
+    return runRuntime(rest[0], rest.slice(1));
+  }
   if (command === 'serve') {
     await runServe(rest);
     return;

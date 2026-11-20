@@ -32,8 +32,13 @@ test('control packages install offline and expose their commands outside the che
     assert.ok(files.includes('bin/' + bin + '.cjs'));
     assert.ok(files.includes('LICENSE'));
     assert.ok(files.includes('src/shared/file-stream.py'));
-    if (name === 'alpi-server') assert.ok(files.includes('src/shared/artifact-download.cjs'));
-    assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/)/.test(file)), files.join('\n'));
+    if (name === 'alpi-server') {
+      assert.ok(files.includes('src/shared/artifact-download.cjs'));
+      for (const recipe of ['Dockerfile', 'package.json', 'npm-shrinkwrap.json']) {
+        assert.ok(files.includes('profiles/pi-dev/' + recipe));
+      }
+    }
+    assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/|profiles\/pi-dev\/)/.test(file)), files.join('\n'));
     t.diagnostic(name + ' packed bytes: ' + pkg.size);
     archives.push(path.join(temp, pkg.filename));
   }
@@ -60,4 +65,8 @@ test('control packages install offline and expose their commands outside the che
   const binDir = path.join(prefix, 'node_modules', '.bin');
   await t.test('installed MCP verifies identity and observes revocation', { timeout: 25000 }, sub =>
     runPairingWorkflow(sub, path.join(binDir, 'alpi-server'), path.join(binDir, 'alpi')));
+  if (process.env.ALPI_TEST_RUNTIME_DOWNLOAD === '1') {
+    await t.test('existing MCP observes explicit Linux runtime installation', { timeout: 220000 }, sub =>
+      runPairingWorkflow(sub, path.join(binDir, 'alpi-server'), path.join(binDir, 'alpi'), { installRuntime: true }));
+  }
 });
