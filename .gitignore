@@ -46,3 +46,4 @@ dist/
 !/docs/alpi-orchestration.md
 
 !/docs/alpi-orchestration-observability-plan.md
+!/docs/alpi-server-implementation-plan.md
