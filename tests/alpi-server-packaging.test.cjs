@@ -31,12 +31,19 @@ test('control packages install offline and expose their commands outside the che
     const files = pkg.files.map(entry => entry.path);
     assert.ok(files.includes('bin/' + bin + '.cjs'));
     assert.ok(files.includes('LICENSE'));
+    assert.ok(files.includes('src/shared/file-stream.py'));
     if (name === 'alpi-server') assert.ok(files.includes('src/shared/artifact-download.cjs'));
     assert.ok(files.every(file => /^(?:bin\/|src\/|package\.json$|LICENSE$|README\.md$|deploy\/|api\/|manifests\/)/.test(file)), files.join('\n'));
     t.diagnostic(name + ' packed bytes: ' + pkg.size);
     archives.push(path.join(temp, pkg.filename));
   }
   await execFile('npm', ['install', '--prefix', prefix, '--no-save', ...archives], { cwd: temp, env });
+  const fileStream = await fs.readFile(path.join(repo, 'src/runtime/file-stream.py'));
+  for (const name of ['alpi-server', 'alpi-client']) {
+    const installed = path.join(prefix, 'node_modules', name, 'src/shared/file-stream.py');
+    assert.ok((await fs.lstat(installed)).isFile());
+    assert.deepEqual(await fs.readFile(installed), fileStream);
+  }
   for (const bin of ['alpi-server', 'alpi']) {
     const cmd = path.join(prefix, 'node_modules', '.bin', bin);
     const { stdout } = await execFile(cmd, ['--help'], { cwd: temp, env, timeout: 5000 });
