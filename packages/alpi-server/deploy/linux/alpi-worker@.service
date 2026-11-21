@@ -1,0 +1,84 @@
+# NETNS-WORKER-1: per-allocation, nonroot, isolated BoxLite engine worker.
+#
+# Instance name: alpi-worker@<lowercase-allocation-uuid>.service
+# The host writes <state>/workers/<uuid>/worker.json atomically before starting
+# this unit. The unit itself is never enabled at boot; it is instantiated only
+# for an owned allocation and stopped when that allocation is stopped.
+#
+# Default state root is /var/lib/alpi-server (%S/alpi-server). A deployment that
+# uses a different state root must override ExecStart and ReadWritePaths in a
+# drop-in; the host launcher writes the same path into the worker config.
+
+[Unit]
+Description=Alpi isolated sandbox engine worker (%i)
+Documentation=file:///usr/share/doc/alpi-server/README.md
+After=network.target
+ConditionPathExists=%S/alpi-server/workers/%i/worker.json
+# Never start a worker at boot. Each instance is explicitly started by the
+# authenticated host control service after the trusted config is written.
+RefuseManualStart=no
+
+[Service]
+Type=exec
+User=alpi-server
+Group=alpi-server
+# /dev/kvm is accessed through the distribution's kvm group. No capability is
+# granted; the worker and the boxlite-shim it spawns remain unprivileged.
+SupplementaryGroups=kvm
+
+# One network namespace per allocation, containing only loopback. gvproxy runs
+# inside the verified boxlite-shim in this namespace (pinned BoxLite 0.14.1
+# src/shim/src/main.rs). The worker's only TCP listener is the fixed
+# 127.0.0.1 tunnel endpoint; no management TCP socket is exposed.
+PrivateNetwork=yes
+IPAddressAllow=127.0.0.1/32
+IPAddressAllow=::1/128
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# Kill every process in the service cgroup (worker and shim/gvproxy) together.
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+TimeoutStopSec=30
+
+# No privilege escalation, no ambient or permitted capabilities.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+
+# State protection: the worker may write only its own allocation directory.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=%S/alpi-server/workers/%i
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+LockPersonality=yes
+UMask=0077
+
+# Device policy: only KVM plus the basic character devices Node and the VMM
+# need. No raw device or host block device access.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/zero rw
+DeviceAllow=/dev/random rw
+DeviceAllow=/dev/urandom rw
+DeviceAllow=/dev/ptmx rw
+
+LimitNOFILE=65536
+Restart=no
+
+Environment=ALPI_STATE_ROOT=%S/alpi-server
+Environment=ALPI_ALLOCATION_ID=%i
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env node /usr/local/lib/node_modules/alpi-server/src/network/engine-worker.cjs --config %S/alpi-server/workers/%i/worker.json
+
+# No [Install] section: this is an instantiated template, not a boot service.

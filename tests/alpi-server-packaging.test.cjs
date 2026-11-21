@@ -36,7 +36,9 @@ test('control packages install offline and expose their commands outside the che
       assert.ok(files.includes('src/shared/artifact-download.cjs'));
       assert.ok(files.includes('deploy/linux/README.md'));
       for (const required of ['src/runtime/network-policy.cjs', 'src/runtime/owned-process.cjs',
-        'src/protocol/iron-transform.proto', 'src/protocol/IRON-LICENSE', 'profiles/iron-callback/npm-shrinkwrap.json',
+        'deploy/linux/alpi-worker@.service', 'deploy/linux/50-alpi-worker.rules',
+        'src/network/engine-worker.cjs', 'src/network/worker-client.cjs', 'src/network/launch-boundary.cjs',
+        'src/network/loopback-routes.cjs', 'src/protocol/iron-transform.proto', 'src/protocol/IRON-LICENSE', 'profiles/iron-callback/npm-shrinkwrap.json',
         'profiles/iron-callback/callback-runtime.cjs', 'profiles/iron-callback/package.json']) assert.ok(files.includes(required));
 
       for (const recipe of ['Dockerfile', 'guest-session.cjs', 'package.json', 'npm-shrinkwrap.json']) {
@@ -54,6 +56,20 @@ test('control packages install offline and expose their commands outside the che
     const installed = path.join(prefix, 'node_modules', name, 'src/shared/file-stream.py');
     assert.ok((await fs.lstat(installed)).isFile());
     assert.deepEqual(await fs.readFile(installed), fileStream);
+  }
+  const installedServer = path.join(prefix, 'node_modules', 'alpi-server');
+  const unit = await fs.readFile(path.join(installedServer, 'deploy/linux/alpi-worker@.service'), 'utf8');
+  const entry = unit.match(/^ExecStart=\/usr\/bin\/env node \/usr\/local\/lib\/node_modules\/alpi-server\/(\S+) --config /m);
+  assert.ok(entry, 'Worker entry point from documented installation prefix');
+  const script = path.join(installedServer, entry[1]);
+  await execFile(process.execPath, ['-e', 'require(process.argv[1])', script], { cwd: temp, env });
+  if (process.platform === 'linux' && Object.keys(os.networkInterfaces()).every(name => name === 'lo')) {
+    await t.test('installed worker recognizes the actual isolated Linux namespace', async () => {
+      const { stdout } = await execFile(process.execPath, ['-e',
+        'require(process.argv[1]).observeLoopbackOnly().then(info => console.log(JSON.stringify(info.interfaces)))',
+        script], { cwd: temp, env });
+      assert.deepEqual(JSON.parse(stdout), ['lo']);
+    });
   }
   for (const bin of ['alpi-server', 'alpi']) {
     const cmd = path.join(prefix, 'node_modules', '.bin', bin);

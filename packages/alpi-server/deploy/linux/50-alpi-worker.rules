@@ -1,0 +1,37 @@
+// NETNS-WORKER-1 polkit rule.
+//
+// Install as /etc/polkit-1/rules.d/50-alpi-worker.rules (root-owned, mode 0644).
+// It lets only the dedicated alpi-server service account start or stop exactly
+// one per-allocation template instance:
+//
+//     alpi-worker@<lowercase-uuid>.service
+//
+// It does not grant generic systemctl, daemon-reload, enable/disable, restart,
+// kill, arbitrary units, arbitrary verbs, or any other systemd action. The host
+// client never invokes sudo or pkexec; systemctl asks polkit only when the
+// caller lacks direct authorization.
+//
+// This file is JavaScript evaluated by polkitd as root. Keep the UUID pattern
+// anchored and lowercase to match the strict host client and systemd template.
+
+polkit.addRule(function (action, subject) {
+  if (action.id !== "org.freedesktop.systemd1.manage-units") {
+    return;
+  }
+  if (subject.user !== "alpi-server") {
+    return;
+  }
+  // The dedicated daemon has no interactive logind session.
+  var verb = action.lookup("verb");
+  if (verb !== "start" && verb !== "stop") {
+    return;
+  }
+  var unit = action.lookup("unit");
+  if (
+    typeof unit !== "string" ||
+    !/^alpi-worker@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.service$/.test(unit)
+  ) {
+    return;
+  }
+  return polkit.Result.YES;
+});
