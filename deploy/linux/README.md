@@ -19,6 +19,19 @@ systemctl is-active alpi-server.service
 
 The system service owns its private state under `/var/lib/alpi-server`. Run administrative commands as the service account or through the Linux operator's authorized administration channel. The database, TLS key and admin socket belong on the host.
 
+## Install the isolated worker on a KVM host
+
+The same server tarball contains the per-allocation worker and its service policy. With the global prefix above, install the templates as the Linux operator. The host needs systemd with cgroup v2, polkit, Node.js 24 on the system service PATH and a kvm group with access to /dev/kvm.
+
+```sh
+package=/usr/local/lib/node_modules/alpi-server/deploy/linux
+sudo install -m 0644 "$package/alpi-worker@.service" /etc/systemd/system/alpi-worker@.service
+sudo install -m 0644 "$package/50-alpi-worker.rules" /etc/polkit-1/rules.d/50-alpi-worker.rules
+sudo systemctl daemon-reload
+```
+
+The host starts each worker on demand after writing its private allocation configuration. Each worker has a separate network namespace and verifies the guest runtime before opening a model route. Live KVM qualification and automatic worker selection by the control service are pending.
+
 ## Reach the service from T3
 
 For the default loopback listener, open the tunnel on the machine and account running the T3 provider. Substitute the SSH alias of the Linux PC.
