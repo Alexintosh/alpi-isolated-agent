@@ -26,6 +26,22 @@ const operations = [
   ['issueTicket', 'POST', 'sandboxes/:sandboxId/terminal-tickets', 'operator'],
 ].map(([name, method, path, role]) => Object.freeze({ name, method, parts: Object.freeze(path.split('/')), role }));
 
+const resourceStatus = Object.freeze({
+  invalid_input: 400, forbidden: 403, not_found: 404,
+  lease_held: 409, lease_missing: 409, lease_stale: 409, lease_expired: 409,
+  generation_conflict: 409, invalid_transition: 409, idempotency_conflict: 409,
+  export_required: 409, payload_too_large: 413, quota_exceeded: 429,
+  invalid_size: 400, invalid_digest: 400, invalid_chunk: 400, invalid_offset: 400,
+  offset_mismatch: 409, conflict: 409, not_ready: 409, incomplete: 409,
+  digest_mismatch: 422, artifact_failed: 409, upload_expired: 410, chunk_limit: 413,
+  profile_unavailable: 503, model_unavailable: 503, unavailable_engine: 503,
+  runtime_unavailable: 503, service_unavailable: 503, store_busy: 503, store_unavailable: 503,
+});
+
+function matchesResourceError(code, status) {
+  return typeof code === 'string' && Object.hasOwn(resourceStatus, code) && resourceStatus[code] === status;
+}
+
 const roles = Object.freeze({ observer: 1, runner: 2, operator: 3 });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -74,4 +90,4 @@ function resourceRequest(name, params = {}) {
   return { method: route.method, path: '/v1/' + route.parts.map(part => part.startsWith(':') ? params[part.slice(1)] : part).join('/') };
 }
 
-module.exports = { canCall, matchResource, resourceRequest };
+module.exports = { canCall, matchResource, resourceRequest, resourceStatus, matchesResourceError };

@@ -16,7 +16,7 @@ const {
 } = require('./context.cjs');
 const { requestJson: defaultRequestJson } = require('./transport.cjs');
 
-const { resourceRequest } = require('./shared/resource-routes.cjs');
+const { resourceRequest, matchesResourceError } = require('./shared/resource-routes.cjs');
 
 const MAX_RUNTIME_COUNT = 64;
 const MAX_RUNTIME_KEYS = 32;
@@ -169,6 +169,9 @@ function transportError(error) {
   if (error && Number.isInteger(error.statusCode) &&
       error.statusCode >= 100 && error.statusCode <= 599) {
     details.statusCode = error.statusCode;
+    if (code === 'HTTP_STATUS' && matchesResourceError(error.resourceCode, error.statusCode)) {
+      details.resourceCode = error.resourceCode;
+    }
   }
   return new ClientError(code, message, details);
 }

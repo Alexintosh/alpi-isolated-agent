@@ -33,6 +33,9 @@ test('paired resource calls use the enrolled role and project and observe revoca
     runtimeInventory: async () => { reads++; return []; },
     openResources: async () => ({
       async execute({ name, params, body, principal }) {
+        if (name === 'createSandbox') {
+          throw Object.assign(new Error('private conflict detail'), { code: 'idempotency_conflict' });
+        }
         if (name === 'getJob') {
           const error = new Error('private backend error');
           error.code = 'not_found';
@@ -59,9 +62,12 @@ test('paired resource calls use the enrolled role and project and observe revoca
   assert.deepEqual(await observer.client.requestResource('listSandboxes'), { project: 'test-project', name: 'listSandboxes' });
   await assert.rejects(observer.client.requestResource('createSandbox', {}, {}), { statusCode: 403 });
   await assert.rejects(observer.client.requestResource('getJob', { jobId: randomUUID() }), { statusCode: 404 });
+  await assert.rejects(runner.client.requestResource('createSandbox', {}, { requestId: randomUUID() }),
+    { code: 'HTTP_STATUS', statusCode: 409, resourceCode: 'idempotency_conflict',
+      message: 'Server rejected the request.' });
   const sandboxId = randomUUID();
   await runner.client.requestResource('stopSandbox', { sandboxId }, { requestId: randomUUID() });
-  assert.equal(reads, 2);
+  assert.equal(reads, 3);
   assert.equal(invocations.length, 2);
   assert.equal(invocations[1].principal.clientId, runner.clientId);
   assert.deepEqual(invocations[1].params, { sandboxId });

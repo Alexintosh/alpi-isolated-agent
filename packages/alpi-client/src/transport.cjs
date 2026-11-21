@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const net = require('node:net');
 const tls = require('node:tls');
+const { matchesResourceError } = require('./shared/resource-routes.cjs');
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_HEADER_BYTES = 16 * 1024;
@@ -21,6 +22,9 @@ class TransportError extends Error {
     this.code = code;
     if (details && Number.isInteger(details.statusCode)) {
       this.statusCode = details.statusCode;
+      if (matchesResourceError(details.resourceCode, this.statusCode)) {
+        this.resourceCode = details.resourceCode;
+      }
     }
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, TransportError);
@@ -611,6 +615,7 @@ async function requestJson(options) {
         }
         if (parsed.statusCode < 200 || parsed.statusCode > 299) {
           fail(new TransportError('HTTP_STATUS', `HTTP response status ${parsed.statusCode}`, {
+            resourceCode: parsed.headers['alpi-error-code'],
             statusCode: parsed.statusCode,
           }));
           return;
