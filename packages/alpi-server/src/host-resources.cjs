@@ -1,5 +1,7 @@
 'use strict';
 
+const { AsyncLocalStorage } = require('node:async_hooks');
+const { createSandboxService, SandboxServiceError } = require('./sandbox-service.cjs');
 const { openArtifactStore } = require('./artifact-store.cjs');
 const { openWorkStore } = require('./work-store.cjs');
 
@@ -30,57 +32,131 @@ function publicEvents(page, after) {
     firstSeq: page.firstSeq, lastSeq: page.lastSeq, gap: page.gap, reset: page.reset };
 }
 
-function openHostResources({ stateDir, limits, services = {} }) {
+const lifecycleRoutes = new Set(['listSandboxes', 'getSandbox', 'createSandbox',
+  'startSandbox', 'stopSandbox', 'deleteSandbox', 'exec']);
+
+function publicSandbox(sandbox) {
+  const { sandboxId, workspaceId, project, engine, engineVersion, profile, imageDigest, resources,
+    generation, desiredState, observedState, recoveryRequired, retention, expiresAt, createdAt, updatedAt } = sandbox;
+  return { sandboxId, workspaceId, project, engine, engineVersion, profile, imageDigest, resources,
+    generation, desiredState, observedState, recoveryRequired, retention, expiresAt, createdAt, updatedAt };
+}
+
+async function openHostResources({ stateDir, limits, services = {}, sandboxHost, sweepIntervalMs = 60000 }) {
   const store = openWorkStore(stateDir, { limits });
+  const admission = new AsyncLocalStorage();
+  const active = new Set();
+  let closing = false;
   let artifacts;
+  let sandbox;
   try {
     artifacts = openArtifactStore(stateDir);
     artifacts.collectGarbage();
+    sandbox = createSandboxService({ store, stateDir,
+      resolveProfile: sandboxHost?.resolveProfile ?? (() => {
+        throw new SandboxServiceError('profile_unavailable', 'Profile unavailable.', { status: 503 });
+      }),
+      withEngine: sandboxHost?.withEngine ?? (() => {
+        throw new SandboxServiceError('engine_unavailable', 'Engine unavailable.', { status: 503 });
+      }),
+      authorize() {
+        const authenticate = admission.getStore();
+        if (authenticate) authenticate();
+      },
+    });
+    await sandbox.recoverStartup();
   } catch (error) {
+    sandbox?.close();
     artifacts?.close();
     store.close();
     throw error;
   }
+  let sweep;
+  const timer = setInterval(() => {
+    if (closing || sweep) return;
+    sweep = sandbox.sweepTtl().catch(() => {}).finally(() => { sweep = undefined; });
+  }, sweepIntervalMs);
+  timer.unref();
   let nextCollection = Date.now() + 60000;
   const artifactFields = {
     beginUpload: ['requestId', 'totalLength', 'sha256'], appendChunk: ['offset', 'data'],
     finishUpload: [], getArtifact: [], readChunk: [], acknowledge: [],
   };
-  return {
-    async execute(request) {
-      const { name, principal, params } = request;
-      if (Object.hasOwn(artifactFields, name)) {
-        const fields = artifactFields[name];
-        const body = request.body;
-        if (Object.keys(body).length !== fields.length || fields.some(key => !Object.hasOwn(body, key))) {
-          throw Object.assign(new Error('Unexpected artifact request.'), { code: 'invalid_input' });
-        }
-        if (name === 'beginUpload' && Date.now() >= nextCollection) {
-          artifacts.collectGarbage();
-          nextCollection = Date.now() + 60000;
-        }
-        const input = { ...body, ...params, project: principal.project };
-        if (name === 'readChunk') input.offset = Number(params.offset);
-        return artifacts[name](input);
+  async function execute(request) {
+    const { name, principal, params } = request;
+    if (lifecycleRoutes.has(name)) {
+      if (Object.keys(params).some(key => Object.hasOwn(request.body, key))) {
+        throw Object.assign(new Error('Duplicate route parameter.'), { code: 'invalid_input' });
       }
-      switch (name) {
-        case 'listSandboxes':
-          return { sandboxes: store.listSandboxes(principal) };
-        case 'getSandbox':
-          return store.getSandbox(principal, params.sandboxId);
-        case 'getJob':
-          return publicJob(store.getJob(principal, params.jobId));
-        case 'getEvents': {
-          const after = Number(params.after);
-          return publicEvents(store.pollJobEvents(principal, { jobId: params.jobId, afterSeq: after }), after);
+      const input = { ...request.body, ...params };
+      const method = name === 'exec' ? 'execInSandbox' : name;
+      if (name === 'exec' && (input.maxOutputBytes === undefined ||
+          (Number.isSafeInteger(input.maxOutputBytes) && input.maxOutputBytes > 8192))) {
+        // The pinned JSON transport also needs room for escaping control characters.
+        input.maxOutputBytes = 8192;
+      }
+      const result = await admission.run(request.authenticate, () => sandbox[method](principal, input))
+        .catch(error => { request.authenticate?.(); throw error; });
+      if (name === 'listSandboxes') {
+        const page = [];
+        let bytes = 0;
+        for (const entry of result.sandboxes) {
+          const row = publicSandbox(entry);
+          bytes += Buffer.byteLength(JSON.stringify(row)) + 1;
+          if (bytes > maxEventPageBytes) break;
+          page.push(row);
         }
-        default:
-          if (Object.hasOwn(services, name)) return services[name](request, store);
-          throw Object.assign(new Error('Requested service unavailable.'),
-            { code: name === 'createSandbox' ? 'profile_unavailable' : 'service_unavailable' });
+        return { sandboxes: page, count: result.count, truncated: page.length < result.count };
+      }
+      if (name === 'exec') return result;
+      const { sandbox: receipt, ...operation } = result;
+      return { ...publicSandbox(receipt), ...operation };
+    }
+    if (Object.hasOwn(artifactFields, name)) {
+      const fields = artifactFields[name];
+      const body = request.body;
+      if (Object.keys(body).length !== fields.length || fields.some(key => !Object.hasOwn(body, key))) {
+        throw Object.assign(new Error('Unexpected artifact request.'), { code: 'invalid_input' });
+      }
+      if (name === 'beginUpload' && Date.now() >= nextCollection) {
+        artifacts.collectGarbage();
+        nextCollection = Date.now() + 60000;
+      }
+      const input = { ...body, ...params, project: principal.project };
+      if (name === 'readChunk') input.offset = Number(params.offset);
+      return artifacts[name](input);
+    }
+    switch (name) {
+      case 'getJob':
+        return publicJob(store.getJob(principal, params.jobId));
+      case 'getEvents': {
+        const after = Number(params.after);
+        return publicEvents(store.pollJobEvents(principal, { jobId: params.jobId, afterSeq: after }), after);
+      }
+      default:
+        if (Object.hasOwn(services, name)) return services[name](request, store);
+        throw Object.assign(new Error('Requested service unavailable.'),
+          { code: 'service_unavailable' });
+    }
+  }
+  return {
+    execute(request) {
+      if (closing) throw Object.assign(new Error('Service is closing.'), { code: 'service_unavailable' });
+      const pending = execute(request);
+      active.add(pending);
+      const settled = () => active.delete(pending);
+      pending.then(settled, settled);
+      return pending;
+    },
+    async close() {
+      closing = true;
+      clearInterval(timer);
+      await Promise.allSettled([...active, sweep]);
+      await sandbox.settle();
+      try { sandbox.close(); } finally {
+        try { artifacts.close(); } finally { store.close(); }
       }
     },
-    close() { try { artifacts.close(); } finally { store.close(); } },
   };
 }
 

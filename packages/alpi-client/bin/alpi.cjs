@@ -207,6 +207,7 @@ async function runMcp(args) {
     try {
       await mcp.runMcp({
         getCapabilities: () => client.getCapabilities(),
+        listSandboxes: () => client.requestResource('listSandboxes'),
         input: process.stdin,
         output: process.stdout,
       });

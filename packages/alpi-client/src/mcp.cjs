@@ -100,19 +100,19 @@ function toolErrorResult(error) {
   };
 }
 
-async function callTool(getCapabilities) {
+async function readResult(read) {
   try {
-    const capabilities = await getCapabilities();
-    if (!isPlainObject(capabilities)) {
+    const value = await read();
+    if (!isPlainObject(value)) {
       return toolErrorResult(undefined);
     }
-    const text = JSON.stringify(capabilities);
+    const text = JSON.stringify(value);
     if (typeof text !== 'string') {
       return toolErrorResult(undefined);
     }
     const result = {
       content: [{ type: 'text', text }],
-      structuredContent: capabilities,
+      structuredContent: value,
     };
     if (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_OUTPUT_BYTES) {
       return toolErrorResult({ code: 'RESPONSE_TOO_LARGE' });
@@ -137,8 +137,17 @@ async function runMcp(options) {
   if (tools.has(TOOL_NAME)) throw new Error('Reserved MCP tool name.');
   tools.set(TOOL_NAME, {
     definition: TOOL,
-    run: () => callTool(options.getCapabilities),
+    noArguments: true,
+    run: () => readResult(options.getCapabilities),
   });
+  if (options.listSandboxes && !tools.has('alpi_sandbox_list')) {
+    tools.set('alpi_sandbox_list', {
+      definition: { name: 'alpi_sandbox_list', description: 'List sandboxes in the paired project.',
+        inputSchema: TOOL.inputSchema, annotations: { readOnlyHint: true } },
+      noArguments: true,
+      run: () => readResult(options.listSandboxes),
+    });
+  }
   const input = options.input;
   const output = options.output;
 
@@ -402,7 +411,7 @@ async function runMcp(options) {
 
     const args = params.arguments;
     if (args !== undefined && args !== null) {
-      if (!isPlainObject(args) || (params.name === TOOL_NAME && Object.keys(args).length !== 0)) {
+      if (!isPlainObject(args) || (tool.noArguments && Object.keys(args).length !== 0)) {
         enqueue(errorResponse(id, INVALID_PARAMS, 'Invalid params.'));
         return;
       }

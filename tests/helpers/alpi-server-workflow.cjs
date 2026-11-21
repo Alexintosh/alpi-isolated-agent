@@ -123,6 +123,10 @@ async function runPairingWorkflow(t, server, client, { installRuntime = false } 
   const listing = await call(2, 'tools/list', {});
   const tool = listing.result.tools.find(item => item.name === 'alpi_capabilities');
   assert.ok(tool, 'capabilities tool advertised');
+  assert.ok(listing.result.tools.some(item => item.name === 'alpi_sandbox_list'));
+  const listArgs = { name: 'alpi_sandbox_list', arguments: {} };
+  const spaces = await call(6, 'tools/call', listArgs);
+  assert.deepEqual(spaces.result.structuredContent, { sandboxes: [], count: 0, truncated: false });
   const toolArgs = { name: tool.name, arguments: {} };
   const ok = await call(3, 'tools/call', toolArgs);
   assert.ok(!ok.result.isError);
@@ -179,6 +183,8 @@ async function runPairingWorkflow(t, server, client, { installRuntime = false } 
   await run(process.execPath, [server, 'clients', 'revoke', records[0].clientId, '--state-dir', state], { env });
   const revoked = await call(4, 'tools/call', toolArgs);
   assert.ok(revoked.result?.isError || revoked.error, 'already-running MCP must reauthenticate after revocation');
+  const deniedList = await call(7, 'tools/call', listArgs);
+  assert.equal(deniedList.result.isError, true);
   mcp.stdin.end();
 }
 
