@@ -175,6 +175,7 @@ function makeProcEvidence(options = {}) {
       throw new Error(`unexpected readlink ${target}`);
     },
     async readFile(target) {
+      if (target === `/sys/fs/cgroup${cgroup}/cgroup.events`) return 'populated 0\n';
       if (target === `/proc/${shimPid}/stat`) {
         return makeProcStat(shimPid, startTime);
       }
@@ -1331,4 +1332,69 @@ test('cancelling a dispatched exec cancels the adapter and reports unverified te
   controller.abort();
   await expectCode(result, 'engine_termination_unverified');
   await cancelled.promise;
+});
+
+test('worker uses the installed SDK package version and reports the actual adapter probe', async t => {
+  for (const version of ['0.14.1', '0.14.0']) {
+    const root = makeTempDirectory(t);
+    const sdkModulePath = path.join(root, 'dist', 'index.mjs');
+    fs.mkdirSync(path.dirname(sdkModulePath), { mode: 0o700 });
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@boxlite-ai/boxlite', version }));
+    fs.writeFileSync(sdkModulePath, `export class JsBoxlite {
+      async listInfo() { return []; }
+      getOrCreate() {} getInfo() {} get() {} remove() {} importBox() {} close() {}
+    }`, { mode: 0o600 });
+    const setup = await setupWorker(t, { root, sdkModulePath, config: {
+      extra: { profile: { ...PROFILE, network: 'disabled' } },
+    }, workerOptions: { adapter: undefined, getInfo: undefined } });
+    const { client, systemctlState } = await setupClient(t, setup);
+    assert.equal((await client.engine.probe()).available, false);
+    await client.start();
+    const actual = await client.engine.probe();
+    assert.equal(actual.version, version);
+    assert.equal(actual.available, version === '0.14.1');
+    assert.equal(actual.capabilities.includes('create'), actual.available);
+    assert.equal(actual.capabilities.includes('network-boundary'), false);
+    systemctlState.active = false;
+    assert.equal((await client.engine.probe()).available, false);
+  }
+});
+
+test('fresh worker reattaches a retained running allocation before explicitly reopening ingress', async t => {
+  const setup = await setupWorker(t, { workerOptions: { watchdogMs: 10 } });
+  const { client } = await setupClient(t, setup, { clientOptions: { heartbeatIntervalMs: 20 } });
+  const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1`, nativeId: 'native-1' };
+  await setup.adapter.start(ref);
+  await client.start();
+  const status = await client.engine.status(ref);
+  assert.ok(status.proof);
+  assert.equal(status.bridge.open, false);
+  const endpoint = await startIronEchoServer(t, setup.config.ironIngressRoot);
+  await client.openBridge(endpoint);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(setup.worker.snapshot().bridge.open, true);
+  await client.engine.stop(ref);
+  await client.engine.start(ref);
+  await client.openBridge(endpoint);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(setup.worker.snapshot().bridge.open, true);
+});
+
+test('scoped engine use surfaces an unconfirmed worker stop', async t => {
+  const setup = await setupWorker(t);
+  const unit = makeSystemctl();
+  const systemctl = { ...unit.client, async stop() { throw new Error('unit stop unavailable'); } };
+  const opts = { systemctl, proc: setup.proc, net: setup.netEvidence, tunnelPort: setup.tunnelPort };
+  const { withEngine } = require('../src/network/worker-client.cjs');
+  await assert.rejects(withEngine({
+    ...opts, allocationId: UUID_A, launchGeneration: 1, token: setup.config.token,
+    controlSocketPath: setup.config.controlSocketPath, serviceUid: currentUid(),
+  }, async () => 'ok'), /unit stop unavailable/);
+  const boundary = createLaunchBoundary({
+    ...opts, stateRoot: setup.root, ironIngressRoot: setup.config.ironIngressRoot, sdkModulePath: setup.config.sdkModulePath,
+    image: IMAGE, imageDigest: IMAGE_DIGEST, profile: PROFILE, uid: currentUid(),
+  });
+  t.after(() => boundary.close());
+  await assert.rejects(boundary.withEngine(makeLaunch(setup.root), async () => 'ok', { skipPrefetch: true }),
+    /unit stop unavailable/);
 });

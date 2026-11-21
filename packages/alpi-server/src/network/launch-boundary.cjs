@@ -997,8 +997,9 @@ function createLaunchBoundary(options = {}) {
       } catch {}
       try {
         await ready.client.stop();
-      } catch {}
-      ready.client.close();
+      } finally {
+        ready.client.close();
+      }
     }
   }
 

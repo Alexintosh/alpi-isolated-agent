@@ -828,34 +828,17 @@ function createWorkerClient(options = {}) {
     id: 'boxlite',
 
     async probe() {
-      requireConnected();
-      const check = await systemctl.check(allocationId);
-      const status = await request('status', {
-        ref: {
-          allocationId,
-          launchGeneration,
-          name: allocationName(allocationId, launchGeneration),
-          nativeId: lastNativeId || 'unverified',
-        },
-        generation: launchGeneration,
-      }).catch(() => null);
-      return Object.freeze({
-        available: true,
-        version: null,
-        capabilities: Object.freeze([
-          'create',
-          'inspect',
-          'start',
-          'stop',
-          'destroy',
-          'list-owned',
-          'exec',
-          'pty',
-          'network-boundary',
-        ]),
-        ...(check.activeState === 'active' ? {} : { reason: 'worker-inactive' }),
-        ...(status === null ? {} : {}),
-      });
+      const unavailable = { available: false, version: null, capabilities: [] };
+      if (!connected) return { ...unavailable, reason: 'worker_unavailable' };
+      try {
+        const check = await systemctl.check(allocationId);
+        if (check.activeState !== 'active' || check.mainPid !== hello.pid) {
+          return { ...unavailable, reason: 'worker_inactive' };
+        }
+        return await request('probe', { generation: launchGeneration });
+      } catch {
+        return { ...unavailable, reason: 'probe_failed' };
+      }
     },
 
     async createBox(spec = {}) {
@@ -969,7 +952,9 @@ function createWorkerClient(options = {}) {
     async status(ref) {
       requireConnected();
       const bounded = validateRef({ allocationId, launchGeneration }, ref);
-      return request('status', { ref: bounded, generation: launchGeneration });
+      const status = await request('status', { ref: bounded, generation: launchGeneration });
+      if (status.running && status.proof) lastNativeId = bounded.nativeId;
+      return status;
     },
 
     async close() {
@@ -1015,13 +1000,25 @@ function createWorkerClient(options = {}) {
         await client.fence();
         client.close();
       }
+      const previousGroup = lastCheck?.controlGroup;
       await systemctl.stop(allocationId);
       const deadline = Date.now() + stopTimeoutMs;
       while (Date.now() <= deadline) {
         const check = await systemctl.check(allocationId);
         lastCheck = check;
-        if (check.activeState === 'inactive' || check.activeState === 'failed') {
-          return check;
+        if (['inactive', 'failed'].includes(check.activeState) && check.mainPid === 0) {
+          const group = check.controlGroup || previousGroup;
+          if (!group) return check;
+          if (!group.startsWith('/') || group === '/' || path.normalize(group) !== group) {
+            fail('worker_stop_unverified', 'Worker control group could not be verified.');
+          }
+          try {
+            const events = await proc.readFile(path.join('/sys/fs/cgroup', group, 'cgroup.events'));
+            if (/^populated 0$/m.test(events)) return check;
+          } catch (error) {
+            if (error.code === 'ENOENT') return check;
+            fail('worker_stop_unverified', 'Worker control group could not be verified.');
+          }
         }
         await new Promise((resolve) => setTimeout(resolve, connectRetryMs));
       }
@@ -1164,8 +1161,9 @@ async function withEngine(options, fn) {
     } catch {}
     try {
       await client.stop();
-    } catch {}
-    client.close();
+    } finally {
+      client.close();
+    }
   }
 }
 

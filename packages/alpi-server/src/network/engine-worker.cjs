@@ -83,6 +83,7 @@ const SETUP_MISSING_MESSAGE =
 
 const OPS = new Set([
   'hello',
+  'probe',
   'create',
   'inspect',
   'start',
@@ -860,7 +861,7 @@ function createEngineWorker(options = {}) {
   let expiryTimer = null;
   let handshakeTimer = null;
   let watchdogBusy = false;
-  let created = null;
+  let activeRef = null;
   const bridge = {
     open: false,
     server: null,
@@ -955,10 +956,11 @@ function createEngineWorker(options = {}) {
         memoryMib: config.profile.memoryMib,
         diskSizeGb: config.profile.diskSizeGb,
       },
+      sdkModulePath: config.sdkModulePath,
       sdk: loaded,
       runtime,
       expectedSdkVersion: options.expectedSdkVersion,
-      networkBoundary: createWorkerBoundary(config),
+      ...(config.profile.network === 'boundary' ? { networkBoundary: createWorkerBoundary(config) } : {}),
     });
   }
 
@@ -998,6 +1000,8 @@ function createEngineWorker(options = {}) {
       assertGeneration(config, message.generation);
     }
     switch (op) {
+      case 'probe':
+        return adapter.probe();
       case 'create': {
         const ref = assertOwnedRef(config, message.ref, { requireNativeId: false });
         if (Object.keys(message).some((key) => !['id', 'op', 'ref', 'generation'].includes(key))) {
@@ -1017,14 +1021,13 @@ function createEngineWorker(options = {}) {
         ) {
           fail('mixed_sandbox', 'The engine returned another allocation.');
         }
-        created = Object.freeze({
+        return Object.freeze({
           allocationId: result.allocationId,
           launchGeneration: result.launchGeneration,
           name: result.name,
           nativeId: result.nativeId,
           created: result.created === true,
         });
-        return created;
       }
       case 'inspect': {
         const ref = assertOwnedRef(config, message.ref);
@@ -1036,6 +1039,7 @@ function createEngineWorker(options = {}) {
         const info = await adapter.start(ref);
         try {
           const verified = await verifyOwnedShim(ref);
+          activeRef = ref;
           lastProof = verified.proof;
           lastProofAt = Date.now();
           return { info, proof: verified.proof };
@@ -1052,6 +1056,7 @@ function createEngineWorker(options = {}) {
       case 'stop': {
         const ref = assertOwnedRef(config, message.ref);
         fenceBridges('stop');
+        activeRef = null;
         const info = await adapter.stop(ref);
         lastProof = null;
         lastProofAt = 0;
@@ -1063,7 +1068,7 @@ function createEngineWorker(options = {}) {
         const result = await adapter.destroy(ref);
         lastProof = null;
         lastProofAt = 0;
-        created = null;
+        activeRef = null;
         return { ...result, fenced: true };
       }
       case 'listOwned': {
@@ -1094,7 +1099,10 @@ function createEngineWorker(options = {}) {
             generationExpired,
           };
         }
+        // The adapter checks the retained mapping before recovery can adopt the runtime PID.
+        await adapter.inspect(ref);
         const verified = await verifyOwnedShim(ref, { previous: lastProof });
+        activeRef = ref;
         lastProof = verified.proof;
         lastProofAt = Date.now();
         return {
@@ -1405,14 +1413,7 @@ function createEngineWorker(options = {}) {
         fenceBridges('proof-expired');
         return;
       }
-      const ref = created
-        ? {
-            allocationId: config.allocationId,
-            launchGeneration: config.launchGeneration,
-            name: created.name,
-            nativeId: created.nativeId,
-          }
-        : null;
+      const ref = activeRef;
       if (!ref) {
         fenceBridges('proof-unavailable');
         return;
