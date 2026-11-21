@@ -310,6 +310,7 @@ function main() {
     try {
       server.forceShutdown();
     } catch {}
+    process.exit(0);
   };
 
   server.addService(proto.TransformService.service, {
@@ -317,12 +318,12 @@ function main() {
       if (closed || Date.now() >= config.grant.expiresAt) {
         return done(null, reject(403));
       }
-      const allowed = evaluateRequest(
-        config,
-        call.request.request,
-        call.request.context,
-        Date.now()
-      );
+      let allowed;
+      try {
+        allowed = evaluateRequest(config, call.request.request, call.request.context, Date.now());
+      } catch {
+        return done(null, reject(503));
+      }
       return done(null, allowed ? { action: 1 } : reject(403));
     },
     transformResponse(_call, done) {
@@ -351,10 +352,7 @@ function main() {
       }
       send({ type: 'ready', port });
       const remaining = Math.max(1, config.grant.expiresAt - Date.now());
-      const timer = setTimeout(() => {
-        shutdown();
-        process.exit(0);
-      }, Math.min(remaining, 2_147_483_647));
+      const timer = setTimeout(shutdown, Math.min(remaining, 2_147_483_647));
       timer.unref?.();
     }
   );
