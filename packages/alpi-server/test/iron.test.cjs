@@ -332,6 +332,19 @@ test('Iron config keeps DNS off, loopback listeners and no CIDR override', () =>
   );
 });
 
+test('an answering port with unconfirmed ownership keeps ingress closed', async t => {
+  const harness = makeHarness(t, { startTimeoutMs: 100 });
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    helpers: { ...harness.options.helpers, ownsListener: async () => false },
+  });
+  t.after(() => lifecycle.stop());
+  await assert.rejects(lifecycle.start(), { code: 'readiness_timeout' });
+  assert.equal(lifecycle.healthy(), false);
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(harness.network.ingress, null);
+});
+
 test('normal lifecycle starts, exposes only the Iron proxy bridge, and cleans up', async (t) => {
   const harness = makeHarness(t);
   const lifecycle = iron.createIronLifecycle(harness.options);
