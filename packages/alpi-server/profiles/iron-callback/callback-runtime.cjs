@@ -299,7 +299,7 @@ function main() {
   const server = new grpc.Server({
     'grpc.max_receive_message_length': 256 * 1024,
   });
-  const reject = (statusCode) => ({ action: 2, response: { statusCode } });
+  const reject = (statusCode) => ({ action: 2, response: { status_code: statusCode } });
 
   const shutdown = () => {
     if (closed) return;

@@ -10,9 +10,33 @@ const os = require('node:os');
 const path = require('node:path');
 const { createInterface } = require('node:readline');
 const { promisify } = require('node:util');
+const { createRequire } = require('node:module');
 
 const run = promisify(execFile);
 
+
+// Use the installed proto and callback dependencies to verify Iron's wire contract.
+async function checkCallback(profileDir, ironConfig) {
+  const fromProfile = createRequire(path.join(profileDir, 'package.json'));
+  const grpc = fromProfile('@grpc/grpc-js');
+  const loader = fromProfile('@grpc/proto-loader');
+  const proto = loader.loadSync(path.join(profileDir, 'vendor/iron-transform.proto'), { keepCase: true });
+  const { TransformService } = grpc.loadPackageDefinition(proto).transform.v1;
+  const endpoint = ironConfig.transforms.find(transform => transform.name === 'grpc').config.target;
+  const client = new TransformService(endpoint, grpc.credentials.createInsecure());
+  const call = promisify(client.transformRequest.bind(client));
+  const target = { host: '192.0.2.1:8080', url: 'http://192.0.2.1:8080/v1/chat/completions' };
+  try {
+    const options = { deadline: Date.now() + 5000 };
+    const allowed = await call({ request: { ...target, method: 'POST' } }, options);
+    assert.equal(allowed.action, 1);
+    const rejected = await call({ request: { ...target, method: 'GET' } }, options);
+    assert.equal(rejected.action, 2);
+    assert.equal(rejected.response.status_code, 403);
+  } finally {
+    client.close();
+  }
+}
 
 async function issueInvitation(server, serverProcess, state, env) {
   const args = [server, 'pair', 'issue', '--state-dir', state, '--project', 'demo',
@@ -96,14 +120,17 @@ async function runPairingWorkflow(t, server, client, { installRuntime = false } 
     const packageRoot = path.resolve(path.dirname(await fs.realpath(server)), '..');
     const { createIronLifecycle, IRON_SHA256 } = require(path.join(packageRoot, 'src/network/iron.cjs'));
     let fenceCount = 0;
+    const callbackProfileDir = path.join(state, 'runtimes/callbacks', installed.ironCallback.digest);
     const policy = createIronLifecycle({ stateDir: state, environmentId: 'package-smoke',
       ironBinary: installed.paths.ironProxy, ironSha256: IRON_SHA256,
-      callbackProfileDir: path.join(state, 'runtimes/callbacks', installed.ironCallback.digest),
+      callbackProfileDir,
       connector: { address: '192.0.2.1', port: 8080 }, model: 'fixture', relay: { fence() { fenceCount++; } } });
     try {
       await policy.start();
       assert.equal(policy.healthy(), true);
       assert.ok(policy.status().pid > 0);
+      const configPath = path.join(state, 'iron/package-smoke', policy.status().launchId, 'iron.json');
+      await checkCallback(callbackProfileDir, JSON.parse(await fs.readFile(configPath, 'utf8')));
     } finally {
       await policy.stop();
     }
