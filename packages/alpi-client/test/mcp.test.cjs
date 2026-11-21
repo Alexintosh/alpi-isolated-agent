@@ -34,7 +34,7 @@ function initialize(id = 1, protocolVersion = '2025-06-18') {
   };
 }
 
-function createHarness(getCapabilities) {
+function createHarness(getCapabilities, workTools) {
   const input = new PassThrough();
   const output = new PassThrough();
   output.setEncoding('utf8');
@@ -109,7 +109,7 @@ function createHarness(getCapabilities) {
     input.end();
   }
 
-  const done = runMcp({ getCapabilities, input, output });
+  const done = runMcp({ getCapabilities, workTools, input, output });
 
   return {
     done,
@@ -596,4 +596,40 @@ test('keeps CLI help compatible', () => {
   });
   assert.equal(mcpHelp.status, 0);
   assert.match(mcpHelp.stdout, /alpi mcp --context NAME/);
+});
+
+test('each stdio connection lists and calls its own tools and cancels a waiting call', async () => {
+  const name = 'alpi_wait';
+  const definition = { name, inputSchema: { type: 'object' } };
+  const started = Promise.withResolvers();
+  const calls = [];
+  const tool = { definition, async run(args, signal) {
+    calls.push(args);
+    if (args.wait) {
+      started.resolve();
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    }
+    return { content: [{ type: 'text', text: 'done' }] };
+  } };
+  const session = createHarness(capabilities, new Map([[name, tool]]));
+  const other = createHarness(capabilities);
+  for (const client of [session, other]) {
+    client.send(initialize());
+    client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  }
+  assert.ok((await session.waitForId(2)).result.tools.some(entry => entry.name === name));
+  assert.ok(!(await other.waitForId(2)).result.tools.some(entry => entry.name === name));
+  const call = (id, args) => session.send({
+    jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+  });
+  call(3, { wait: false });
+  assert.equal((await session.waitForId(3)).result.content[0].text, 'done');
+  call(4, { wait: true });
+  await started.promise;
+  session.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 4 } });
+  session.end();
+  other.end();
+  await Promise.all([session.done, other.done]);
+  assert.deepEqual(calls, [{ wait: false }, { wait: true }]);
+  assert.ok(!session.messages.some(message => message.id === 4));
 });

@@ -1,8 +1,6 @@
 'use strict';
 
-// A small stdio MCP server for the authorized Alpi context. It deliberately
-// exposes only the first implemented tool and delegates all credential and
-// transport handling to the caller's authenticated getCapabilities function.
+// The paired client supplies project-scoped tools for this stdio connection.
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -125,10 +123,6 @@ async function callTool(getCapabilities) {
   }
 }
 
-const TOOLS = new Map([
-  [TOOL_NAME, { definition: TOOL, run: callTool }],
-]);
-
 async function runMcp(options) {
   if (!isPlainObject(options) ||
       typeof options.getCapabilities !== 'function' ||
@@ -139,7 +133,12 @@ async function runMcp(options) {
     throw new Error('Invalid MCP options.');
   }
 
-  const getCapabilities = options.getCapabilities;
+  const tools = new Map(options.workTools);
+  if (tools.has(TOOL_NAME)) throw new Error('Reserved MCP tool name.');
+  tools.set(TOOL_NAME, {
+    definition: TOOL,
+    run: () => callTool(options.getCapabilities),
+  });
   const input = options.input;
   const output = options.output;
 
@@ -179,6 +178,7 @@ async function runMcp(options) {
     }
     failed = true;
     finished = true;
+    for (const controller of pending.values()) controller.abort();
     cleanup();
     if (drainReject) {
       const reject = drainReject;
@@ -378,7 +378,7 @@ async function runMcp(options) {
     }
     const entry = pending.get(params.requestId);
     if (entry) {
-      entry.cancelled = true;
+      entry.abort();
     }
   }
 
@@ -394,7 +394,7 @@ async function runMcp(options) {
       enqueue(errorResponse(id, INVALID_PARAMS, 'Invalid params.'));
       return;
     }
-    const tool = TOOLS.get(params.name);
+    const tool = tools.get(params.name);
     if (!tool) {
       enqueue(errorResponse(id, INVALID_PARAMS, 'Unknown tool.'));
       return;
@@ -402,7 +402,7 @@ async function runMcp(options) {
 
     const args = params.arguments;
     if (args !== undefined && args !== null) {
-      if (!isPlainObject(args) || Object.keys(args).length !== 0) {
+      if (!isPlainObject(args) || (params.name === TOOL_NAME && Object.keys(args).length !== 0)) {
         enqueue(errorResponse(id, INVALID_PARAMS, 'Invalid params.'));
         return;
       }
@@ -413,19 +413,22 @@ async function runMcp(options) {
       return;
     }
 
-    const entry = { cancelled: false };
-    pending.set(id, entry);
+    const controller = new AbortController();
+    pending.set(id, controller);
     inflight += 1;
 
     Promise.resolve()
-      .then(() => tool.run(getCapabilities))
+      .then(() => {
+        controller.signal.throwIfAborted();
+        return tool.run(args ?? {}, controller.signal);
+      })
       .then((result) => {
-        if (!entry.cancelled && !failed) {
+        if (!controller.signal.aborted && !failed) {
           enqueue(response(id, result));
         }
       })
       .catch(() => {
-        if (!entry.cancelled && !failed) {
+        if (!controller.signal.aborted && !failed) {
           enqueue(response(id, toolErrorResult(undefined)));
         }
       })
@@ -466,7 +469,7 @@ async function runMcp(options) {
 
     if (method === 'tools/list') {
       enqueue(response(id, {
-        tools: Array.from(TOOLS.values(), (entry) => entry.definition),
+        tools: Array.from(tools.values(), (entry) => entry.definition),
       }));
       return;
     }
