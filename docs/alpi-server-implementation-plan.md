@@ -2,7 +2,9 @@
 
 **First release outcome.** From the operator’s existing T3 Code installation, a coordinator pairs with a separate Linux PC, creates two isolated workspaces, assigns a real coding task to a guest agent using a local model, follows the task, takes control of the same Pi conversation and returns it to the coordinator and retrieves the verified result. The Linux service owns the VMs, Iron Proxy, credentials and job state. The laptop may disconnect during a run. Alpi Desktop stays closed throughout acceptance.
 
-**Status.** Proposed design against Alpi revision `053422fe69eceb2d6a7772c98cdf4eb612d27318`. Commands and API shapes below are proposed interfaces. The initial reference target is one systemd Linux x86-64 host with working KVM. Record the actual distribution, architecture, disk, RAM, available inference endpoint and T3 provider configuration during deployment. ARM64 can use the same contracts once its full artifact set and live acceptance pass.
+**Implementation status, 21 November 2026.** On revision `306a930`, a packaged client pairs with a packaged server over pinned HTTPS. Its running MCP connection sees the newly installed runtime and observes credential revocation. Linux x86-64 package tests download the official Iron and BoxLite artifacts, start the Iron proxy and its callback, and verify the selected files with `alpi-server doctor --runtime`. The MCP currently exposes `alpi_capabilities`. Sandbox creation, job dispatch, operator attachment and guest file transfer still need integration through that entry point. The commands and APIs below describe the target release.
+
+The deployment target is a systemd Linux x86-64 host with working KVM. Physical two-machine acceptance is pending availability of the gaming PC. Record its distribution, architecture, disk, RAM, inference endpoint and T3 provider configuration during deployment. ARM64 requires its own complete artifact set and acceptance run.
 
 ## 1. Product boundaries
 
