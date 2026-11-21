@@ -4,6 +4,7 @@
 const assert = require('node:assert/strict');
 const { spawn, execFile } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
+const http = require('node:http');
 const fs = require('node:fs/promises');
 const { once } = require('node:events');
 const os = require('node:os');
@@ -14,6 +15,25 @@ const { createRequire } = require('node:module');
 
 const run = promisify(execFile);
 
+
+// Only the proxy receives the request. Its policy callback denies GET before forwarding.
+async function checkProxyDenial(port) {
+  const authority = '192.0.2.1:8080';
+  const response = await new Promise((resolve, reject) => {
+    const req = http.get({ hostname: '127.0.0.1', port, agent: false,
+      path: 'http://' + authority + '/v1/chat/completions', headers: { host: authority },
+      signal: AbortSignal.timeout(5000) }, resolve);
+    req.once('error', reject);
+  });
+  assert.equal(response.statusCode, 403);
+  response.setEncoding('utf8');
+  let body = '';
+  for await (const chunk of response) {
+    body += chunk;
+    assert.ok(body.length <= 128);
+  }
+  assert.equal(body, 'Request denied by Alpi policy.\n');
+}
 
 // Use the installed proto and callback dependencies to verify Iron's wire contract.
 async function checkCallback(profileDir, ironConfig) {
@@ -129,6 +149,7 @@ async function runPairingWorkflow(t, server, client, { installRuntime = false } 
       await policy.start();
       assert.equal(policy.healthy(), true);
       assert.ok(policy.status().pid > 0);
+      await checkProxyDenial(policy.ingress().port);
       const configPath = path.join(state, 'iron/package-smoke', policy.status().launchId, 'iron.json');
       await checkCallback(callbackProfileDir, JSON.parse(await fs.readFile(configPath, 'utf8')));
     } finally {
