@@ -234,7 +234,11 @@ function validateManifest(input, component) {
   if (input.component !== component) {
     fail('manifest_invalid', `Trusted manifest component must be ${component}.`);
   }
-  if (typeof input.version !== 'string' || !VERSION_PATTERN.test(input.version)) {
+  if (
+    typeof input.version !== 'string' ||
+    input.version.length > 64 ||
+    !VERSION_PATTERN.test(input.version)
+  ) {
     fail('manifest_invalid', `Trusted manifest version for ${component} is invalid.`);
   }
   if (input.platform !== PLATFORM || input.architecture !== ARCH) {
@@ -374,7 +378,9 @@ function computeSetId(manifests) {
     hash.update(`${component}:${manifests[component].sha256}\n`);
   }
   const digest = hash.digest('hex').slice(0, 16);
-  const version = manifests['boxlite-sdk'].version.replace(/[^0-9A-Za-z.-]/g, '-');
+  const version = manifests['boxlite-sdk'].version
+    .replace(/[^0-9A-Za-z.-]/g, '-')
+    .toLowerCase();
   return `${ENGINE}-${version}-${digest}`;
 }
 
@@ -454,7 +460,11 @@ function validateMetadata(meta, setId) {
   if (meta.format !== 1 || meta.id !== setId || meta.engine !== ENGINE) {
     fail('runtime_corrupt', `Runtime metadata for ${setId} has an unsupported format.`);
   }
-  if (typeof meta.version !== 'string' || !VERSION_PATTERN.test(meta.version)) {
+  if (
+    typeof meta.version !== 'string' ||
+    meta.version.length > 64 ||
+    !VERSION_PATTERN.test(meta.version)
+  ) {
     fail('runtime_corrupt', `Runtime metadata for ${setId} has an invalid version.`);
   }
   if (typeof meta.installedAt !== 'string' || Number.isNaN(Date.parse(meta.installedAt))) {
@@ -474,7 +484,11 @@ function validateMetadata(meta, setId) {
       fail('runtime_corrupt', `Runtime metadata for ${setId} has an unexpected component.`);
     }
     seenComponents.add(component.component);
-    if (typeof component.version !== 'string' || !VERSION_PATTERN.test(component.version)) {
+    if (
+      typeof component.version !== 'string' ||
+      component.version.length > 64 ||
+      !VERSION_PATTERN.test(component.version)
+    ) {
       fail('runtime_corrupt', `Runtime metadata for ${setId} has an invalid component version.`);
     }
     if (typeof component.archiveSha256 !== 'string' || !SHA256_PATTERN.test(component.archiveSha256)) {

@@ -434,6 +434,39 @@ test('rejects a non-gzip archive without leaving partial state', async (t) => {
   });
 });
 
+test('accepts GNU long name headers', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'longname'), 'state');
+  const version = '0.1.0';
+  const expected = entriesFor('boxlite-sdk', version);
+  const target = expected[1];
+  const sdkEntries = [
+    expected[0],
+    {
+      name: 'LongLink',
+      type: 'L',
+      content: Buffer.from(`${target.name}\0`),
+    },
+    { name: 'truncated-name', mode: target.mode, content: target.content },
+    ...expected.slice(2),
+  ];
+  const release = makeRelease({
+    version,
+    archiveEntries: { 'boxlite-sdk': sdkEntries },
+  });
+
+  const result = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: makeFetch(release.archives).fetch,
+  });
+
+  assertInstalledPaths(result, stateDir);
+  assert.equal(
+    fs.readFileSync(path.join(result.paths.sdk, 'dist', 'index.js'), 'utf8'),
+    target.content.toString('utf8')
+  );
+});
+
 test('rejects unsupported host profiles and untrusted manifests', async (t) => {
   const stateDir = path.join(tempDirectory(t, 'validation'), 'state');
   const release = makeRelease({ version: '0.1.0' });
@@ -494,6 +527,31 @@ test('rejects unsupported host profiles and untrusted manifests', async (t) => {
 
   assert.equal(fixture.requests.length, 0);
   assert.equal(fs.existsSync(stateDir), false);
+});
+
+test('follows a redirect to another allowed HTTPS host', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'redirect-ok'), 'state');
+  const release = makeRelease({ version: '0.1.0' });
+  const ironUrl = release.manifests['iron-proxy'].url;
+  const cdnUrl = 'https://cdn.example.test/releases/iron-proxy-0.1.0.tgz';
+  release.manifests['iron-proxy'].allowedHosts = ['example.test', 'cdn.example.test'];
+  const archives = {
+    ...release.archives,
+    [cdnUrl]: release.archives[ironUrl],
+  };
+  const fixture = makeFetch(archives, {
+    redirects: { [ironUrl]: cdnUrl },
+  });
+
+  const result = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: fixture.fetch,
+  });
+
+  assertInstalledPaths(result, stateDir);
+  assert.ok(fixture.requests.includes(ironUrl));
+  assert.ok(fixture.requests.includes(cdnUrl));
 });
 
 test('rejects a redirect to a disallowed host before any request to it', async (t) => {
