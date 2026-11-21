@@ -151,6 +151,7 @@ function makeHarness(t, overrides = {}) {
       events.push('iron-start');
       return handle;
     },
+    async ownsListener() { return true; },
     async probe() {
       return true;
     },

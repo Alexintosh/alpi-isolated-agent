@@ -21,6 +21,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const net = require('node:net');
+const { ownsLoopbackListener } = require('./listener-owner.cjs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { setTimeout: delay } = require('node:timers/promises');
@@ -529,6 +530,7 @@ function loadHelpers(options) {
     privateDirectory,
     startOwnedProcess,
     probe: helpers.probe ?? probe,
+    ownsListener: helpers.ownsListener ?? ownsLoopbackListener,
     assertPortFree: helpers.assertPortFree ?? assertPortFree,
     findFreePort: helpers.findFreePort ?? findFreePort,
   };
@@ -1198,7 +1200,7 @@ class IronLifecycle {
       signal?.throwIfAborted();
       await waitUntil(
         async () => {
-          if (iron.healthy() !== true) return false;
+          if (iron.healthy() !== true || !await helpers.ownsListener(iron.pid, proxyPort)) return false;
           return helpers
             .probe('127.0.0.1', proxyPort, 200)
             .then(() => true, () => false);
