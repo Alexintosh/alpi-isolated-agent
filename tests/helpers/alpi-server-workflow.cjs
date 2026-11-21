@@ -28,9 +28,9 @@ async function checkCallback(profileDir, ironConfig) {
   const target = { host: '192.0.2.1:8080', url: 'http://192.0.2.1:8080/v1/chat/completions' };
   try {
     const options = { deadline: Date.now() + 5000 };
-    const allowed = await call({ request: { ...target, method: 'POST' } }, options);
+    const allowed = await call({ context: {}, request: { ...target, method: 'POST' } }, options);
     assert.equal(allowed.action, 1);
-    const rejected = await call({ request: { ...target, method: 'GET' } }, options);
+    const rejected = await call({ context: {}, request: { ...target, method: 'GET' } }, options);
     assert.equal(rejected.action, 2);
     assert.equal(rejected.response.status_code, 403);
   } finally {
