@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -1106,4 +1106,20 @@ test('requiring the installer never fetches assets', () => {
     globalThis.fetch = originalFetch;
   }
   assert.equal(calls, 0);
+});
+
+test('reports a broken active selection to inventory and the doctor CLI', async (t) => {
+  const stateDir = tempDirectory(t, 'broken-selection');
+  const release = makeRelease({ version: '0.1.0' });
+  const installed = await installRuntime({
+    stateDir, manifests: release.manifests, fetch: makeFetch(release.archives).fetch,
+  });
+  fs.unlinkSync(path.join(installed.paths.root, 'metadata.json'));
+  await assert.rejects(listRuntimes({ stateDir }), { code: 'runtime_corrupt' });
+  const doctor = spawnSync(process.execPath, [
+    path.resolve(__dirname, '../bin/alpi-server.cjs'), 'doctor', '--runtime', '--state-dir', stateDir,
+  ], { encoding: 'utf8' });
+  assert.equal(doctor.status, 1);
+  assert.match(doctor.stderr, /runtime_corrupt/);
+  assert.equal(doctor.stdout, '');
 });

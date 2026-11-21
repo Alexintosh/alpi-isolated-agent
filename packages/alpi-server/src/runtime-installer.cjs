@@ -1640,6 +1640,7 @@ async function listRuntimes(options = {}) {
   const releasesDirectory = path.join(runtimesDirectory, 'releases');
   let entries = [];
   try {
+    assertPrivateDirStat(await fsp.lstat(releasesDirectory), releasesDirectory);
     entries = await fsp.readdir(releasesDirectory, { withFileTypes: true });
   } catch (error) {
     if (error && error.code === 'ENOENT') entries = [];
@@ -1692,6 +1693,9 @@ async function listRuntimes(options = {}) {
   const limited = records.slice(0, LIST_LIMIT);
   const activeRecord = limited.find((record) => record.id === current.active) || null;
   const previousRecord = limited.find((record) => record.id === current.previous) || null;
+  if (current.active && !activeRecord) {
+    fail('runtime_corrupt', 'Active runtime is missing or has invalid metadata.');
+  }
   return {
     active: activeRecord
       ? { ...activeRecord, active: true, previous: false }
