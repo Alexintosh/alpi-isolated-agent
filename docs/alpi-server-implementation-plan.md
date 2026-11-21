@@ -123,7 +123,10 @@ Provide an ephemeral profile with an expiry and a persistent interactive profile
 The portable command `alpi mcp --context gaming-pc` runs on the machine that hosts the **outer T3 provider**. It loads the operator-created context, opens the authenticated API connection and serves stdio MCP. The service continues to run when the MCP subprocess exits. Register it under a distinct name such as `alpi-server` so the existing local `alpi` connector remains usable. Configure the provider profile selected in T3. A per-provider MCP registration should be tested in both that T3 profile and standalone Codex.
 
 ```sh
-codex mcp add alpi-server -- /absolute/path/to/alpi mcp --context gaming-pc
+codex mcp add alpi-server \
+  --env "ALPI_CONFIG_DIR=$ALPI_CONFIG_DIR" \
+  --env "ALPI_CONTEXT_KEY_FILE=$ALPI_CONTEXT_KEY_FILE" \
+  -- "$(command -v node)" "$(command -v alpi)" mcp --context gaming-pc
 ```
 
 Publish tools for capabilities, sandbox create/list/inspect/start/stop, project upload/import, job submit/status/wait/send/cancel, guest exec and export/download. Scope tools to the context. Keep deletion explicit, with resource identity and a separate permission. Human terminal attachment and pairing use CLI commands. Each tool returns structured IDs, status, retry semantics and receipt data. Filter control credentials, raw provider responses and guest-supplied URLs from status. Label guest-produced text and files as untrusted inputs to the coordinator.

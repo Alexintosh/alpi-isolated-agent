@@ -27,7 +27,7 @@ For the default loopback listener, open the tunnel on the machine and account ru
 ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:7443:127.0.0.1:7443 GAMING_PC
 ```
 
-Install the client tarball using Node.js 24. Prepare an owner-only directory and a separate private 32-byte key file for the encrypted context store. Set `ALPI_CONFIG_DIR` and `ALPI_CONTEXT_KEY_FILE` in the environments of both the pairing command and the provider that launches the MCP. The key file path can be configured in T3. Keep its contents and the one-time enrollment envelope out of chat and MCP configuration.
+On the provider machine, install the client with Node.js 24 using `npm install --global --ignore-scripts ./alpi-client-0.1.0-alpha.1.tgz`. Prepare an owner-only directory and a separate private 32-byte key file for the encrypted context store. Set `ALPI_CONFIG_DIR` and `ALPI_CONTEXT_KEY_FILE` in the environments of both the pairing command and the provider that launches the MCP. The key file path can be configured in T3. Keep its contents and the one-time enrollment envelope out of chat and MCP configuration.
 
 Use the remote console to issue an invitation and transfer its output through a trusted channel into an owner-only file. Treat a lost exchange response as a possibly successful enrollment. Inspect the enrolled clients from the Linux console before issuing a replacement. Confirm the pinned server fingerprint and server ID through the console.
 
@@ -46,10 +46,13 @@ ssh GAMING_PC sudo -n -u alpi-server /usr/local/bin/alpi-server pair issue --sta
 alpi capabilities --context gaming-pc
 ```
 
-After pairing a context named `gaming-pc`, register the client with the provider selected in T3. For the Codex provider, use the absolute installed executable:
+After pairing a context named `gaming-pc`, register the client with the provider selected in T3. Run this command in the shell where you paired. It records the installed executable paths and the two context paths for the Codex provider selected in T3.
 
 ```sh
-codex mcp add alpi-server -- /absolute/path/to/alpi mcp --context gaming-pc
+codex mcp add alpi-server \
+  --env "ALPI_CONFIG_DIR=$ALPI_CONFIG_DIR" \
+  --env "ALPI_CONTEXT_KEY_FILE=$ALPI_CONTEXT_KEY_FILE" \
+  -- "$(command -v node)" "$(command -v alpi)" mcp --context gaming-pc
 ```
 
 In a fresh provider session, list the tools and call `alpi_capabilities`. Compare the returned server ID to the one on the Linux console. With only the control package installed, the runtime list should be empty.

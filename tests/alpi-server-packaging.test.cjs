@@ -34,6 +34,7 @@ test('control packages install offline and expose their commands outside the che
     assert.ok(files.includes('src/shared/file-stream.py'));
     if (name === 'alpi-server') {
       assert.ok(files.includes('src/shared/artifact-download.cjs'));
+      assert.ok(files.includes('deploy/linux/README.md'));
       for (const required of ['src/runtime/network-policy.cjs', 'src/runtime/owned-process.cjs',
         'src/protocol/iron-transform.proto', 'src/protocol/IRON-LICENSE', 'profiles/iron-callback/npm-shrinkwrap.json',
         'profiles/iron-callback/callback-runtime.cjs', 'profiles/iron-callback/package.json']) assert.ok(files.includes(required));

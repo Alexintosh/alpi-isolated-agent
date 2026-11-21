@@ -16,6 +16,7 @@
     "src/",
     "LICENSE",
     "deploy/linux/alpi-server.service",
+    "deploy/linux/README.md",
     "api/control.openapi.yaml",
     "manifests/",
     "profiles/pi-dev/Dockerfile",
