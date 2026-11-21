@@ -1143,6 +1143,11 @@ function buildSandbox(receipt, row) {
   });
 }
 
+function deletionHash(receipt, discard, reason) {
+  return digestOf({ operation: 'delete', sandboxId: receipt.sandboxId,
+    generation: receipt.generation, discard, reason });
+}
+
 function verifyStoreJournal(receipt, row) {
   if (receipt.project !== row.project) {
     fail('engine_identity_conflict', 'Sandbox project does not match its journal.', {
@@ -1548,19 +1553,16 @@ function createSandboxService(options = {}) {
         retryable: false,
       });
     }
-    let observedState = 'unknown';
-    try {
-      const info = await callWithEngine(
-        engineRecordFor(row, receipt),
-        (adapter) => adapter.inspect(refForRow(row)),
-        'inspect',
-        ['inspect']
-      );
-      observedState = info && info.running === true ? 'running' : 'stopped';
-    } catch {
-      observedState = 'unknown';
+    const ref = refForRow(row);
+    const info = await callWithEngine(
+      engineRecordFor(row, receipt), adapter => adapter.inspect(ref), 'inspect', ['inspect']
+    );
+    if (!info || Object.keys(ref).some(key => info[key] !== ref[key]) || typeof info.running !== 'boolean') {
+      fail('engine_identity_conflict', 'Engine could not confirm the owned allocation.', {
+        status: 409, retryable: false,
+      });
     }
-    return attachAndObserve(principal, receipt, row, row.nativeId, observedState);
+    return attachAndObserve(principal, receipt, row, row.nativeId, info.running ? 'running' : 'stopped');
   }
 
   async function recordObservedIfNeeded(principal, receipt, observedState) {
@@ -1911,37 +1913,32 @@ function createSandboxService(options = {}) {
     );
   }
 
-  async function reconcileDeleteLocked(principal, receipt, row) {
-    let current = row;
-    if (current.deleteState !== 'removed') {
-      try {
-        await destroyAllocationLocked(receipt, current);
-      } catch (error) {
-        const mapped = mapError(error, 'recovery');
-        return { status: 'uncertain', code: mapped.code };
-      }
-      current = journal.get(current.project, current.sandboxId);
+  async function reconcileDeleteLocked(principal, row) {
+    const current = journal.get(row.project, row.sandboxId);
+    const latestReceipt = store.getSandbox(principal, row.sandboxId);
+    if (!current || !['pending', 'uncertain', 'removed'].includes(current.deleteState)) {
+      return { status: 'uncertain', code: 'delete_intent_missing' };
     }
-    if (!current) {
-      return { status: 'uncertain', code: 'journal_missing' };
-    }
-    const latestReceipt = store.getSandbox(principal, current.sandboxId);
+    verifyStoreJournal(latestReceipt, current);
     if (latestReceipt.deletedAt !== null) {
-      journal.markDeleted({
-        project: current.project,
-        sandboxId: current.sandboxId,
-      });
+      journal.markDeleted({ project: current.project, sandboxId: current.sandboxId });
       return { status: 'reconciled' };
     }
-    if (latestReceipt.desiredState !== 'stopped') {
+    if (latestReceipt.desiredState !== 'stopped' ||
+        (!current.discard && !['stopped', 'removed'].includes(latestReceipt.observedState))) {
       return { status: 'uncertain', code: 'stop_unconfirmed' };
     }
-    if (
-      latestReceipt.retention === 'until-export' &&
-      latestReceipt.exportedAt === null &&
-      !current.discard
-    ) {
+    if (latestReceipt.retention === 'until-export' && latestReceipt.exportedAt === null && !current.discard) {
       return { status: 'retained', code: 'export_required' };
+    }
+    // Older journals substitute a display reason when the caller omitted it.
+    const reasons = [current.deleteReason];
+    if (current.deleteReason === (current.discard ? 'discarded' : 'deleted')) reasons.push(null);
+    if (!reasons.some(reason => deletionHash(latestReceipt, current.discard, reason) === current.deleteHash)) {
+      return { status: 'uncertain', code: 'generation_conflict' };
+    }
+    if (current.deleteState !== 'removed') {
+      await destroyAllocationLocked(latestReceipt, current);
     }
     let latest = latestReceipt;
     if (latest.observedState !== 'removed') {
@@ -2278,6 +2275,9 @@ function createSandboxService(options = {}) {
     let row = journal.get(principal.project, body.sandboxId);
     if (!row || row.createState !== 'created' || row.nativeId === null) {
       invalidTransition('Sandbox engine allocation is not ready.');
+    }
+    if (row.deleteState !== 'none') {
+      invalidTransition('Sandbox deletion is already in progress.');
     }
     verifyStoreJournal(receipt, row);
     if (receipt.expiresAt !== null && receipt.expiresAt <= nowMs()) {
@@ -2682,13 +2682,7 @@ function createSandboxService(options = {}) {
       });
     }
 
-    const hash = digestOf({
-      operation: 'delete',
-      sandboxId: body.sandboxId,
-      generation: receipt.generation,
-      discard: body.discard,
-      reason: body.reason,
-    });
+    const hash = deletionHash(receipt, body.discard, body.reason);
 
     if (row.deleteState !== 'removed') {
       row = journal.beginDelete({
@@ -2787,6 +2781,9 @@ function createSandboxService(options = {}) {
     let row = journal.get(principal.project, body.sandboxId);
     if (!row || row.createState !== 'created' || row.nativeId === null) {
       invalidTransition('Sandbox engine allocation is not ready.');
+    }
+    if (row.deleteState !== 'none') {
+      invalidTransition('Sandbox deletion is already in progress.');
     }
     verifyStoreJournal(receipt, row);
     if (receipt.expiresAt !== null && receipt.expiresAt <= nowMs()) {
@@ -2986,11 +2983,7 @@ function createSandboxService(options = {}) {
             current.deleteState === 'uncertain' ||
             current.deleteState === 'removed'
           ) {
-            const outcome = await reconcileDeleteLocked(
-              principal,
-              receipt,
-              current
-            );
+            const outcome = await reconcileDeleteLocked(principal, current);
             if (outcome.status === 'reconciled') {
               report.reconciled.push({
                 sandboxId: row.sandboxId,
@@ -3011,6 +3004,12 @@ function createSandboxService(options = {}) {
               });
             }
             return;
+          }
+
+          if (current.createState === 'created' && receipt.nativeId !== current.nativeId) {
+            verifyStoreJournal(receipt, current);
+            await ensureAttached(principal, receipt, current);
+            report.reconciled.push({ sandboxId: row.sandboxId, project: row.project, action: 'attach' });
           }
 
           if (

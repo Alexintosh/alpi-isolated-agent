@@ -1583,3 +1583,57 @@ test('an engine provider arriving after the deadline cannot create the allocatio
   }
   assert.equal(engine.calls.create.length, 0);
 });
+
+test('durable deletion fences later starts and recovery checks the current generation', async t => {
+  const { service, engine, store } = setup(t);
+  const { sandbox: { sandboxId } } = await createSandbox(service);
+  await startSandbox(service, ALPHA_RUNNER, sandboxId);
+  await stopSandbox(service, ALPHA_RUNNER, sandboxId);
+  engine.destroyHook = () => { throw new Error('Removal unavailable'); };
+  await assert.rejects(service.deleteSandbox(ALPHA_OPERATOR, { sandboxId }), assertServiceCode('engine_uncertain'));
+  await assert.rejects(startSandbox(service, ALPHA_RUNNER, sandboxId), assertServiceCode('invalid_transition'));
+  assert.equal(engine.calls.start.length, 1);
+  engine.destroyHook = null;
+  // A database left by the earlier server can contain a later admitted start.
+  const receipt = store.getSandbox(ALPHA_RUNNER, sandboxId);
+  const running = store.startSandbox(ALPHA_RUNNER, { sandboxId, generation: receipt.generation });
+  assert.equal((await service.recoverStartup()).uncertain[0].code, 'stop_unconfirmed');
+  store.stopSandbox(ALPHA_RUNNER, { sandboxId, generation: running.generation });
+  assert.equal((await service.recoverStartup()).uncertain[0].code, 'generation_conflict');
+  assert.equal(engine.calls.destroy.length, 1);
+  assert.equal(engine.boxes.size, 1);
+});
+
+test('recovery finishes an interrupted delete when its original intent still matches', async t => {
+  const { service, engine } = setup(t);
+  const { sandbox: { sandboxId } } = await createSandbox(service);
+  await stopSandbox(service, ALPHA_RUNNER, sandboxId);
+  engine.destroyHook = () => { throw new Error('Removal unavailable'); };
+  await assert.rejects(service.deleteSandbox(ALPHA_OPERATOR, { sandboxId }), assertServiceCode('engine_uncertain'));
+  engine.destroyHook = null;
+  assert.equal((await service.recoverStartup()).reconciled[0].action, 'delete');
+  assert.equal(engine.boxes.size, 0);
+});
+
+test('recovery attaches a completed journal record only after inspecting its owned box', async t => {
+  const { service, engine, directory, store } = setup(t);
+  const { sandbox } = await createSandbox(service);
+  // Model a restart after the journal commit and before the work-store attachment.
+  const db = new (require('node:sqlite').DatabaseSync)(path.join(directory, 'work.sqlite'));
+  try {
+    db.prepare("UPDATE sandboxes SET native_id = NULL, observed_state = 'unknown' WHERE sandbox_id = ?").run(sandbox.sandboxId);
+  } finally { db.close(); }
+  const inspect = engine.inspect.bind(engine);
+  engine.inspect = async ref => ({ ...await inspect(ref), nativeId: 'different-box' });
+  const denied = await service.recoverStartup();
+  assert.equal(denied.uncertain[0].code, 'engine_identity_conflict');
+  assert.equal(store.getSandbox(ALPHA_RUNNER, sandbox.sandboxId).nativeId, null);
+  engine.inspect = inspect;
+  const recovered = await service.recoverStartup();
+  assert.deepEqual(recovered.reconciled, [{ sandboxId: sandbox.sandboxId, project: 'alpha', action: 'attach' }]);
+  const receipt = store.getSandbox(ALPHA_RUNNER, sandbox.sandboxId);
+  assert.equal(receipt.nativeId, sandbox.nativeId);
+  assert.equal(receipt.observedState, 'stopped');
+  assert.equal((await service.recoverStartup()).checked, 0);
+  assert.equal(engine.calls.create.length, 1);
+});
