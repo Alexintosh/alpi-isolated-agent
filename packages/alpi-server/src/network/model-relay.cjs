@@ -374,8 +374,13 @@ async function readCredential(credential) {
       fail('credential_unavailable', 'Credential content is invalid.');
     }
     return secret;
+  } catch (error) {
+    if (error instanceof ModelRelayError) throw error;
+    fail('credential_unavailable', 'Credential is unavailable.');
   } finally {
-    await handle.close();
+    try {
+      await handle.close();
+    } catch {}
   }
 }
 
@@ -643,7 +648,7 @@ async function createModelRelay(options) {
         failUpstream(context, 'upstream_redirect');
         return;
       }
-      if (status < 200 || status >= 300) {
+      if (status !== 200) {
         upstreamRes.resume();
         failUpstream(context, 'upstream_error');
         return;
@@ -764,7 +769,9 @@ async function createModelRelay(options) {
       rejectRequest(req, res, 414, 'not_found', limits.bodyTimeoutMs);
       return;
     }
-    if (!isJsonContentType(req.headers['content-type'])) {
+    const encoding = req.headers['content-encoding'];
+    if (!isJsonContentType(req.headers['content-type']) ||
+        (encoding !== undefined && String(encoding).trim().toLowerCase() !== 'identity')) {
       rejectRequest(req, res, 415, 'unsupported_content_type', limits.bodyTimeoutMs);
       return;
     }
@@ -919,22 +926,32 @@ async function createModelRelay(options) {
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(socketPath);
+    try {
+      server.listen(socketPath);
+    } catch {
+      reject(new ModelRelayError('socket_unavailable', 'Relay socket is unavailable.'));
+    }
   });
 
   try {
-    fs.chmodSync(socketPath, 0o600);
     const socketStat = fs.lstatSync(socketPath);
     if (!socketStat.isSocket()) {
       throw new Error('not a socket');
     }
     state.socketDev = socketStat.dev;
     state.socketIno = socketStat.ino;
+    fs.chmodSync(socketPath, 0o600);
+    const securedStat = fs.lstatSync(socketPath);
+    if (
+      !securedStat.isSocket() ||
+      securedStat.dev !== state.socketDev ||
+      securedStat.ino !== state.socketIno
+    ) {
+      throw new Error('socket changed');
+    }
   } catch {
     await new Promise((resolve) => server.close(resolve));
-    try {
-      fs.unlinkSync(socketPath);
-    } catch {}
+    cleanupSocket();
     fail('socket_unavailable', 'Relay socket could not be secured.');
   }
 
@@ -962,7 +979,20 @@ async function createModelRelay(options) {
     }
   }
 
-  async function allow({ generation: requestedGeneration, ironReady, callbackReady } = {}) {
+  async function allow(params = {}) {
+    if (!params || typeof params !== 'object' || Array.isArray(params)) {
+      fail('invalid_allow', 'Enable parameters are invalid.');
+    }
+    for (const key of Object.keys(params)) {
+      if (key !== 'generation' && key !== 'ironReady' && key !== 'callbackReady') {
+        fail('invalid_allow', 'Enable parameters contain unsupported fields.');
+      }
+    }
+    const {
+      generation: requestedGeneration,
+      ironReady,
+      callbackReady,
+    } = params;
     if (state.closed) {
       fail('relay_closed', 'Relay is closed.');
     }

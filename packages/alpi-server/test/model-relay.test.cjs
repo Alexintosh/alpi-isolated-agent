@@ -290,6 +290,12 @@ test('denies by default and rejects non-inference input', async (t) => {
   assert.equal(wrongType.status, 415);
   assert.equal(json(wrongType).error.code, 'unsupported_content_type');
 
+  const encodedRequest = await request(relay, {
+    headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' },
+    body: chatBody(),
+  });
+  assert.equal(encodedRequest.status, 415);
+
   const invalidJson = await request(relay, {
     headers: { 'content-type': 'application/json' },
     body: '{',
@@ -648,6 +654,41 @@ test('bounds upstream failures and sanitizes them', async (t) => {
   assert.equal(redirectResponse.headers.location, undefined);
   assert.equal(redirectResponse.body.includes(SECRET), false);
 
+  let upstreamStatus = 500;
+  const erroring = await startHttpServer(t, (req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(upstreamStatus, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `internal ${SECRET}` }));
+    });
+  });
+  const erroringRelay = await createRelay(
+    t,
+    relayOptions(root, erroring, {
+      socketPath: path.join(root, 'erroring.sock'),
+      credential,
+    })
+  );
+  await erroringRelay.allow({
+    generation: 1,
+    ironReady: true,
+    callbackReady: true,
+  });
+  const erroringResponse = await request(erroringRelay, {
+    headers: { 'content-type': 'application/json' },
+    body: chatBody(),
+  });
+  assert.equal(erroringResponse.status, 502);
+  assert.equal(json(erroringResponse).error.code, 'upstream_error');
+  assert.equal(erroringResponse.body.includes(SECRET), false);
+  upstreamStatus = 202;
+  const accepted = await request(erroringRelay, {
+    headers: { 'content-type': 'application/json' }, body: chatBody(),
+  });
+  assert.equal(accepted.status, 502);
+  assert.equal(json(accepted).error.code, 'upstream_error');
+
+
   const failing = await startHttpServer(t, (req) => {
     req.socket.destroy();
   });
@@ -937,6 +978,9 @@ test('owns and cleans up only its private Unix socket', async (t) => {
   const relay = await createModelRelay(
     relayOptions(root, upstream, { socketPath })
   );
+  t.after(async () => {
+    await relay.close();
+  });
   const socketStat = fs.lstatSync(socketPath);
   assert.equal(socketStat.isSocket(), true);
   assert.equal(socketStat.mode & 0o777, 0o600);
