@@ -263,6 +263,100 @@ async function waitForStatus(socketPath, timeoutMs = 6_000) {
   return null;
 }
 
+function supervisorLaunchArgs(supervisor, options = {}) {
+  return [
+    'supervise',
+    '--foreground',
+    '--socket', supervisor.socketPath,
+    '--state', supervisor.statePath,
+    '--session-id', supervisor.sessionId,
+    '--cwd', supervisor.workspace,
+    '--session-dir', supervisor.sessions,
+    '--agent-dir', supervisor.agent,
+    '--home', supervisor.home,
+    '--provider', 'alpi',
+    '--model', 'fixture',
+    '--pi', supervisor.fakePi,
+    '--path-env', process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+    '--log', supervisor.logPath,
+    '--max-events', String(options.maxEvents || 32),
+    '--submit-deadline-ms', String(options.submitDeadlineMs || 500),
+    '--command-deadline-ms', String(options.commandDeadlineMs || 2_000),
+    '--quiesce-deadline-ms', String(options.quiesceDeadlineMs || 800),
+    '--stop-deadline-ms', String(options.stopDeadlineMs || 2_000),
+  ];
+}
+
+function spawnSupervisorProcess(supervisor, options = {}) {
+  return spawn(NODE, [SUPERVISOR, ...supervisorLaunchArgs(supervisor, options)], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+  });
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && error.code !== 'ESRCH');
+  }
+}
+
+function waitForExit(child, timeoutMs = 8_000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve();
+    }, timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function waitForPidGone(pid, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processAlive(pid)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function waitForSupervisorGone(socketPath, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await runCli(['status', '--socket', socketPath], 2_000);
+    if (result.json && result.json.code === 'supervisor_unavailable') {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function waitSettledCli(supervisor, timeoutMs = 6_000) {
+  const deadline = Date.now() + timeoutMs;
+  let after = 0;
+  while (Date.now() < deadline) {
+    const events = await eventsCli(supervisor, after, 400);
+    if (events.json && events.json.settled === true) {
+      return events.json;
+    }
+    if (events.json) {
+      after = events.json.nextSeq;
+    }
+  }
+  return null;
+}
+
 async function startSupervisor(t, options = {}) {
   const root = tempDirectory(options.label || 'guest');
   const workspace = path.join(root, 'workspace');
@@ -280,31 +374,20 @@ async function startSupervisor(t, options = {}) {
   const socketPath = path.join(run, `pi-${sessionId}.sock`);
   const statePath = path.join(run, `pi-${sessionId}.state.json`);
   const logPath = path.join(run, 'supervisor.log');
-  const args = [
-    'supervise',
-    '--foreground',
-    '--socket', socketPath,
-    '--state', statePath,
-    '--session-id', sessionId,
-    '--cwd', workspace,
-    '--session-dir', sessions,
-    '--agent-dir', agent,
-    '--home', home,
-    '--provider', 'alpi',
-    '--model', 'fixture',
-    '--pi', fakePi,
-    '--path-env', process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
-    '--log', logPath,
-    '--max-events', String(options.maxEvents || 32),
-    '--submit-deadline-ms', String(options.submitDeadlineMs || 500),
-    '--command-deadline-ms', String(options.commandDeadlineMs || 2_000),
-    '--quiesce-deadline-ms', String(options.quiesceDeadlineMs || 800),
-    '--stop-deadline-ms', String(options.stopDeadlineMs || 2_000),
-  ];
-  const child = spawn(NODE, [SUPERVISOR, ...args], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-    env: { PATH: process.env.PATH, HOME: process.env.HOME },
-  });
+  const spec = {
+    root,
+    workspace,
+    sessions,
+    agent,
+    home,
+    run,
+    socketPath,
+    statePath,
+    logPath,
+    fakePi,
+    sessionId,
+  };
+  const child = spawnSupervisorProcess(spec, options);
   let stderr = '';
   child.stderr.on('data', (chunk) => {
     stderr += chunk.toString('utf8');
@@ -317,27 +400,23 @@ async function startSupervisor(t, options = {}) {
     if (child.exitCode === null) {
       child.kill('SIGKILL');
     }
-    fs.rmSync(root, { recursive: true, force: true });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (error.code !== 'ENOTEMPTY') {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
   });
   const status = await waitForStatus(socketPath);
   if (!status) {
     throw new Error(`Supervisor did not start: ${stderr}`);
   }
-  return {
-    root,
-    workspace,
-    sessions,
-    agent,
-    home,
-    run,
-    socketPath,
-    statePath,
-    logPath,
-    fakePi,
-    sessionId,
-    child,
-    status,
-  };
+  return { ...spec, child, status };
 }
 
 function submitArgs(supervisor, spec) {
@@ -1058,4 +1137,257 @@ test('host adapter reports forced cleanup honestly', async (t) => {
   const closed = await adapter.close({ nativeSessionId: UUID_B });
   assert.equal(closed.stopped, true);
   assert.equal(closed.forced, true);
+});
+
+test('failed critical state write fences prompt dispatch and reports the fault', async (t) => {
+  const supervisor = await startSupervisor(t, { scenario: { settleDelayMs: 10 } });
+  fs.chmodSync(supervisor.run, 0o500);
+  let first;
+  try {
+    first = await submitCli(supervisor, {
+      requestId: 'fault-1',
+      generation: 1,
+      message: 'must not dispatch',
+    });
+  } finally {
+    fs.chmodSync(supervisor.run, 0o700);
+  }
+  assert.equal(first.json.ok, false);
+  assert.equal(first.json.code, 'state_write_failed');
+  assert.equal(promptCount(supervisor.workspace), 0);
+
+  // The supervisor stays fenced even after guest storage becomes writable.
+  const fenced = await submitCli(supervisor, {
+    requestId: 'fault-2',
+    generation: 1,
+    message: 'still fenced',
+  });
+  assert.equal(fenced.json.ok, false);
+  assert.equal(fenced.json.code, 'storage_unavailable');
+  assert.equal(promptCount(supervisor.workspace), 0);
+
+  const status = await runCli(['status', '--socket', supervisor.socketPath]);
+  assert.equal(status.json.ok, true);
+  assert.equal(status.json.status, 'uncertain');
+  assert.equal(status.json.storageFault.code, 'state_write_failed');
+  assert.equal(status.json.storageFault.operation, 'submit-intent');
+});
+
+test('failed generation persistence rolls back pause, resume, and resolve', async (t) => {
+  // A failed pause fence must not report or persist the new generation.
+  {
+    const supervisor = await startSupervisor(t, { scenario: { settleDelayMs: 10 } });
+    const submitted = await submitCli(supervisor, {
+      requestId: 'pause-1',
+      generation: 1,
+      message: 'work',
+    });
+    assert.equal(submitted.json.accepted, true);
+    assert.ok(await waitSettledCli(supervisor));
+    fs.chmodSync(supervisor.run, 0o500);
+    let paused;
+    try {
+      paused = await runCli([
+        'pause', '--socket', supervisor.socketPath,
+        '--generation', '1', '--owner', 'op-1', '--abort-active',
+      ]);
+    } finally {
+      fs.chmodSync(supervisor.run, 0o700);
+    }
+    assert.equal(paused.json.ok, false);
+    assert.equal(paused.json.code, 'state_write_failed');
+    const status = await runCli(['status', '--socket', supervisor.socketPath]);
+    assert.equal(status.json.generation, 1);
+    assert.equal(status.json.paused, false);
+    assert.equal(status.json.pauseOwner, null);
+  }
+  // A failed resume must keep the paused generation and owner in force.
+  {
+    const supervisor = await startSupervisor(t, { scenario: { settleDelayMs: 10 } });
+    const submitted = await submitCli(supervisor, {
+      requestId: 'resume-1',
+      generation: 1,
+      message: 'work',
+    });
+    assert.equal(submitted.json.accepted, true);
+    assert.ok(await waitSettledCli(supervisor));
+    const paused = await runCli([
+      'pause', '--socket', supervisor.socketPath,
+      '--generation', '1', '--owner', 'op-2', '--abort-active',
+    ]);
+    assert.equal(paused.json.ok, true);
+    fs.chmodSync(supervisor.run, 0o500);
+    let resumed;
+    try {
+      resumed = await runCli([
+        'resume', '--socket', supervisor.socketPath,
+        '--generation', String(paused.json.generation), '--owner', 'op-2',
+      ]);
+    } finally {
+      fs.chmodSync(supervisor.run, 0o700);
+    }
+    assert.equal(resumed.json.ok, false);
+    assert.equal(resumed.json.code, 'state_write_failed');
+    const status = await runCli(['status', '--socket', supervisor.socketPath]);
+    assert.equal(status.json.generation, paused.json.generation);
+    assert.equal(status.json.paused, true);
+    assert.equal(status.json.pauseOwner, 'op-2');
+  }
+  // A failed resolve must leave the pending prompt ambiguous, not settled.
+  {
+    const supervisor = await startSupervisor(t, {
+      scenario: { losePromptResponse: true },
+      submitDeadlineMs: 200,
+    });
+    const submitted = await submitCli(supervisor, {
+      requestId: 'resolve-1',
+      generation: 1,
+      message: 'ambiguous',
+    });
+    assert.equal(submitted.json.uncertain, true);
+    fs.chmodSync(supervisor.run, 0o500);
+    let resolved;
+    try {
+      resolved = await runCli([
+        'resolve', '--socket', supervisor.socketPath,
+        '--request-id', 'resolve-1', '--resolution', 'settled',
+      ]);
+    } finally {
+      fs.chmodSync(supervisor.run, 0o700);
+    }
+    assert.equal(resolved.json.ok, false);
+    assert.equal(resolved.json.code, 'state_write_failed');
+    const status = await runCli(['status', '--socket', supervisor.socketPath]);
+    // A committed resolve reports status 'settled'; the rollback restored the
+    // pre-resolve uncertainty (the fake Pi's agent_settled event had already
+    // marked the record settled before the resolve was attempted).
+    assert.equal(status.json.status, 'uncertain');
+    assert.equal(status.json.pendingPrompt.requestId, 'resolve-1');
+    assert.equal(status.json.pendingPrompt.uncertain, true);
+  }
+});
+
+test('supervisor restart refuses to replace a live Pi child and keeps cleanup pending', async (t) => {
+  const supervisor = await startSupervisor(t, { scenario: { settleDelayMs: 10, keepAlive: true } });
+  const submitted = await submitCli(supervisor, {
+    requestId: 'crash-1',
+    generation: 1,
+    message: 'before crash',
+  });
+  assert.equal(submitted.json.accepted, true);
+  assert.ok(await waitSettledCli(supervisor));
+  const statusBefore = await runCli(['status', '--socket', supervisor.socketPath]);
+  const piPid = statusBefore.json.piPid;
+  assert.ok(Number.isSafeInteger(piPid) && piPid > 0);
+
+  // Crash the writer without stopping Pi: the child outlives its supervisor.
+  supervisor.child.kill('SIGKILL');
+  await waitForExit(supervisor.child);
+  assert.equal(await waitForSupervisorGone(supervisor.socketPath), true);
+
+  const markerPath = supervisor.statePath + '.owner';
+  assert.equal(fs.existsSync(markerPath), true);
+  const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  assert.equal(marker.child.state, 'running');
+  assert.equal(marker.child.pid, piPid);
+  if (process.platform === 'linux') {
+    assert.equal(typeof marker.child.startTime, 'string');
+  }
+
+  // A replacement must refuse while the previous child may still be alive.
+  const refused = await runCli(supervisorLaunchArgs(supervisor), 15_000);
+  assert.equal(refused.code, 2);
+  assert.equal(refused.json.ok, false);
+  assert.equal(refused.json.code, 'cleanup_pending');
+  assert.equal(refused.json.details.cleanupPending, true);
+
+  // The guard is retained as cleanup-pending evidence, the orphaned child was
+  // never signalled by the replacement, and no replacement child was spawned.
+  assert.equal(fs.existsSync(markerPath), true);
+  assert.equal(processAlive(piPid), true);
+  assert.equal(promptCount(supervisor.workspace), 1);
+
+  // Explicit verified cleanup: the operator terminates the orphan...
+  process.kill(piPid, 'SIGTERM');
+  assert.equal(await waitForPidGone(piPid), true);
+  // ...and only a positively verified absence lets a replacement recover.
+  const replacement = spawnSupervisorProcess(supervisor);
+  t.after(async () => {
+    if (replacement.exitCode === null && replacement.signalCode === null) {
+      replacement.kill('SIGTERM');
+      await waitForExit(replacement, 4_000);
+    }
+    if (replacement.exitCode === null && replacement.signalCode === null) {
+      replacement.kill('SIGKILL');
+    }
+  });
+  const statusAfter = await waitForStatus(supervisor.socketPath, 10_000);
+  assert.ok(statusAfter, 'replacement supervisor did not become ready');
+  assert.equal(statusAfter.generation, 2);
+  // The recovered supervisor wrote a fresh guard naming its own child.
+  const markerAfter = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  assert.equal(markerAfter.child.state, 'running');
+  assert.ok(markerAfter.child.pid !== piPid);
+
+  const recovered = await submitCli(supervisor, {
+    requestId: 'crash-2',
+    generation: 2,
+    message: 'after recovery',
+  });
+  assert.equal(recovered.json.accepted, true);
+});
+
+test('failed stop cleanup keeps the ownership guard until absence is verified', async (t) => {
+  const supervisor = await startSupervisor(t, { scenario: { settleDelayMs: 10 } });
+  const statusBefore = await runCli(['status', '--socket', supervisor.socketPath]);
+  const piPid = statusBefore.json.piPid;
+  assert.ok(Number.isSafeInteger(piPid) && piPid > 0);
+  const markerPath = supervisor.statePath + '.owner';
+
+  // Critical persistence fails during stop: the observed child exit cannot be
+  // recorded, so finalization must not clear the durable ownership guard.
+  fs.chmodSync(supervisor.run, 0o500);
+  let stopped;
+  try {
+    stopped = await runCli(['stop', '--socket', supervisor.socketPath], 15_000);
+  } finally {
+    fs.chmodSync(supervisor.run, 0o700);
+  }
+  assert.equal(stopped.json.ok, true);
+  assert.equal(stopped.json.stopped, true);
+
+  // The guard survived finalization and still names the child.
+  assert.equal(fs.existsSync(markerPath), true);
+  const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  assert.equal(marker.child.state, 'running');
+  assert.equal(marker.child.pid, piPid);
+
+  // The child did exit; the supervisor just could not record it durably.
+  assert.equal(await waitForPidGone(piPid), true);
+
+  // Restart recovers only after the probe independently verifies absence.
+  const replacement = spawnSupervisorProcess(supervisor);
+  t.after(async () => {
+    if (replacement.exitCode === null && replacement.signalCode === null) {
+      replacement.kill('SIGTERM');
+      await waitForExit(replacement, 4_000);
+    }
+    if (replacement.exitCode === null && replacement.signalCode === null) {
+      replacement.kill('SIGKILL');
+    }
+  });
+  const statusAfter = await waitForStatus(supervisor.socketPath, 10_000);
+  assert.ok(statusAfter, 'replacement supervisor did not become ready');
+  assert.equal(statusAfter.generation, 2);
+  // The recovered supervisor wrote a fresh guard naming its own child.
+  const markerAfter = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  assert.equal(markerAfter.child.state, 'running');
+  assert.ok(markerAfter.child.pid !== piPid);
+
+  const recovered = await submitCli(supervisor, {
+    requestId: 'recover-1',
+    generation: 2,
+    message: 'after recovery',
+  });
+  assert.equal(recovered.json.accepted, true);
 });

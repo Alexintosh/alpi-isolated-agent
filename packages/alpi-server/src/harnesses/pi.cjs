@@ -1369,7 +1369,8 @@ function createPiHarness(options) {
           },
           stopDeadlineMs + 5_000
         );
-        sessions.delete(sessionId);
+        // The attachment is kept until cleanup is verified so a retry can
+        // address the same session record instead of a reconstructed path.
         if (payload.stopped !== true) {
           fail('cleanup_unverified', 'Guest supervisor could not verify Pi termination.', {
             forced: payload.forced === true,
@@ -1377,6 +1378,7 @@ function createPiHarness(options) {
             cleanupUnverified: payload.cleanupUnverified === true,
           });
         }
+        sessions.delete(sessionId);
         return {
           harnessId: PI_HARNESS_ID,
           nativeSessionId: sessionId,

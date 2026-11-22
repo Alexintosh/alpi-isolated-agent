@@ -193,6 +193,32 @@ function ensureDirectory(directory, { privateMode = false } = {}) {
   return directory;
 }
 
+/**
+ * Persist a directory entry so that a rename or unlink is durable. Unsupported
+ * directory fsync is the only error that may be ignored; anything else means
+ * the caller cannot claim the change was committed.
+ */
+function fsyncDirectory(directory) {
+  let fd;
+  try {
+    fd = fs.openSync(directory, 'r');
+    fs.fsyncSync(fd);
+  } catch (error) {
+    if (error && ['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF'].includes(error.code)) {
+      return;
+    }
+    fail('state_write_failed', 'Guest supervisor directory could not be synced.');
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // The original failure is reported by fsyncDirectory.
+      }
+    }
+  }
+}
+
 function writeAtomic(filePath, data) {
   const directory = path.dirname(filePath);
   const temporary = path.join(
@@ -207,23 +233,18 @@ function writeAtomic(filePath, data) {
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(temporary, filePath);
-    try {
-      const directoryFd = fs.openSync(directory, 'r');
-      try {
-        fs.fsyncSync(directoryFd);
-      } finally {
-        fs.closeSync(directoryFd);
-      }
-    } catch (error) {
-      if (!['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) {
-        // Directory fsync is best effort; the rename already happened.
-      }
-    }
+    // File contents and the directory entry must both be durable before the
+    // caller treats the write as committed.
+    fsyncDirectory(directory);
   } catch {
     fail('state_write_failed', 'Guest supervisor state could not be written.');
   } finally {
     if (fd !== undefined) {
-      fs.closeSync(fd);
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // The original failure above is the one that matters.
+      }
     }
     try {
       fs.unlinkSync(temporary);
@@ -233,6 +254,126 @@ function writeAtomic(filePath, data) {
       }
     }
   }
+}
+
+/**
+ * Remove a file and persist the directory entry. Only ENOENT is tolerable
+ * because the desired end state (file absent) already holds.
+ */
+function unlinkDurable(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') {
+      fail('state_write_failed', 'Guest supervisor marker could not be removed.');
+    }
+    return;
+  }
+  fsyncDirectory(path.dirname(filePath));
+}
+
+/**
+ * Linux start time (field 22 of /proc/<pid>/stat). Together with the pid this
+ * identifies a process across pid reuse. Other platforms cannot provide it.
+ */
+function readProcStartTime(pid) {
+  if (process.platform !== 'linux') {
+    return null;
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return null;
+  }
+  const close = raw.lastIndexOf(')');
+  if (close < 0) {
+    return null;
+  }
+  const fields = raw.slice(close + 2).split(' ');
+  const startTime = fields[19];
+  return typeof startTime === 'string' && /^\d+$/.test(startTime) ? startTime : null;
+}
+
+/**
+ * Existence probe only. Signal 0 delivers nothing; ESRCH is the one answer
+ * that proves the pid is gone, and EPERM still means the process exists.
+ */
+function processPresent(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(error && error.code === 'ESRCH');
+  }
+}
+
+function normalizeChildRecord(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  if (!['none', 'spawning', 'running', 'exited'].includes(value.state)) {
+    return null;
+  }
+  const pid = value.pid === null || value.pid === undefined
+    ? null
+    : (Number.isSafeInteger(value.pid) && value.pid > 0 ? value.pid : null);
+  const startTime = typeof value.startTime === 'string' && /^\d+$/.test(value.startTime)
+    ? value.startTime
+    : null;
+  return {
+    state: value.state,
+    pid,
+    startTime,
+    at: typeof value.at === 'string' ? value.at : null,
+    exitCode: Number.isInteger(value.exitCode) ? value.exitCode : null,
+    signal: typeof value.signal === 'string' ? value.signal : null,
+  };
+}
+
+/**
+ * Classify a persisted child record without ever signalling a pid. Only
+ * 'absent' is proof that exclusive ownership can be released. 'spawning' and
+ * pid-only records are treated as unknown and fail closed.
+ */
+function probeChildPresence(child) {
+  if (!child || typeof child !== 'object') {
+    return 'unknown';
+  }
+  if (child.state === 'none' || child.state === 'exited') {
+    return 'absent';
+  }
+  if (child.state !== 'running') {
+    return 'unknown';
+  }
+  const pid = child.pid;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return 'unknown';
+  }
+  if (process.platform === 'linux' && child.startTime) {
+    let present = true;
+    try {
+      fs.lstatSync(`/proc/${pid}`);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        present = false;
+      }
+    }
+    if (!present) {
+      return 'absent';
+    }
+    const current = readProcStartTime(pid);
+    if (current === null) {
+      return 'unknown';
+    }
+    return current === child.startTime ? 'alive' : 'absent';
+  }
+  // Conservative fallback: a live pid is ambiguous because it may have been
+  // reused, and a missing pid is the only independent proof of absence.
+  return processPresent(pid) ? 'alive-unverified' : 'absent';
 }
 
 function readStateFile(filePath) {
@@ -561,6 +702,18 @@ function createSupervisor(config) {
   let resumed = false;
   const pending = new Map();
   let idCounter = 0;
+  let storageFault = null;
+  let childState = {
+    state: 'none',
+    pid: null,
+    startTime: null,
+    at: null,
+    exitCode: null,
+    signal: null,
+  };
+  const ownershipPath = `${statePath}.owner`;
+  let reclaimPath = null;
+  let lockStartedAt = null;
 
   function nextRequestId(prefix) {
     idCounter += 1;
@@ -590,12 +743,65 @@ function createSupervisor(config) {
       lastError,
       piPid,
       piExitCode,
+      child: childState,
       createdAt: state && state.createdAt ? state.createdAt : nowIso(),
       updatedAt: nowIso(),
     };
   }
 
-  function writeStateNow() {
+  function recordStorageFault(operation, error) {
+    const code = error instanceof SupervisorError
+      ? error.code
+      : (error && typeof error.code === 'string' ? error.code : 'state_write_failed');
+    storageFault = {
+      code,
+      message: 'Guest supervisor storage failed.',
+      operation,
+      at: nowIso(),
+    };
+    lastError = {
+      code: 'state_write_failed',
+      message: `Guest supervisor could not persist ${operation}.`,
+    };
+  }
+
+  /**
+   * Diagnostic journal writes are best effort and never latch a storage fault.
+   * Once a critical write fails, no further state writes are attempted so an
+   * ambiguous durable marker is never silently overwritten.
+   */
+  function writeStateBestEffort() {
+    saveDirty = false;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (storageFault) {
+      return false;
+    }
+    const data = JSON.stringify(serializeState(), null, 2);
+    try {
+      writeAtomic(statePath, data);
+      return true;
+    } catch (error) {
+      lastError = {
+        code: error instanceof SupervisorError ? error.code : 'state_write_failed',
+        message: 'State write failed.',
+      };
+      return false;
+    }
+  }
+
+  /**
+   * Critical ownership/lifecycle state. Throws when the transition was not
+   * durably committed, and refuses further writes after any critical failure.
+   */
+  function writeStateCritical(operation) {
+    if (storageFault) {
+      fail('storage_unavailable', 'Guest supervisor storage is unavailable.', {
+        fault: storageFault,
+      });
+    }
     saveDirty = false;
     if (saveTimer) {
       clearTimeout(saveTimer);
@@ -605,8 +811,153 @@ function createSupervisor(config) {
     try {
       writeAtomic(statePath, data);
     } catch (error) {
-      lastError = { code: error.code || 'state_write_failed', message: 'State write failed.' };
+      if (!storageFault) {
+        recordStorageFault(operation, error);
+      }
+      throw error instanceof SupervisorError
+        ? error
+        : new SupervisorError('state_write_failed', 'Guest supervisor state could not be committed.', {
+          operation,
+        });
     }
+  }
+
+  function ownershipMarkerPayload() {
+    return {
+      version: 1,
+      sessionId,
+      supervisorPid: process.pid,
+      supervisorStartedAt: lockStartedAt || (state && state.createdAt) || nowIso(),
+      child: childState,
+      updatedAt: nowIso(),
+    };
+  }
+
+  function writeOwnershipMarkerCritical(operation) {
+    if (storageFault) {
+      fail('storage_unavailable', 'Guest supervisor storage is unavailable.', {
+        fault: storageFault,
+      });
+    }
+    try {
+      writeAtomic(ownershipPath, JSON.stringify(ownershipMarkerPayload(), null, 2));
+    } catch (error) {
+      if (!storageFault) {
+        recordStorageFault(operation, error);
+      }
+      throw error instanceof SupervisorError
+        ? error
+        : new SupervisorError('state_write_failed', 'Guest supervisor ownership marker could not be committed.', {
+          operation,
+        });
+    }
+  }
+
+  /**
+   * Used only when absence is independently established (an observed child
+   * exit or no child ever spawned). It may run after a storage fault because
+   * it records a proof rather than granting ownership; if it fails, the prior
+   * guard stays and restart fails closed until the probe verifies absence.
+   */
+  function writeOwnershipMarkerRaw(operation) {
+    try {
+      writeAtomic(ownershipPath, JSON.stringify(ownershipMarkerPayload(), null, 2));
+      return true;
+    } catch (error) {
+      if (!storageFault) {
+        recordStorageFault(operation, error);
+      }
+      return false;
+    }
+  }
+
+  function readOwnershipMarker() {
+    let stat;
+    try {
+      stat = fs.lstatSync(ownershipPath);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        return null;
+      }
+      fail('cleanup_pending', 'Guest supervisor ownership marker could not be inspected.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      fail('cleanup_pending', 'Guest supervisor ownership marker is not a regular file.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    const uid = currentUid();
+    if (uid !== null && stat.uid !== uid && stat.uid !== 0) {
+      fail('cleanup_pending', 'Guest supervisor ownership marker is not owned by the guest user.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    if ((stat.mode & 0o077) !== 0) {
+      fail('cleanup_pending', 'Guest supervisor ownership marker is not private.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(ownershipPath, 'utf8'));
+    } catch {
+      fail('cleanup_pending', 'Guest supervisor ownership marker is not valid JSON.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.version !== 1) {
+      fail('cleanup_pending', 'Guest supervisor ownership marker has an unsupported shape.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    if (parsed.sessionId !== sessionId) {
+      fail('state_conflict', 'Guest supervisor ownership marker belongs to a different session.');
+    }
+    const child = normalizeChildRecord(parsed.child);
+    if (!child) {
+      fail('cleanup_pending', 'Guest supervisor ownership marker has an invalid child record.', {
+        reason: 'ownership_unreadable',
+        cleanupPending: true,
+      });
+    }
+    return { child, raw: parsed };
+  }
+
+  /**
+   * Serialize ownership recovery. Returns true when a prior marker was proven
+   * absent and cleared; throws cleanup_pending when the prior child may live
+   * or its identity cannot be verified. Recovery runs while holding the
+   * supervisor lock, and the probe never signals an unverified pid.
+   */
+  function reconcileOwnership() {
+    const marker = readOwnershipMarker();
+    if (!marker) {
+      return false;
+    }
+    const verdict = probeChildPresence(marker.child);
+    if (verdict !== 'absent') {
+      fail('cleanup_pending', 'A previous Pi child cannot be proven absent; guest cleanup is required.', {
+        verdict,
+        child: marker.child,
+        cleanupPending: true,
+      });
+    }
+    unlinkDurable(ownershipPath);
+    return true;
+  }
+
+  function persistChildTransition(nextChild, operation) {
+    childState = nextChild;
+    writeOwnershipMarkerCritical(operation);
+    writeStateCritical(operation);
   }
 
   function scheduleSave() {
@@ -617,7 +968,7 @@ function createSupervisor(config) {
     saveTimer = setTimeout(() => {
       saveTimer = null;
       if (saveDirty) {
-        writeStateNow();
+        writeStateBestEffort();
       }
     }, 50);
   }
@@ -685,7 +1036,13 @@ function createSupervisor(config) {
       } else {
         status = 'settled';
       }
-      writeStateNow();
+      // A settlement changes ownership/pending semantics; try to commit it
+      // strictly, but never throw out of the Pi stdout handler.
+      try {
+        writeStateCritical('agent-settled');
+      } catch {
+        // The storage fault is recorded and further dispatch is denied.
+      }
     } else if (safe && (safe.type === 'agent_start' || safe.type === 'message_start' ||
       safe.type === 'message_update' || safe.type === 'message_end' ||
       safe.type === 'tool_execution_start' || safe.type === 'tool_execution_update' ||
@@ -813,10 +1170,22 @@ function createSupervisor(config) {
     piExited = true;
     piExitCode = Number.isInteger(code) ? code : null;
     piSignal = typeof signal === 'string' ? signal : null;
+    childState = {
+      state: 'exited',
+      pid: childState.pid === null ? piPid : childState.pid,
+      startTime: childState.startTime,
+      at: nowIso(),
+      exitCode: piExitCode,
+      signal: piSignal,
+    };
     failPending(new SupervisorError('pi_exited', 'Pi exited before completing the request.', {
       exitCode: piExitCode,
       signal: piSignal,
     }));
+    // An observed exit is independent proof of absence. Record it durably so a
+    // later supervisor can clear the guard; if this write fails the previous
+    // marker (possibly 'running') remains and restart fails closed.
+    writeOwnershipMarkerRaw('pi-exit');
     if (!stopping) {
       status = 'exited';
       lastError = {
@@ -831,7 +1200,11 @@ function createSupervisor(config) {
       if (pendingPrompt && !pendingPrompt.settled) {
         pendingPrompt.uncertain = true;
       }
-      writeStateNow();
+      try {
+        writeStateCritical('pi-exit');
+      } catch {
+        // The storage fault is recorded and further dispatch is denied.
+      }
     }
     notifyWaiters();
   }
@@ -853,6 +1226,19 @@ function createSupervisor(config) {
       HOME: guestHome,
       PI_CODING_AGENT_DIR: agentDir,
     };
+    // A durable spawning marker closes the window in which a crashed
+    // supervisor could leave an unidentified child: any restart over this
+    // marker fails closed until an operator has verified the guest. It is
+    // overwritten with the running record immediately after the spawn.
+    childState = {
+      state: 'spawning',
+      pid: null,
+      startTime: null,
+      at: nowIso(),
+      exitCode: null,
+      signal: null,
+    };
+    writeOwnershipMarkerCritical('pi-spawning');
     let child;
     try {
       child = childProcess.spawn(piExecutable, argv, {
@@ -862,20 +1248,65 @@ function createSupervisor(config) {
         detached: false,
       });
     } catch {
+      // A synchronous spawn failure means no child exists; record that proof
+      // so the spawning guard does not fence every future restart.
+      childState = {
+        state: 'none',
+        pid: null,
+        startTime: null,
+        at: nowIso(),
+        exitCode: null,
+        signal: null,
+      };
+      writeOwnershipMarkerRaw('pi-spawn-failed');
       fail('pi_unavailable', 'Pi could not be started inside the guest.');
     }
     piChild = child;
     piPid = child.pid || null;
     piExited = false;
+    childState = {
+      state: 'running',
+      pid: piPid,
+      startTime: piPid ? readProcStartTime(piPid) : null,
+      at: nowIso(),
+      exitCode: null,
+      signal: null,
+    };
+    try {
+      persistChildTransition(childState, 'pi-start');
+    } catch (error) {
+      // The child exists but its ownership record is not durable. Kill the
+      // child this supervisor just spawned (verified ours) and fail closed; a
+      // later restart probes absence before reclaiming the session.
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // Reported by the close handler.
+      }
+      throw error;
+    }
     child.on('error', () => {
       lastError = { code: 'pi_unavailable', message: 'Pi process failed to start.' };
       if (!piExited) {
         piExited = true;
+        childState = {
+          state: 'exited',
+          pid: childState.pid,
+          startTime: childState.startTime,
+          at: nowIso(),
+          exitCode: null,
+          signal: null,
+        };
+        writeOwnershipMarkerRaw('pi-start-error');
         failPending(new SupervisorError('pi_unavailable', 'Pi process failed to start.'));
         if (!stopping) {
           status = 'exited';
         }
-        writeStateNow();
+        try {
+          writeStateCritical('pi-start-error');
+        } catch {
+          // The storage fault is recorded and further dispatch is denied.
+        }
         notifyWaiters();
       }
     });
@@ -1034,7 +1465,9 @@ function createSupervisor(config) {
     } else if (paused) {
       status = 'paused';
     }
-    writeStateNow();
+    // Quiescence is an ownership-relevant transition; report it only when the
+    // resulting state was durably committed.
+    writeStateCritical('abort');
     return {
       aborted: true,
       settled,
@@ -1074,6 +1507,11 @@ function createSupervisor(config) {
     if (piExited) {
       fail('pi_exited', 'Pi is not running.');
     }
+    if (storageFault) {
+      fail('storage_unavailable', 'Guest supervisor storage is unavailable; refusing to dispatch.', {
+        fault: storageFault,
+      });
+    }
     if (pendingPrompt && pendingPrompt.requestId === requestId) {
       return {
         ok: true,
@@ -1094,7 +1532,7 @@ function createSupervisor(config) {
     }
 
     const submittedAt = nowIso();
-    pendingPrompt = {
+    const nextPrompt = {
       requestId,
       generation,
       submittedAt,
@@ -1104,7 +1542,7 @@ function createSupervisor(config) {
       operator,
       owner,
     };
-    activeTurn = {
+    const nextTurn = {
       requestId,
       generation,
       submittedAt,
@@ -1113,10 +1551,34 @@ function createSupervisor(config) {
       disposition: null,
       operator,
     };
+    pendingPrompt = nextPrompt;
+    activeTurn = nextTurn;
     status = 'running';
+    const uncertainResult = (reason) => ({
+      ok: true,
+      duplicate: false,
+      accepted: false,
+      uncertain: true,
+      settled: false,
+      disposition: null,
+      requestId,
+      generation,
+      code: 'prompt_uncertain',
+      reason,
+    });
     // Imperative boundary: persist the intent before writing to Pi. A host
     // crash or lost response after this point is `uncertain`, never a retry.
-    writeStateNow();
+    try {
+      writeStateCritical('submit-intent');
+    } catch (error) {
+      // Nothing was dispatched. The durable marker may or may not contain this
+      // intent, so retain the ambiguous record and fence all further dispatch
+      // until a restart reloads durable state.
+      pendingPrompt.uncertain = true;
+      activeTurn.uncertain = true;
+      status = 'uncertain';
+      throw error;
+    }
 
     let response;
     try {
@@ -1131,7 +1593,11 @@ function createSupervisor(config) {
         pendingPrompt.uncertain = true;
         activeTurn.uncertain = true;
         status = piExited ? 'exited' : 'uncertain';
-        writeStateNow();
+        try {
+          writeStateCritical('submit-uncertain');
+        } catch {
+          // The side effect is already in flight; retain the ambiguity.
+        }
         return {
           ok: true,
           duplicate: false,
@@ -1148,7 +1614,17 @@ function createSupervisor(config) {
       pendingPrompt = null;
       activeTurn = null;
       status = paused ? 'paused' : 'ready';
-      writeStateNow();
+      try {
+        writeStateCritical('submit-failed');
+      } catch {
+        // The durable intent cannot be cleared; keep the record ambiguous.
+        pendingPrompt = nextPrompt;
+        activeTurn = nextTurn;
+        pendingPrompt.uncertain = true;
+        activeTurn.uncertain = true;
+        status = 'uncertain';
+        return uncertainResult('state_write_failed');
+      }
       throw error;
     }
 
@@ -1156,7 +1632,17 @@ function createSupervisor(config) {
       pendingPrompt = null;
       activeTurn = null;
       status = paused ? 'paused' : 'ready';
-      writeStateNow();
+      try {
+        writeStateCritical('submit-rejected');
+      } catch {
+        // Pi rejected the prompt, but the durable record cannot be cleared.
+        pendingPrompt = nextPrompt;
+        activeTurn = nextTurn;
+        pendingPrompt.uncertain = true;
+        activeTurn.uncertain = true;
+        status = 'uncertain';
+        return uncertainResult('state_write_failed');
+      }
       fail('guest_error', typeof response.error === 'string'
         ? truncateText(response.error, 1024)
         : 'Pi rejected the prompt.');
@@ -1166,7 +1652,17 @@ function createSupervisor(config) {
       pendingPrompt = null;
       activeTurn = null;
       status = paused ? 'paused' : 'ready';
-      writeStateNow();
+      try {
+        writeStateCritical('submit-protocol-error');
+      } catch {
+        // The durable record cannot be cleared; keep it ambiguous.
+        pendingPrompt = nextPrompt;
+        activeTurn = nextTurn;
+        pendingPrompt.uncertain = true;
+        activeTurn.uncertain = true;
+        status = 'uncertain';
+        return uncertainResult('state_write_failed');
+      }
       fail('protocol_error', 'Pi prompt response had no disposition.');
     }
     pendingPrompt.disposition = disposition;
@@ -1183,7 +1679,23 @@ function createSupervisor(config) {
     } else {
       status = paused ? 'paused' : 'running';
     }
-    writeStateNow();
+    try {
+      writeStateCritical('submit-result');
+    } catch {
+      // Pi accepted the prompt but the durable disposition is ambiguous.
+      return {
+        ok: true,
+        duplicate: false,
+        accepted: false,
+        uncertain: true,
+        settled: activeTurn.settled === true,
+        disposition,
+        requestId,
+        generation,
+        code: 'prompt_uncertain',
+        reason: 'state_write_failed',
+      };
+    }
     return {
       ok: true,
       duplicate: false,
@@ -1206,17 +1718,32 @@ function createSupervisor(config) {
         receivedGeneration: requestGeneration,
       });
     }
+    if (storageFault) {
+      fail('storage_unavailable', 'Guest supervisor storage is unavailable; refusing to grant ownership.', {
+        fault: storageFault,
+      });
+    }
     if (paused) {
       if (pauseOwner !== owner) {
         fail('owner_mismatch', 'A different operator owns the paused conversation.');
       }
     } else {
+      const previous = { generation, paused, pauseOwner, status };
       generation += 1;
       paused = true;
       pauseOwner = owner;
       status = 'paused_pending';
-      // Fence the previous writer before any abort or quiescence wait.
-      writeStateNow();
+      try {
+        // Fence the previous writer before any abort or quiescence wait. The
+        // new generation is not reported unless this write is durable.
+        writeStateCritical('pause');
+      } catch (error) {
+        generation = previous.generation;
+        paused = previous.paused;
+        pauseOwner = previous.pauseOwner;
+        status = previous.status;
+        throw error;
+      }
     }
     let settled = !activeTurn || activeTurn.settled === true;
     let abortResult = null;
@@ -1241,7 +1768,7 @@ function createSupervisor(config) {
     }
     const quiescent = settled && verified && isStreaming === false;
     status = quiescent ? 'paused' : 'paused_pending';
-    writeStateNow();
+    writeStateCritical('pause-result');
     return {
       ok: true,
       paused: true,
@@ -1274,6 +1801,11 @@ function createSupervisor(config) {
     if (owner !== pauseOwner) {
       fail('owner_mismatch', 'Only the paused operator can return control.');
     }
+    if (storageFault) {
+      fail('storage_unavailable', 'Guest supervisor storage is unavailable; refusing to grant ownership.', {
+        fault: storageFault,
+      });
+    }
     let isStreaming = null;
     let verified = false;
     try {
@@ -1294,11 +1826,20 @@ function createSupervisor(config) {
         isStreaming,
       });
     }
+    const previous = { generation, paused, pauseOwner, status };
     generation += 1;
     paused = false;
     pauseOwner = null;
     status = activeTurn && activeTurn.settled !== true ? 'running' : 'ready';
-    writeStateNow();
+    try {
+      writeStateCritical('resume');
+    } catch (error) {
+      generation = previous.generation;
+      paused = previous.paused;
+      pauseOwner = previous.pauseOwner;
+      status = previous.status;
+      throw error;
+    }
     return {
       ok: true,
       resumed: true,
@@ -1388,8 +1929,17 @@ function createSupervisor(config) {
     if (!matchesPrompt && !matchesTurn) {
       fail('unknown_request', 'No prompt record matches that request id.');
     }
+    if (storageFault) {
+      fail('storage_unavailable', 'Guest supervisor storage is unavailable; resolution was not committed.', {
+        fault: storageFault,
+      });
+    }
     // Operator resolution is an explicit acknowledgement after inspecting the
-    // native conversation. It never re-dispatches the prompt.
+    // native conversation. It never re-dispatches the prompt. Snapshot deeply:
+    // the rollback must undo in-place field mutations.
+    const previousPrompt = pendingPrompt ? JSON.parse(JSON.stringify(pendingPrompt)) : null;
+    const previousTurn = activeTurn ? JSON.parse(JSON.stringify(activeTurn)) : null;
+    const previousStatus = status;
     if (matchesPrompt) {
       pendingPrompt.settled = true;
       pendingPrompt.uncertain = false;
@@ -1406,7 +1956,14 @@ function createSupervisor(config) {
       }
     }
     status = paused ? 'paused' : 'settled';
-    writeStateNow();
+    try {
+      writeStateCritical('resolve');
+    } catch (error) {
+      pendingPrompt = previousPrompt;
+      activeTurn = previousTurn;
+      status = previousStatus;
+      throw error;
+    }
     return {
       ok: true,
       resolved: true,
@@ -1463,6 +2020,9 @@ function createSupervisor(config) {
       piPid,
       piExitCode,
       piSignal,
+      child: childState,
+      ownershipPending: childState.state === 'running' || childState.state === 'spawning',
+      storageFault,
       lastError,
       resumed,
       protocolErrors,
@@ -1511,66 +2071,217 @@ function createSupervisor(config) {
     }
   }
 
+  function readLockRecord() {
+    let raw;
+    try {
+      raw = fs.readFileSync(lockPath, 'utf8');
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        return null;
+      }
+      return { invalid: true };
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to the invalid marker below.
+    }
+    return { invalid: true };
+  }
+
+  function supervisorAlive(record) {
+    if (!record || record.invalid === true) {
+      return false;
+    }
+    if (!Number.isSafeInteger(record.pid) || record.pid <= 0) {
+      return false;
+    }
+    try {
+      process.kill(record.pid, 0);
+      return true;
+    } catch (error) {
+      // ESRCH is the only answer that proves the supervisor is gone. EPERM
+      // means the process exists but is not inspectable, so fail closed.
+      return !(error && error.code === 'ESRCH');
+    }
+  }
+
+  function tryCreateLock() {
+    let fd;
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+    } catch (error) {
+      throw error;
+    }
+    try {
+      fs.writeFileSync(fd, JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        sessionId,
+        startedAt: lockStartedAt,
+      }), 'utf8');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = undefined;
+      fsyncDirectory(path.dirname(lockPath));
+      return;
+    } catch (error) {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // The original failure is reported below.
+        }
+      }
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        // Keep the original failure.
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Acquire the supervisor lock. Stale locks are reclaimed only while holding
+   * a separate reclaim lock, so two supervisors cannot both decide that the
+   * same lock is stale and replace it. The liveness probe never signals a
+   * live pid, and a lock owned by a live supervisor is never taken.
+   */
   function acquireLock() {
     lockPath = `${statePath}.lock`;
-    const payload = JSON.stringify({
-      pid: process.pid,
-      sessionId,
-      startedAt: nowIso(),
-    });
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    reclaimPath = `${statePath}.lock` + " + '.reclaim'";
+    lockStartedAt = nowIso();
+    try {
+      tryCreateLock();
+      return;
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') {
+        fail('lock_failed', 'Guest supervisor lock could not be acquired.');
+      }
+    }
+    const existing = readLockRecord();
+    if (supervisorAlive(existing)) {
+      fail('already_running', 'A guest supervisor already owns this session.');
+    }
+    let reclaimFd;
+    for (let attempt = 0; ; attempt += 1) {
       try {
-        const fd = fs.openSync(lockPath, 'wx', 0o600);
-        fs.writeFileSync(fd, payload, 'utf8');
-        fs.closeSync(fd);
-        return;
+        reclaimFd = fs.openSync(reclaimPath, 'wx', 0o600);
+        fs.writeFileSync(reclaimFd, JSON.stringify({ pid: process.pid, at: nowIso() }), 'utf8');
+        fs.fsyncSync(reclaimFd);
+        fs.closeSync(reclaimFd);
+        reclaimFd = undefined;
+        break;
       } catch (error) {
-        if (!error || error.code !== 'EEXIST') {
-          fail('lock_failed', 'Guest supervisor lock could not be acquired.');
-        }
-        let existing = null;
-        try {
-          existing = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-        } catch {
-          existing = null;
-        }
-        if (existing && Number.isSafeInteger(existing.pid) && existing.pid !== process.pid) {
+        if (reclaimFd !== undefined) {
           try {
-            process.kill(existing.pid, 0);
-            fail('already_running', 'A guest supervisor already owns this session.');
-          } catch (probeError) {
-            if (probeError && probeError.code !== 'ESRCH') {
-              fail('already_running', 'A guest supervisor already owns this session.');
-            }
+            fs.closeSync(reclaimFd);
+          } catch {
+            // The failure below is what matters.
           }
+          reclaimFd = undefined;
         }
+        if (error && error.code === 'EEXIST') {
+          let stale = null;
+          try {
+            stale = JSON.parse(fs.readFileSync(reclaimPath, 'utf8'));
+          } catch {
+            stale = null;
+          }
+          if (attempt === 0 && stale && !supervisorAlive(stale)) {
+            // A dead supervisor can leave the reclaim lock behind only if it
+            // was killed inside this tiny window. Clean it up once.
+            try {
+              fs.unlinkSync(reclaimPath);
+            } catch {
+              // The retry reports the next failure.
+            }
+            continue;
+          }
+          fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
+        }
+        fail('lock_failed', 'Guest supervisor ownership recovery could not be serialized.');
+      }
+    }
+    try {
+      const current = readLockRecord();
+      if (supervisorAlive(current)) {
+        fail('already_running', 'A guest supervisor already owns this session.');
+      }
+      if (existing && !existing.invalid && current && !current.invalid &&
+        (current.pid !== existing.pid || current.startedAt !== existing.startedAt)) {
+        fail('lock_busy', 'Guest supervisor lock changed during ownership recovery.');
+      }
+      if (current) {
         try {
           fs.unlinkSync(lockPath);
         } catch (unlinkError) {
-          if (unlinkError.code !== 'ENOENT') {
+          if (!unlinkError || unlinkError.code !== 'ENOENT') {
             fail('lock_failed', 'A stale guest supervisor lock could not be cleared.');
           }
         }
+        fsyncDirectory(path.dirname(lockPath));
+      }
+      try {
+        tryCreateLock();
+      } catch (createError) {
+        if (createError && createError.code === 'EEXIST') {
+          fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+        }
+        fail('lock_failed', 'Guest supervisor lock could not be acquired.');
+      }
+    } finally {
+      try {
+        fs.unlinkSync(reclaimPath);
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') {
+          // The reclaim lock is diagnostic once we hold the real lock.
+        }
       }
     }
-    fail('lock_failed', 'Guest supervisor lock could not be acquired.');
   }
 
   function releaseLock() {
     if (!lockPath) {
       return;
     }
+    const current = readLockRecord();
+    if (current && !current.invalid &&
+      (current.pid !== process.pid || current.startedAt !== lockStartedAt)) {
+      // Never remove a lock that a replacement supervisor now owns.
+      lockPath = null;
+      reclaimPath = null;
+      return;
+    }
     try {
       fs.unlinkSync(lockPath);
     } catch (error) {
-      if (error.code !== 'ENOENT') {
+      if (!error || error.code !== 'ENOENT') {
+        // Best effort on the shutdown path; the ownership marker still guards
+        // the session against an unverified replacement.
+      }
+    }
+    try {
+      fsyncDirectory(path.dirname(lockPath));
+    } catch {
+      // Best effort; the entry is gone or was already absent.
+    }
+    if (reclaimPath) {
+      try {
+        fs.unlinkSync(reclaimPath);
+      } catch {
         // Best effort.
       }
     }
     lockPath = null;
+    reclaimPath = null;
   }
 
-  function loadOrCreateState() {
+  function loadOrCreateState(ownershipVerified) {
     const loaded = readStateFile(statePath);
     if (loaded) {
       if (loaded.sessionId !== sessionId || loaded.cwd !== cwd ||
@@ -1585,6 +2296,28 @@ function createSupervisor(config) {
       }
       if (!Array.isArray(loaded.events) || !Number.isSafeInteger(loaded.seq)) {
         fail('state_corrupt', 'Guest supervisor state has an invalid event journal.');
+      }
+      const loadedChild = normalizeChildRecord(loaded.child);
+      if (loaded.child !== undefined && loadedChild === null) {
+        fail('state_corrupt', 'Guest supervisor state has an invalid child record.');
+      }
+      if (!ownershipVerified) {
+        // A durable ownership marker was absent. Older state (or state written
+        // without a marker) must not be treated as proof that no Pi child
+        // survives; only a verified-exit or no-child record may pass.
+        if (loadedChild && loadedChild.state !== 'exited' && loadedChild.state !== 'none') {
+          fail('cleanup_pending', 'Persisted state may reference a live Pi child.', {
+            cleanupPending: true,
+            child: loadedChild,
+          });
+        }
+        if (!loadedChild && Number.isSafeInteger(loaded.piPid) && loaded.piPid > 0 &&
+          loaded.status !== 'stopped' && loaded.status !== 'exited') {
+          fail('cleanup_pending', 'Older persisted state may reference a live Pi child.', {
+            cleanupPending: true,
+            piPid: loaded.piPid,
+          });
+        }
       }
       state = loaded;
       resumed = true;
@@ -1605,6 +2338,18 @@ function createSupervisor(config) {
         .filter((entry) => entry && Number.isSafeInteger(entry.seq))
         .slice(-maxEvents);
       earliestSeq = events.length > 0 ? events[0].seq : seq + 1;
+      if (!ownershipVerified) {
+        // When a marker was cleared, start() already reset childState: the
+        // cleared marker proved the previous child is gone.
+        childState = loadedChild || {
+          state: 'none',
+          pid: null,
+          startTime: null,
+          at: nowIso(),
+          exitCode: null,
+          signal: null,
+        };
+      }
       lastError = loaded.lastError || null;
       if (activeTurn && activeTurn.settled !== true) {
         activeTurn.uncertain = true;
@@ -1626,6 +2371,14 @@ function createSupervisor(config) {
       events = [];
       earliestSeq = 1;
       status = 'starting';
+      childState = {
+        state: 'none',
+        pid: null,
+        startTime: null,
+        at: nowIso(),
+        exitCode: null,
+        signal: null,
+      };
     }
   }
 
@@ -1756,8 +2509,28 @@ function createSupervisor(config) {
 
   async function start() {
     acquireLock();
-    loadOrCreateState();
-    writeStateNow();
+    let ownershipVerified = false;
+    try {
+      ownershipVerified = reconcileOwnership();
+      if (ownershipVerified) {
+        // The cleared marker is independent proof the previous child is gone.
+        childState = {
+          state: 'none',
+          pid: null,
+          startTime: null,
+          at: nowIso(),
+          exitCode: null,
+          signal: null,
+        };
+      }
+      loadOrCreateState(ownershipVerified);
+      // The restarted supervisor fences every prior writer; that fence must be
+      // durable before the socket accepts any request.
+      writeStateCritical('startup');
+    } catch (error) {
+      releaseLock();
+      throw error;
+    }
     try {
       await bindServer();
     } catch (error) {
@@ -1776,9 +2549,13 @@ function createSupervisor(config) {
         message: 'Guest supervisor handshake failed.',
       };
       status = 'exited';
-      writeStateNow();
+      writeStateBestEffort();
       await shutdown(stopDeadlineMs);
-      await finalizeStop();
+      try {
+        await finalizeStop();
+      } catch {
+        // The ownership marker and recorded fault still guard a replacement.
+      }
       throw error;
     }
     status = paused
@@ -1786,17 +2563,19 @@ function createSupervisor(config) {
       : activeTurn && activeTurn.settled !== true
         ? 'uncertain'
         : 'ready';
-    writeStateNow();
+    writeStateBestEffort();
     logLine(logPath, `supervisor ready session=${sessionId} generation=${generation} pid=${process.pid}`);
   }
 
   async function shutdown(deadlineMs) {
-    if (stoppingResult) {
+    // A verified stop is final; an unverified one may be retried because the
+    // child may have exited after the previous deadline expired.
+    if (stoppingResult && stoppingResult.stopped === true) {
       return stoppingResult;
     }
     stopping = true;
     status = 'stopping';
-    writeStateNow();
+    writeStateBestEffort();
     let forced = false;
     let cleanupUnverified = false;
     const child = piChild;
@@ -1811,7 +2590,7 @@ function createSupervisor(config) {
       };
       stoppingResult = result;
       status = 'stopped';
-      writeStateNow();
+      writeStateBestEffort();
       notifyWaiters();
       return result;
     }
@@ -1869,7 +2648,7 @@ function createSupervisor(config) {
     };
     stoppingResult = result;
     status = done ? 'stopped' : 'stopping';
-    writeStateNow();
+    writeStateBestEffort();
     notifyWaiters();
     logLine(logPath, `supervisor stopped session=${sessionId} forced=${forced} verified=${done}`);
     return result;
@@ -1894,7 +2673,7 @@ function createSupervisor(config) {
       }
     }
     releaseLock();
-    writeStateNow();
+    writeStateCritical('stop-finalize');
   }
 
   function installSignalHandlers() {
