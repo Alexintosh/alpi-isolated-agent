@@ -283,10 +283,10 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
   const other = reserve(store, otherClient, { requestId: 'lost-1' });
   assert.notEqual(other.sandboxId, first.sandboxId);
 
-  const workspaceId = first.workspaceId;
   const firstAdmission = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-lost-1',
-    workspaceId,
+    sandboxId: first.sandboxId,
+    engine: first.engine,
     payload: { prompt: 'hello', options: { temperature: 0 } },
   });
   const job = firstAdmission.job;
@@ -306,7 +306,8 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
 
   const jobReplay = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-lost-1',
-    workspaceId,
+    sandboxId: first.sandboxId,
+    engine: first.engine,
     payload: { options: { temperature: 0 }, prompt: 'hello' },
   });
   assert.equal(jobReplay.job.jobId, job.jobId);
@@ -321,7 +322,8 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
     () =>
       store.submitJob(ALPHA_RUNNER, {
         requestId: 'job-lost-1',
-        workspaceId,
+        sandboxId: first.sandboxId,
+        engine: first.engine,
         payload: { prompt: 'different' },
       }),
     assertCode('idempotency_conflict')
@@ -333,7 +335,8 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
   assert.equal(
     reopened.submitJob(ALPHA_RUNNER, {
       requestId: 'job-lost-1',
-      workspaceId,
+      sandboxId: first.sandboxId,
+      engine: first.engine,
       payload: { prompt: 'hello', options: { temperature: 0 } },
     }).job.jobId,
     job.jobId
@@ -427,7 +430,8 @@ test('cross-project identifiers are indistinguishable from missing', (t) => {
   const sandbox = reserve(store, ALPHA_OPERATOR);
   const { job } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'alpha-job',
-    workspaceId: sandbox.workspaceId,
+    sandboxId: sandbox.sandboxId,
+    engine: sandbox.engine,
     payload: { prompt: 'secret' },
   });
   store.appendEvent(ALPHA_RUNNER, {
@@ -482,7 +486,8 @@ test('cross-project identifiers are indistinguishable from missing', (t) => {
     () =>
       store.submitJob(BETA_OPERATOR, {
         requestId: 'beta-job',
-        workspaceId: sandbox.workspaceId,
+        sandboxId: sandbox.sandboxId,
+        engine: sandbox.engine,
       }),
     assertCode('not_found')
   );
@@ -513,7 +518,8 @@ test('pending recovery enumerates unsettled sandboxes and jobs', (t) => {
   const sandbox = reserve(store, ALPHA_OPERATOR);
   const { job } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'recovery-job',
-    workspaceId: sandbox.workspaceId,
+    sandboxId: sandbox.sandboxId,
+    engine: sandbox.engine,
   });
 
   let pending = store.listPendingRecovery(ALPHA_OPERATOR);
@@ -584,12 +590,14 @@ test('two jobs on different workspaces are independent', (t) => {
 
   const { job: firstJob } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-1',
-    workspaceId: firstSandbox.workspaceId,
+    sandboxId: firstSandbox.sandboxId,
+    engine: firstSandbox.engine,
     payload: { prompt: 'one' },
   });
   const { job: secondJob } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-2',
-    workspaceId: secondSandbox.workspaceId,
+    sandboxId: secondSandbox.sandboxId,
+    engine: secondSandbox.engine,
     payload: { prompt: 'two' },
   });
 
@@ -630,7 +638,8 @@ test('job dispositions enforce strict transitions and never resend uncertain', (
   const sandbox = reserve(store, ALPHA_OPERATOR);
   const { job } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'transition-job',
-    workspaceId: sandbox.workspaceId,
+    sandboxId: sandbox.sandboxId,
+    engine: sandbox.engine,
   });
 
   const uncertain = store.markJob(ALPHA_RUNNER, {
@@ -1029,7 +1038,8 @@ test('text and payload bounds are enforced', (t) => {
     () =>
       store.submitJob(ALPHA_RUNNER, {
         requestId: 'large-job',
-        workspaceId: sandbox.workspaceId,
+        sandboxId: sandbox.sandboxId,
+        engine: sandbox.engine,
         payload: { text: 'x'.repeat(70 * 1024) },
       }),
     assertCode('payload_too_large')
@@ -1169,7 +1179,7 @@ test('job cursors are independent and advance across a fully pruned window', t =
   const sandbox = reserve(store, ALPHA_RUNNER, { requestId: 'cursor-box' });
   // Admission commits each job's submitted event, which occupies job_seq 1;
   // progress appends continue from there.
-  const job = name => store.submitJob(ALPHA_RUNNER, { requestId: name, workspaceId: sandbox.workspaceId }).job.jobId;
+  const job = name => store.submitJob(ALPHA_RUNNER, { requestId: name, sandboxId: sandbox.sandboxId, engine: sandbox.engine }).job.jobId;
   const first = job('one'), second = job('two');
   const append = jobId => store.appendEvent(ALPHA_RUNNER, { jobId, sandboxId: sandbox.sandboxId, type: 'progress' });
   const poll = (jobId, afterSeq = 0) => store.pollJobEvents(ALPHA_OBSERVER, { jobId, afterSeq });
@@ -1230,9 +1240,9 @@ test('every dispatch key preserves all JSON object keys through restart', t => {
   const directory = tempDirectory(t, 'job-key');
   let store = openWorkStore(directory);
   t.after(() => store.close());
-  const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'json-box' });
+  const box = reserve(store, ALPHA_RUNNER, { requestId: 'json-box' });
   const payload = JSON.parse('{"nested":{"__proto__":"original"}}');
-  const input = { requestId: 'key', workspaceId, payload };
+  const input = { requestId: 'key', sandboxId: box.sandboxId, engine: box.engine, payload };
   const first = store.submitJob(ALPHA_RUNNER, input);
   store.close();
   store = openWorkStore(directory);
@@ -1245,29 +1255,30 @@ test('a crash between the admission commit and the ack still leaves the submitte
   const directory = tempDirectory(t, 'submit-crash');
   let store = openWorkStore(directory);
   t.after(() => store.close());
-  const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'crash-box' });
-  const input = { requestId: 'crash-job', workspaceId, payload: { prompt: 'hello' } };
+  const box = reserve(store, ALPHA_RUNNER, { requestId: 'crash-box' });
+  const input = {
+    requestId: 'crash-job',
+    sandboxId: box.sandboxId,
+    engine: box.engine,
+    payload: { prompt: 'hello' },
+  };
 
   // Simulate process death at the exact former crash boundary: the admission
   // transaction commits, then the caller never receives the receipt. The
-  // job row and its job.submitted event live in that one transaction, so
-  // both are durable the moment the commit lands.
-  const originalExec = store.db.exec.bind(store.db);
-  let armed = false;
-  store.db.exec = (sql) => {
-    if (armed && sql === 'COMMIT') {
-      armed = false;
-      originalExec(sql);
-      throw new Error('simulated crash after the admission commit');
-    }
-    return originalExec(sql);
-  };
-  armed = true;
+  // crash is injected through the transact helper's post-commit seam, so the
+  // test pins the durability boundary without coupling to the concrete
+  // transaction SQL. The job row and its job.submitted event live in that
+  // one transaction, so both are durable the moment the commit lands.
   assert.throws(
-    () => store.submitJob(ALPHA_RUNNER, input),
+    () =>
+      store.submitJob(ALPHA_RUNNER, {
+        ...input,
+        onCommitted: () => {
+          throw new Error('simulated crash after the admission commit');
+        },
+      }),
     (error) => error.code === 'store_error'
   );
-  store.db.exec = originalExec;
   store.close();
 
   // Reopening finds the acknowledged job WITH its job.submitted event: the
@@ -1284,13 +1295,68 @@ test('a crash between the admission commit and the ack still leaves the submitte
   assert.equal(rows.n, 1);
 });
 
+test('the store transaction owns admission refusal ordering', (t) => {
+  const directory = tempDirectory(t, 'admission-order');
+  const store = openWorkStore(directory);
+  t.after(() => store.close());
+
+  const sandbox = reserve(store, ALPHA_OPERATOR, { requestId: 'order-box' });
+
+  // An engine that does not match the sandbox workspace is refused inside
+  // the admission transaction, before any idempotency receipt is written.
+  assert.throws(
+    () =>
+      store.submitJob(ALPHA_RUNNER, {
+        requestId: 'engine-mismatch',
+        sandboxId: sandbox.sandboxId,
+        engine: 'other-engine',
+        payload: { prompt: 'hello' },
+      }),
+    assertCode('engine_identity_conflict')
+  );
+
+  // The refused attempt left no receipt behind: the same request key admits
+  // cleanly once the engine matches the workspace.
+  const { job } = store.submitJob(ALPHA_RUNNER, {
+    requestId: 'engine-mismatch',
+    sandboxId: sandbox.sandboxId,
+    engine: sandbox.engine,
+    payload: { prompt: 'hello' },
+  });
+  assert.equal(job.disposition, 'acknowledged');
+
+  // A deleted sandbox is not_found whatever engine the request names: the
+  // deleted gate runs before the engine comparison.
+  const ref = { sandboxId: sandbox.sandboxId, generation: sandbox.generation };
+  store.recordObserved(ALPHA_OPERATOR, { ...ref, observedState: 'removed' });
+  store.discardSandbox(ALPHA_OPERATOR, { sandboxId: sandbox.sandboxId });
+  assert.throws(
+    () =>
+      store.submitJob(ALPHA_RUNNER, {
+        requestId: 'deleted-match',
+        sandboxId: sandbox.sandboxId,
+        engine: sandbox.engine,
+      }),
+    assertCode('not_found')
+  );
+  assert.throws(
+    () =>
+      store.submitJob(ALPHA_RUNNER, {
+        requestId: 'deleted-mismatch',
+        sandboxId: sandbox.sandboxId,
+        engine: 'other-engine',
+      }),
+    assertCode('not_found')
+  );
+});
+
 test('store clients get typed retryable database errors and cannot renew retired workspaces', t => {
   const directory = tempDirectory(t, 'busy-read');
   const store = openWorkStore(directory);
   const peer = openWorkStore(directory);
   t.after(() => { store.close(); peer.close(); });
   const box = reserve(store, ALPHA_OPERATOR, { requestId: 'box' });
-  const { job } = store.submitJob(ALPHA_OPERATOR, { requestId: 'job', workspaceId: box.workspaceId });
+  const { job } = store.submitJob(ALPHA_OPERATOR, { requestId: 'job', sandboxId: box.sandboxId, engine: box.engine });
   const lease = store.acquireLease(ALPHA_OPERATOR, { workspaceId: box.workspaceId });
   const ref = { sandboxId: box.sandboxId, generation: box.generation };
   store.db.exec('PRAGMA busy_timeout=0');
@@ -1308,9 +1374,9 @@ test('a legacy project journal migrates with explicit gaps and fences historical
   const directory = tempDirectory(t, 'legacy-state');
   let store = openWorkStore(directory, { maxEvents: 2 });
   t.after(() => store.close());
-  const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'legacy' });
-  const old = store.acquireLease(ALPHA_RUNNER, { workspaceId, holder: 'label' });
-  const { job } = store.submitJob(ALPHA_RUNNER, { workspaceId, requestId: 'job' });
+  const box = reserve(store, ALPHA_RUNNER, { requestId: 'legacy' });
+  const old = store.acquireLease(ALPHA_RUNNER, { workspaceId: box.workspaceId, holder: 'label' });
+  const { job } = store.submitJob(ALPHA_RUNNER, { requestId: 'job', sandboxId: box.sandboxId, engine: box.engine });
   for (let i = 0; i < 3; i++) store.appendEvent(ALPHA_RUNNER, { type: 'progress', jobId: job.jobId });
   store.db.exec(`DROP INDEX events_per_job;
     ALTER TABLE events DROP COLUMN job_seq;
@@ -1324,7 +1390,7 @@ test('a legacy project journal migrates with explicit gaps and fences historical
   store.appendEvent(ALPHA_RUNNER, { type: 'progress', jobId: job.jobId });
   assert.equal(store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId, afterSeq: 4 }).nextSeq, 5);
   assert.throws(() => store.validateLease(ALPHA_RUNNER, old), assertCode('lease_missing'));
-  assert.ok(store.acquireLease(ALPHA_RUNNER, { workspaceId }).epoch > old.epoch);
+  assert.ok(store.acquireLease(ALPHA_RUNNER, { workspaceId: box.workspaceId }).epoch > old.epoch);
 });
 
 test('execution intents fence writers until done and uncertain outcomes fence handoff', (t) => {

@@ -313,7 +313,7 @@ test('paired observer follows a persisted job after restart using its own cursor
       profile: 'pi-dev', imageDigest: 'sha256:' + '1'.repeat(64), resources: { vcpus: 1, memoryMiB: 512, diskMiB: 2048 } });
     // Admission returns { job, admission }; the submitted event is already
     // committed inside the admission transaction.
-    job = store.submitJob(principal, { requestId: randomUUID(), workspaceId: sandbox.workspaceId, payload: { prompt: 'private-input' } }).job;
+    job = store.submitJob(principal, { requestId: randomUUID(), sandboxId: sandbox.sandboxId, engine: sandbox.engine, payload: { prompt: 'private-input' } }).job;
     store.appendEvent(principal, { type: 'message', jobId: job.jobId, data: { text: 'result', rawProviderBody: 'hidden' } });
   } finally { store.close(); }
   const server = await startServer({ stateDir, port: 0, handleSignals: false, openResources: openHostResources });

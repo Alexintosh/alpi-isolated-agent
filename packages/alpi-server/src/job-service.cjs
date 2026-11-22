@@ -25,7 +25,9 @@
  *   An idempotent replay returns the persisted receipt without appending
  *   another event.
  * - A job is scoped to the engine of its sandbox workspace. A submission that
- *   names a different engine than the workspace is refused.
+ *   names a different engine than the workspace is refused by the work store
+ *   inside the admission transaction, after the not_found gate that treats an
+ *   unknown or deleted sandbox as missing regardless of the engine named.
  * - Workspaces are provisioned and released through the sandbox service; this
  *   module never widens retention and never deletes a workspace itself.
  * - Cancellation only advances the durable disposition graph. Because this
@@ -113,29 +115,19 @@ function createJobService(options = {}) {
     }
     const requestId = normalizeRequestId(body.requestId);
 
-    // Project-scoped: a cross-project sandbox is indistinguishable from a
-    // missing one, and a deleted workspace cannot accept new jobs.
-    const workspace = store.getSandbox(principalInput, sandboxId);
-    // getSandbox includes deleted rows so callers can read a terminal
-    // receipt; admission must refuse them as missing, whatever engine the
-    // request names.
-    if (workspace.deletedAt !== null) {
-      fail('not_found', 'The sandbox does not exist.');
-    }
-    if (workspace.engine !== engine.id) {
-      fail(
-        'engine_identity_conflict',
-        'The submitted engine does not match the sandbox engine.'
-      );
-    }
-
     // Durability boundary: the work store commits the acknowledged job row,
     // its idempotency receipt and the `job.submitted` event in a single
     // BEGIN IMMEDIATE transaction, so the caller is only acknowledged after
     // the submission survives a restart and the event can never lag the job.
+    // The store is the single admission authority for the sandbox: an
+    // unknown, cross-project or deleted sandbox is `not_found` inside that
+    // transaction, before any engine comparison, so this service performs no
+    // separate workspace read and cannot disagree with the committed state
+    // it admits against.
     const { job } = store.submitJob(principalInput, {
       requestId,
-      workspaceId: workspace.workspaceId,
+      sandboxId,
+      engine: engine.id,
       payload: body.payload === undefined ? {} : body.payload,
     });
 

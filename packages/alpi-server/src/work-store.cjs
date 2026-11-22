@@ -129,18 +129,33 @@ function translateError(error) {
   return new WorkStoreError('store_error', 'Work store operation failed.');
 }
 
-function transact(db, operation, readOnly = false) {
+/**
+ * Run `operation` inside one SQLite transaction. `onCommit`, when given,
+ * runs after COMMIT has landed but before the result is returned: the exact
+ * boundary between a durable commit and the caller receiving its receipt.
+ * A throw from `onCommit` propagates after the commit and must not roll the
+ * committed transaction back.
+ */
+function transact(db, operation, readOnly = false, onCommit = null) {
   try {
     db.exec(readOnly ? 'BEGIN' : 'BEGIN IMMEDIATE');
   } catch (error) { throw translateError(error); }
+  let result;
   try {
-    const result = operation();
+    result = operation();
     db.exec('COMMIT');
-    return result;
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* SQLite may already have rolled back. */ }
     throw translateError(error);
   }
+  if (typeof onCommit === 'function') {
+    try {
+      onCommit();
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+  return result;
 }
 
 function normalizeText(value, maxLength) {
@@ -2041,7 +2056,7 @@ class WorkStore {
   /**
    * Persist a job admission before any external side effect.
    *
-   * input: {requestId, workspaceId, payload?}
+   * input: {requestId, sandboxId, engine, payload?, onCommitted?}
    *
    * Returns { job, admission } where `job` is the persisted job receipt with
    * a stable jobId and `sessionUuid` used for the native session, and
@@ -2050,11 +2065,23 @@ class WorkStore {
    * submittedEventSeq: null } on an idempotent replay; a changed payload
    * raises `idempotency_conflict`.
    *
+   * The store is the single admission authority for the sandbox reference:
+   * inside the admission transaction an unknown, cross-project or deleted
+   * sandbox is `not_found` before any engine comparison, and an engine that
+   * does not match the sandbox workspace raises `engine_identity_conflict`.
+   *
    * First admission also appends the `job.submitted` event inside the same
    * BEGIN IMMEDIATE transaction that commits the job row, so an acknowledged
    * job always has exactly one submitted event: a crash between the commit
    * and this call returning cannot separate them, and a replay never appends
    * a second event.
+   *
+   * onCommitted: optional callback invoked through the transact helper after
+   * the admission transaction has committed but before this call returns,
+   * whether the call admitted a new job or resolved an idempotent replay. A
+   * callback that throws surfaces as `store_error` while the commit stays
+   * durable. The seam lets fault-injection tests crash at the exact
+   * durability boundary without coupling to the transaction SQL.
    */
   submitJob(principalInput, input) {
     this._ensureOpen();
@@ -2065,100 +2092,115 @@ class WorkStore {
       body.requestId,
       MAX_REQUEST_ID_LENGTH
     );
-    const workspaceId = normalizeText(
-      body.workspaceId,
+    const sandboxId = normalizeText(
+      body.sandboxId,
       MAX_REQUEST_ID_LENGTH
     );
+    const engine = normalizeText(body.engine, MAX_ENGINE_LENGTH);
     const payloadJson = canonicalJson(
       body.payload === undefined ? {} : body.payload,
       MAX_JSON_BYTES
     );
-
-    const payloadHash = digestOf(
-      canonicalJson(
-        { requestId, workspaceId, payload: JSON.parse(payloadJson) },
-        MAX_JSON_BYTES
-      )
-    );
+    const onCommitted =
+      typeof body.onCommitted === 'function' ? body.onCommitted : null;
 
     try {
-      return transact(this.db, () => {
-        const existing = this._checkIdempotency(
-          principal.project,
-          principal.clientId,
-          'submitJob',
-          requestId,
-          payloadHash
-        );
-        if (existing !== null) {
-          const row = this._job(principal.project, existing.jobId);
-          if (!row) {
-            fail('store_error', 'Work store operation failed.');
+      return transact(
+        this.db,
+        () => {
+          // Single admission authority for the sandbox reference: the row is
+          // resolved once, inside this transaction, and an unknown,
+          // cross-project or deleted sandbox is not_found before any engine
+          // comparison.
+          const sandbox = this._sandbox(principal.project, sandboxId);
+          if (!sandbox || sandbox.deleted_at !== null) {
+            notFound();
           }
-          return {
-            job: jobReceipt(row),
-            admission: { duplicate: true, submittedEventSeq: null },
-          };
-        }
-
-        const workspace = this._workspace(
-          principal.project,
-          workspaceId
-        );
-        if (!workspace) {
-          notFound();
-        }
-
-        const nowMs = this._now();
-        const jobId = crypto.randomUUID();
-        const sessionUuid = crypto.randomUUID();
-        this.db
-          .prepare(
-            `INSERT INTO jobs
-              (job_id, project, client_id, request_id, workspace_id,
-               session_uuid, disposition, payload_json, detail_json,
-               created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'acknowledged', ?, NULL, ?, ?)`
-          )
-          .run(
-            jobId,
-            principal.project,
-            principal.clientId,
-            requestId,
-            workspaceId,
-            sessionUuid,
-            payloadJson,
-            nowMs,
-            nowMs
+          if (sandbox.engine !== engine) {
+            fail(
+              'engine_identity_conflict',
+              'The submitted engine does not match the sandbox engine.'
+            );
+          }
+          const workspaceId = sandbox.workspace_id;
+          const payloadHash = digestOf(
+            canonicalJson(
+              { requestId, workspaceId, payload: JSON.parse(payloadJson) },
+              MAX_JSON_BYTES
+            )
           );
 
-        this._rememberIdempotency(
-          principal.project,
-          principal.clientId,
-          'submitJob',
-          requestId,
-          payloadHash,
-          { jobId }
-        );
+          const existing = this._checkIdempotency(
+            principal.project,
+            principal.clientId,
+            'submitJob',
+            requestId,
+            payloadHash
+          );
+          if (existing !== null) {
+            const row = this._job(principal.project, existing.jobId);
+            if (!row) {
+              fail('store_error', 'Work store operation failed.');
+            }
+            return {
+              job: jobReceipt(row),
+              admission: { duplicate: true, submittedEventSeq: null },
+            };
+          }
 
-        // The acknowledgement and its observer-visible submitted event commit
-        // atomically: one admission transaction, exactly one event.
-        const submittedEvent = this._appendEventInTransaction(principal, {
-          type: 'job.submitted',
-          sandboxId: null,
-          jobId,
-          cursor: null,
-          dataJson: '{}',
-        });
+          const nowMs = this._now();
+          const jobId = crypto.randomUUID();
+          const sessionUuid = crypto.randomUUID();
+          this.db
+            .prepare(
+              `INSERT INTO jobs
+                (job_id, project, client_id, request_id, workspace_id,
+                 session_uuid, disposition, payload_json, detail_json,
+                 created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'acknowledged', ?, NULL, ?, ?)`
+            )
+            .run(
+              jobId,
+              principal.project,
+              principal.clientId,
+              requestId,
+              workspaceId,
+              sessionUuid,
+              payloadJson,
+              nowMs,
+              nowMs
+            );
 
-        return {
-          job: jobReceipt(this._job(principal.project, jobId)),
-          admission: {
-            duplicate: false,
-            submittedEventSeq: submittedEvent.seq,
-          },
-        };
-      });
+          this._rememberIdempotency(
+            principal.project,
+            principal.clientId,
+            'submitJob',
+            requestId,
+            payloadHash,
+            { jobId }
+          );
+
+          // The acknowledgement and its observer-visible submitted event
+          // commit atomically: one admission transaction, exactly one event.
+          const submittedEvent = this._appendEventInTransaction(principal, {
+            type: 'job.submitted',
+            sandboxId: null,
+            jobId,
+            cursor: null,
+            dataJson: '{}',
+          });
+
+          return {
+            job: jobReceipt(this._job(principal.project, jobId)),
+            admission: {
+              duplicate: false,
+              submittedEventSeq: submittedEvent.seq,
+            },
+          };
+        },
+        false,
+        onCommitted
+      );
     } catch (error) {
       throw translateError(error);
     }
