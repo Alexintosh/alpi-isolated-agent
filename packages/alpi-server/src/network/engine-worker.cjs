@@ -98,6 +98,12 @@ const OPS = new Set([
   'fenceBridge',
 ]);
 
+// Control operations that must never wait behind a long-running queued
+// operation such as adapter.exec. They are authenticated exactly like every
+// other post-hello operation, but the connection processes each one as soon as
+// its frame is received; a fence is applied on receipt.
+const CONTROL_FAST_OPS = new Set(['heartbeat', 'fenceBridge', 'closeBridge']);
+
 class EngineWorkerError extends Error {
   constructor(code, message, details) {
     super(message);
@@ -111,6 +117,25 @@ class EngineWorkerError extends Error {
 
 function fail(code, message, details) {
   throw new EngineWorkerError(code, message, details);
+}
+
+/**
+ * Bound one evidence read (trusted SDK getInfo or /proc reads) by a deadline.
+ * The underlying read cannot be cancelled, so a late result is discarded by
+ * the caller's epoch check instead of resurrecting stale proof state.
+ */
+function boundedVerification(promise, deadlineMs, code, message) {
+  let timer = null;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new EngineWorkerError(code, message)), deadlineMs);
+  });
+  deadline.catch(() => {});
+  promise.catch(() => {});
+  return Promise.race([promise, deadline]).finally(() => {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 function currentUid() {
@@ -836,6 +861,7 @@ function createEngineWorker(options = {}) {
   const proc = options.proc || createDefaultProcEvidence();
   const netEvidence = options.net || proc;
   const proofMaxAgeMs = options.proofMaxAgeMs ?? DEFAULT_PROOF_MAX_AGE_MS;
+  const proofVerifyDeadlineMs = options.proofVerifyDeadlineMs ?? proofMaxAgeMs;
   const ownerHeartbeatTimeoutMs =
     options.ownerHeartbeatTimeoutMs ?? DEFAULT_OWNER_HEARTBEAT_TIMEOUT_MS;
   const watchdogMs = options.watchdogMs ?? DEFAULT_WATCHDOG_MS;
@@ -1121,12 +1147,24 @@ function createEngineWorker(options = {}) {
             fenceBridges('generation-expired');
             fail('generation_expired', 'The worker launch generation has expired.');
           }
+          const epoch = fenceEpoch;
           try {
-            const verified = await verifyOwnedShim(ref, { previous: lastProof });
-            lastProof = verified.proof;
-            lastProofAt = Date.now();
+            const verified = await boundedVerification(
+              verifyOwnedShim(ref, { previous: lastProof }),
+              proofVerifyDeadlineMs,
+              'worker_shim_unverified',
+              'The owned-shim evidence provider did not verify in time.'
+            );
+            if (epoch === fenceEpoch && !closed) {
+              lastProof = verified.proof;
+              lastProofAt = Date.now();
+            }
+            // A fence advanced the epoch while this verifier ran; discard the
+            // late result instead of resurrecting stale evidence.
           } catch (error) {
-            fenceBridges('proof-failed');
+            if (epoch === fenceEpoch && !closed) {
+              fenceBridges('proof-failed');
+            }
             throw error;
           }
         }
@@ -1162,7 +1200,12 @@ function createEngineWorker(options = {}) {
         const admitted = () => epoch === fenceEpoch && !closed && !generationExpired && !signal.aborted;
         let verified;
         try {
-          verified = await verifyOwnedShim(ref, { previous: lastProof });
+          verified = await boundedVerification(
+            verifyOwnedShim(ref, { previous: lastProof }),
+            proofVerifyDeadlineMs,
+            'worker_shim_unverified',
+            'The owned-shim evidence provider did not verify in time.'
+          );
         } catch (error) {
           fenceBridges('proof-failed');
           throw error;
@@ -1360,22 +1403,38 @@ function createEngineWorker(options = {}) {
           return;
         }
         if (++queued > 64) { socket.destroy(); return; }
-        queue = queue
-          .then(async () => {
-            let payload;
-            try {
-              payload = await handleMessage(message, socket, controller.signal);
-            } catch (error) {
-              payload = errorPayload(error);
-            }
-            if (payload && payload.ok === false) {
-              send(socket, { id: message.id ?? null, ...payload });
-            } else {
-              send(socket, { id: message.id ?? null, ok: true, result: payload });
-            }
-          })
-          .catch(() => { socket.destroy(); })
-          .finally(() => { queued--; });
+        const respond = async () => {
+          let payload;
+          try {
+            payload = await handleMessage(message, socket, controller.signal);
+          } catch (error) {
+            payload = errorPayload(error);
+          }
+          if (payload && payload.ok === false) {
+            send(socket, { id: message.id ?? null, ...payload });
+          } else {
+            send(socket, { id: message.id ?? null, ok: true, result: payload });
+          }
+        };
+        const isFastControl =
+          message !== null &&
+          typeof message === 'object' &&
+          !Array.isArray(message) &&
+          CONTROL_FAST_OPS.has(message.op);
+        if (isFastControl) {
+          // Authenticated heartbeat, fence and close control is processed
+          // promptly on receipt and never queued behind a long adapter.exec;
+          // a fence applies immediately. Lifecycle mutations keep their
+          // bounded serialization below.
+          void respond()
+            .catch(() => { socket.destroy(); })
+            .finally(() => { queued--; });
+        } else {
+          queue = queue
+            .then(respond)
+            .catch(() => { socket.destroy(); })
+            .finally(() => { queued--; });
+        }
       }
     });
 
@@ -1396,32 +1455,54 @@ function createEngineWorker(options = {}) {
   }
 
   async function runWatchdog() {
-    if (watchdogBusy || closed || !bridge.open) {
+    if (closed || !bridge.open) {
+      return;
+    }
+    // Proof freshness and owner-heartbeat expiry are enforced on every tick
+    // before any evidence read. An in-progress (possibly stalled) verifier
+    // must never be able to suppress these checks or keep a stale bridge open.
+    if (generationExpired) {
+      fenceBridges('generation-expired');
+      return;
+    }
+    if (Date.now() - lastHeartbeatAt > ownerHeartbeatTimeoutMs) {
+      fenceBridges('owner-heartbeat-expired');
+      return;
+    }
+    if (lastProof === null || Date.now() - lastProofAt > proofMaxAgeMs) {
+      fenceBridges('proof-expired');
+      return;
+    }
+    if (watchdogBusy) {
+      // At most one verification runs at a time; the expiry checks above
+      // already ran on this tick and are never gated on the verifier.
+      return;
+    }
+    const ref = activeRef;
+    if (!ref) {
+      fenceBridges('proof-unavailable');
       return;
     }
     watchdogBusy = true;
+    const epoch = fenceEpoch;
     try {
-      if (generationExpired) {
-        fenceBridges('generation-expired');
+      const verified = await boundedVerification(
+        verifyOwnedShim(ref, { previous: lastProof }),
+        proofVerifyDeadlineMs,
+        'watchdog-proof-failed',
+        'The owned-shim evidence provider did not verify in time.'
+      );
+      if (closed || epoch !== fenceEpoch) {
+        // A fence advanced the epoch while this verifier ran; discard the late
+        // result instead of resurrecting stale evidence.
         return;
       }
-      if (Date.now() - lastHeartbeatAt > ownerHeartbeatTimeoutMs) {
-        fenceBridges('owner-heartbeat-expired');
-        return;
-      }
-      if (lastProof === null || Date.now() - lastProofAt > proofMaxAgeMs) {
-        fenceBridges('proof-expired');
-        return;
-      }
-      const ref = activeRef;
-      if (!ref) {
-        fenceBridges('proof-unavailable');
-        return;
-      }
-      await verifyOwnedShim(ref, { previous: lastProof });
+      lastProof = verified.proof;
       lastProofAt = Date.now();
     } catch {
-      fenceBridges('watchdog-proof-failed');
+      if (!closed && epoch === fenceEpoch) {
+        fenceBridges('watchdog-proof-failed');
+      }
     } finally {
       watchdogBusy = false;
     }

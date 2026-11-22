@@ -1398,3 +1398,186 @@ test('scoped engine use surfaces an unconfirmed worker stop', async t => {
   await assert.rejects(boundary.withEngine(makeLaunch(setup.root), async () => 'ok', { skipPrefetch: true }),
     /unit stop unavailable/);
 });
+
+// ---------------------------------------------------------------------------
+// Watchdog independence and control scheduling (worker-r1 findings B2 and B3)
+// ---------------------------------------------------------------------------
+
+test('a stalled evidence provider fences an established bridge within the proof freshness bound', async (t) => {
+  const adapter = makeAdapter();
+  const held = Promise.withResolvers();
+  let stall = false;
+  const setup = await setupWorker(t, {
+    adapter,
+    workerOptions: {
+      getInfo: async (nativeId) => {
+        if (stall) {
+          return held.promise;
+        }
+        return adapter.getInfo(nativeId);
+      },
+      proofMaxAgeMs: 120,
+      ownerHeartbeatTimeoutMs: 60_000,
+      watchdogMs: 20,
+    },
+  });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const { bridge } = await openBridgeAfterStart(t, setup, client);
+  const tcp = await connectTcp(bridge.port);
+  tcp.write('ping');
+  assert.equal(await readOnce(tcp), 'ping');
+
+  // The watchdog verifier hangs on the held SDK getInfo. Later watchdog ticks
+  // must still enforce the proof freshness bound and fence the bridge; the
+  // in-progress verifier must not be able to suppress the checks.
+  stall = true;
+  const stalledAt = Date.now();
+  while (setup.worker.snapshot().bridge.open) {
+    if (Date.now() - stalledAt > 1_000) {
+      assert.fail('bridge was not fenced within the proof freshness bound');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const elapsed = Date.now() - stalledAt;
+  assert.ok(elapsed < 1_000, `fencing took ${elapsed}ms`);
+  assert.notEqual(setup.worker.snapshot().bridge.reason, null);
+  await onceClose(tcp);
+});
+
+test('a long adapter exec does not expire owner heartbeats that keep arriving', async (t) => {
+  const adapter = makeAdapter();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  adapter.exec = async () => {
+    entered.resolve();
+    await release.promise;
+    return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false, timedOut: false, cancelled: false };
+  };
+  const setup = await setupWorker(t, {
+    adapter,
+    workerOptions: { ownerHeartbeatTimeoutMs: 300, watchdogMs: 30 },
+  });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const { ref, bridge } = await openBridgeAfterStart(t, setup, client);
+  const tcp = await connectTcp(bridge.port);
+  tcp.write('ping');
+  assert.equal(await readOnce(tcp), 'ping');
+
+  const execPromise = client.engine.exec(ref, {
+    argv: ['long-running', 'command'],
+    timeoutMs: 30_000,
+  });
+  await entered.promise;
+  let heartbeatCount = 0;
+  const pump = setInterval(() => {
+    client.heartbeatNow()
+      .then(() => { heartbeatCount += 1; })
+      .catch(() => {});
+  }, 80);
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  clearInterval(pump);
+  assert.ok(heartbeatCount >= 5, `only ${heartbeatCount} heartbeats were processed`);
+  assert.equal(setup.worker.snapshot().bridge.open, true);
+  assert.equal(setup.worker.snapshot().bridge.reason, null);
+
+  release.resolve();
+  const execResult = await execPromise;
+  assert.equal(execResult.exitCode, 0);
+  tcp.write('pong');
+  assert.equal(await readOnce(tcp), 'pong');
+});
+
+test('an explicit fence arriving during a long exec is applied promptly', async (t) => {
+  const adapter = makeAdapter();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  adapter.exec = async () => {
+    entered.resolve();
+    await release.promise;
+    return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false, timedOut: false, cancelled: false };
+  };
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup);
+  await client.start();
+  const { ref, bridge } = await openBridgeAfterStart(t, setup, client);
+  const tcp = await connectTcp(bridge.port);
+  tcp.write('ping');
+  assert.equal(await readOnce(tcp), 'ping');
+
+  const execPromise = client.engine.exec(ref, {
+    argv: ['long-running', 'command'],
+    timeoutMs: 30_000,
+  });
+  await entered.promise;
+  // Do not await the fence response: with the repaired scheduling it arrives
+  // while the exec is still pending; worker-side state proves promptness.
+  const fencePromise = client.fence('fence-during-exec');
+  const fenceStartedAt = Date.now();
+  while (setup.worker.snapshot().bridge.open) {
+    if (Date.now() - fenceStartedAt > 1_000) {
+      assert.fail('fence was not applied within one second of receipt');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const fenceElapsed = Date.now() - fenceStartedAt;
+  assert.ok(fenceElapsed < 1_000, `fence waited ${fenceElapsed}ms behind the long exec`);
+  assert.equal(setup.worker.snapshot().bridge.open, false);
+  assert.equal(setup.worker.snapshot().bridge.reason, 'fenced');
+  await onceClose(tcp);
+
+  release.resolve();
+  const execResult = await execPromise;
+  assert.equal(execResult.exitCode, 0);
+  await fencePromise;
+});
+
+test('late watchdog verifier results are discarded after an epoch advance', async (t) => {
+  const adapter = makeAdapter();
+  const held = Promise.withResolvers();
+  let stall = false;
+  const setup = await setupWorker(t, {
+    adapter,
+    workerOptions: {
+      getInfo: async (nativeId) => {
+        if (stall) {
+          return held.promise;
+        }
+        return adapter.getInfo(nativeId);
+      },
+      proofMaxAgeMs: 5_000,
+      ownerHeartbeatTimeoutMs: 60_000,
+      watchdogMs: 20,
+    },
+  });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  await openBridgeAfterStart(t, setup, client);
+  const proofAtBeforeStall = setup.worker.snapshot().lastProofAt;
+
+  // The next watchdog tick enters verifyOwnedShim and hangs on the held SDK
+  // read (first tick lands within 20ms; 80ms guarantees it is in flight).
+  stall = true;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  // Advance the fence epoch while the verifier is still in flight.
+  await client.fence('epoch-advance');
+  assert.equal(setup.worker.snapshot().bridge.open, false);
+
+  // Release the stalled verifier; the late successful result must not
+  // refresh the proof timestamp.
+  stall = false;
+  held.resolve(await adapter.getInfo('native-1'));
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  const snapshot = setup.worker.snapshot();
+  assert.equal(snapshot.lastProofAt, proofAtBeforeStall);
+  assert.equal(snapshot.bridge.open, false);
+});
