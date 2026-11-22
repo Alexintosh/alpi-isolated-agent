@@ -1225,6 +1225,82 @@ test('precommit failures and cancellation leave active and previous unchanged', 
   assert.equal(releaseDirectories(stateDir).length, 3);
 });
 
+test('cancellation during receipt preparation preserves the selection byte for byte', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'receipt-abort'), 'state');
+  const firstRelease = makeRelease({ version: '0.1.0' });
+  const first = await installRuntime({
+    stateDir,
+    manifests: firstRelease.manifests,
+    fetch: makeFetch(firstRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+  const secondRelease = makeRelease({ version: '0.2.0' });
+  const second = await installRuntime({
+    stateDir,
+    manifests: secondRelease.manifests,
+    fetch: makeFetch(secondRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+  const thirdRelease = makeRelease({ version: '0.3.0' });
+  const prepared = await prepareRuntime({
+    stateDir,
+    manifests: thirdRelease.manifests,
+    fetch: makeFetch(thirdRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+
+  const selectionPath = path.join(stateDir, 'runtimes', 'current.json');
+  const before = fs.readFileSync(selectionPath);
+  const selectionBefore = JSON.parse(before.toString('utf8'));
+  assert.equal(selectionBefore.format, 1);
+  assert.equal(selectionBefore.active, second.set);
+  assert.equal(selectionBefore.previous, first.set);
+
+  const fsp = require('node:fs/promises');
+  const originalOpen = fsp.open;
+  const controller = new AbortController();
+  let receiptOpens = 0;
+  fsp.open = async function patchedOpen(target, ...rest) {
+    const name = typeof target === 'string' ? path.basename(target) : '';
+    if (name.startsWith('.current.') && name.endsWith('.tmp')) {
+      receiptOpens += 1;
+      const handle = await originalOpen.call(fsp, target, ...rest);
+      // Cancel after the temporary receipt exists but before it is renamed.
+      controller.abort();
+      return handle;
+    }
+    return originalOpen.call(fsp, target, ...rest);
+  };
+  try {
+    await assert.rejects(
+      commitRuntimeSelection({
+        stateDir,
+        set: prepared.set,
+        manifests: thirdRelease.manifests,
+        signal: controller.signal,
+      }),
+      (error) => error && error.name === 'AbortError'
+    );
+  } finally {
+    fsp.open = originalOpen;
+  }
+
+  assert.equal(receiptOpens, 1);
+  assert.ok(controller.signal.aborted);
+  // The rename never happened: old selection bytes are preserved exactly and
+  // no temporary receipt is left behind.
+  assert.deepEqual(fs.readFileSync(selectionPath), before);
+  assert.deepEqual(
+    fs
+      .readdirSync(path.join(stateDir, 'runtimes'))
+      .filter((name) => name.startsWith('.current.')),
+    []
+  );
+  const inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, second.set);
+  assert.equal(inventory.previous.id, first.set);
+});
+
 test('commit refuses a candidate that does not match the trusted manifests', async (t) => {
   const stateDir = path.join(tempDirectory(t, 'commit-manifest'), 'state');
   const firstRelease = makeRelease({ version: '0.1.0' });

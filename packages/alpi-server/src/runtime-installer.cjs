@@ -639,7 +639,13 @@ async function fsyncDirectory(directory) {
   }
 }
 
-async function writeSelection(root, selection) {
+// The atomic rename of the synced temporary receipt onto current.json is the
+// selection commit point. Cancellation is checked after every asynchronous
+// stage of receipt preparation and immediately before that rename; when
+// cancellation wins first the temporary receipt is removed and active/previous
+// stay untouched. Once the rename completes the swap is committed and is not
+// rolled back.
+async function writeSelection(root, selection, signal) {
   const directory = path.join(root, 'runtimes');
   const destination = path.join(directory, 'current.json');
   const temporary = path.join(
@@ -648,19 +654,21 @@ async function writeSelection(root, selection) {
   );
   const handle = await fsp.open(temporary, 'wx', 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(selection, null, 2)}\n`, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
+    try {
+      checkAbort(signal);
+      await handle.writeFile(`${JSON.stringify(selection, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    checkAbort(signal);
     await fsp.rename(temporary, destination);
-    await fsyncDirectory(directory);
   } finally {
     await fsp.unlink(temporary).catch((error) => {
       if (error.code !== 'ENOENT') throw error;
     });
   }
+  await fsyncDirectory(directory);
 }
 
 async function syncTree(directory) {
@@ -799,7 +807,8 @@ async function inspectRelease(root, setId, manifests) {
   }
 }
 
-async function selectSet(root, current, setId) {
+async function selectSet(root, current, setId, signal) {
+  checkAbort(signal);
   let previous = current.previous;
   if (current.active && current.active !== setId) previous = current.active;
   if (previous === setId) previous = null;
@@ -807,12 +816,13 @@ async function selectSet(root, current, setId) {
     const inspected = await inspectRelease(root, previous, null);
     if (!inspected.valid) previous = null;
   }
+  checkAbort(signal);
   await writeSelection(root, {
     format: 1,
     active: setId,
     previous,
     updatedAt: new Date().toISOString(),
-  });
+  }, signal);
 }
 
 function buildResult(root, meta) {
@@ -1743,8 +1753,10 @@ async function prepareRuntime(options = {}) {
  * Commit a prepared runtime candidate as the active selection exactly once.
  * The candidate must still match the trusted release manifests and verify
  * under the serial install lock. The final cancellation check happens after
- * verification and immediately before the atomic selection write, so any
- * failure or cancellation before this point leaves active/previous untouched.
+ * verification and immediately before the atomic rename that commits the
+ * selection receipt, so any failure or cancellation before the rename leaves
+ * active/previous untouched. The rename itself is the commit point; it is not
+ * rolled back afterwards.
  *
  * @param {object} options
  * @param {string} options.stateDir
@@ -1794,7 +1806,7 @@ async function commitRuntimeSelection(options = {}) {
       fail('runtime_corrupt', `Prepared runtime set ${setId} failed verification.`);
     }
     checkAbort(options.signal);
-    await selectSet(root, current, setId);
+    await selectSet(root, current, setId, options.signal);
     return buildResult(root, inspected.meta);
   });
 }
