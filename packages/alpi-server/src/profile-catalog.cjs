@@ -45,12 +45,15 @@ function makeProfileCatalog(config) {
   }
   const profiles = new Map();
   for (const item of config.profiles) {
-    keys(item, ['name', 'engine', 'image', 'projects', 'harnesses', 'limits', 'providers']);
+    keys(item, ['name', 'engine', 'image', 'projects', 'harnesses', 'limits', 'providers'], ['imagePreparationMiB']);
     keys(item.limits, ['vcpus', 'memoryMiB', 'diskMiB']);
     if (!id(item.name) || profiles.has(item.name) || !id(item.engine) || !image(item.image) ||
         !positive(item.limits.vcpus, 1024) || !positive(item.limits.memoryMiB, 0x7fffffff) ||
-        !positive(item.limits.diskMiB, 0x7fffffff) || !Array.isArray(item.providers)) invalid();
+        !positive(item.limits.diskMiB, 0x7fffffff) ||
+        (item.imagePreparationMiB !== undefined && !positive(item.imagePreparationMiB, 0x7fffffff)) ||
+        !Array.isArray(item.providers)) invalid();
     profiles.set(item.name, Object.freeze({ name: item.name, engine: item.engine, image: item.image,
+      imagePreparationMiB: item.imagePreparationMiB,
       projects: members(item.projects, text, 128), harnesses: members(item.harnesses, id, 16),
       limits: Object.freeze({ ...item.limits }), providers: item.providers.length
         ? members(item.providers, name => providers.has(name), 32) : Object.freeze([]) }));
@@ -89,7 +92,8 @@ function makeProfileCatalog(config) {
     // Effective capabilities require separate worker, image and network qualification.
     forProject(project) {
       return [...profiles.values()].filter(p => p.projects.includes(project)).map(p => ({
-        name: p.name, engine: p.engine, image: p.image, limits: p.limits, harnesses: p.harnesses,
+        name: p.name, engine: p.engine, image: p.image, imagePreparationMiB: p.imagePreparationMiB,
+        limits: p.limits, harnesses: p.harnesses,
         providers: p.providers.map(name => ({ name, models: providers.get(name).models })),
       }));
     },

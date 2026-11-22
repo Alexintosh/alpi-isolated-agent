@@ -274,8 +274,12 @@ async function runRuntime(action, args) {
     try {
       const callback = require('../src/network/callback-install.cjs');
       const images = require('../src/profile-image.cjs');
-      let additionalBytes = await callback.callbackAdmissionBytes(stateDir);
-      if (profile) additionalBytes += images.imageAdmissionBytes(profile);
+      // Core admission covers the candidate and a first callback install.
+      // Pinned-image admission is separate: it is bounded by the profile's
+      // declared image preparation footprint (never the guest disk limit),
+      // credits a verified image cache, and runs inside ensureImage before
+      // any pull once the candidate set is known.
+      const additionalBytes = await callback.callbackAdmissionBytes(stateDir);
       const prepared = await installer.prepareRuntime({
         stateDir,
         engine,

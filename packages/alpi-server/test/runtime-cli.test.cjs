@@ -7,7 +7,7 @@ const path = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const { test } = require('node:test');
 
-const { installRuntime, listRuntimes } = require('../src/runtime-installer.cjs');
+const { installRuntime, listRuntimes, diskAdmissionBytes } = require('../src/runtime-installer.cjs');
 const {
   makeRelease,
   pinnedProfile,
@@ -46,11 +46,49 @@ function writeArchives(directory, release) {
   return archives;
 }
 
+// An SDK fixture that behaves like the real boxed SDK for image work: an ESM
+// dist/index.js exposing a JsBoxlite whose digest-addressed image cache
+// persists through the manifest marker written by the production wrapper.
+function cliSdkEntries(version) {
+  const sdkSource = [
+    "import { appendFileSync, readFileSync, existsSync } from 'node:fs';",
+    'const config = JSON.parse(readFileSync(process.env.ALPI_CLI_TEST_CONFIG, "utf8"));',
+    'const record = (event) => appendFileSync(config.eventsPath, JSON.stringify({ source: "sdk", ...event }) + "\\n");',
+    'export class JsBoxlite {',
+    '  constructor(options) {',
+    '    record({ type: "sdk-construct", homeDir: options.homeDir });',
+    '    let versions = [];',
+    '    const marker = options.homeDir + "/manifest.json";',
+    '    if (existsSync(marker)) {',
+    '      versions = [{ digest: JSON.parse(readFileSync(marker, "utf8")).manifestDigest }];',
+    '    }',
+    '    this.images = {',
+    '      async get(repository) { record({ type: "sdk-get", repository }); return { versions }; },',
+    '      async pull(reference) { record({ type: "sdk-pull", reference }); versions = [{ digest: reference.split("@")[1] }]; },',
+    '    };',
+    '  }',
+    '  close() { record({ type: "sdk-close" }); }',
+    '}',
+  ].join('\n') + '\n';
+  return [
+    {
+      name: 'package/package.json',
+      mode: 0o644,
+      content: Buffer.from(JSON.stringify({ name: '@boxlite-ai/boxlite', version, type: 'module' })),
+    },
+    { name: 'package/dist/index.js', mode: 0o644, content: Buffer.from(sdkSource) },
+    { name: 'package/dist/agents.js', mode: 0o644, content: Buffer.from('sdk-agents-' + version) },
+    { name: 'package/native/boxlite.js', mode: 0o644, content: Buffer.from('sdk-native-' + version) },
+  ];
+}
+
 function preloadSource() {
   return `'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
 const config = JSON.parse(fs.readFileSync(process.env.ALPI_CLI_TEST_CONFIG, 'utf8'));
+const fsp = require('node:fs/promises');
+fsp.statfs = async () => ({ bavail: BigInt(config.availableBytes), bsize: 1n });
 function record(event) {
   fs.appendFileSync(config.eventsPath, JSON.stringify(event) + '\\n');
 }
@@ -79,6 +117,11 @@ installer.commitRuntimeSelection = (options) => {
   record({ type: 'commit', set: options.set });
   return realCommit({ ...options, manifests: config.manifests });
 };
+const realVerifyRuntime = installer.verifyRuntime;
+installer.verifyRuntime = (options) => realVerifyRuntime({
+  ...options,
+  manifests: config.manifests,
+});
 const callbackPath = require.resolve(
   path.join(config.packageRoot, 'src/network/callback-install.cjs')
 );
@@ -116,7 +159,7 @@ if (!config.useRealDependencyModules) {
 const imagePath = require.resolve(
   path.join(config.packageRoot, 'src/profile-image.cjs')
 );
-if (!config.useRealDependencyModules) {
+if (!config.useRealDependencyModules && !config.useRealImageModule) {
   require.cache[imagePath] = {
     id: imagePath,
     filename: imagePath,
@@ -141,7 +184,10 @@ if (!config.useRealDependencyModules) {
 
 function prepareHarness(t, label, options = {}) {
   const directory = tempDirectory(t, label);
-  const release = options.release ?? makeRelease({ version: options.version ?? '0.1.0' });
+  const release = options.release ?? makeRelease({
+    version: options.version ?? '0.1.0',
+    ...(options.sdkEntries ? { archiveEntries: { 'boxlite-sdk': options.sdkEntries } } : {}),
+  });
   const stateDir = options.stateDir ?? path.join(directory, 'state');
   const preload = path.join(directory, 'preload.cjs');
   fs.writeFileSync(preload, preloadSource(), { mode: 0o600 });
@@ -153,16 +199,17 @@ function prepareHarness(t, label, options = {}) {
     archives: writeArchives(directory, release),
     eventsPath: path.join(directory, 'events.jsonl'),
     availableBytes: String(options.availableBytes ?? (1n << 40n)),
-    callbackBytes: 64 * 1024 * 1024,
+    callbackBytes: options.callbackBytes ?? 64 * 1024 * 1024,
     callbackMode: options.callbackMode ?? 'success',
     callbackDigest: 'b'.repeat(64),
     imageBytes: 8 * 1024 * 1024 * 1024,
     imageMode: options.imageMode ?? 'success',
     useRealDependencyModules: options.useRealDependencyModules ?? false,
+    useRealImageModule: options.useRealImageModule ?? false,
   };
   const configPath = path.join(directory, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-  const profile = pinnedProfile('pi-dev', 8192);
+  const profile = pinnedProfile('pi-dev', options.diskMiB ?? 8192, options.imagePreparationMiB ?? 512);
   const profilesPath = path.join(directory, 'profiles.json');
   fs.writeFileSync(
     profilesPath,
@@ -381,28 +428,160 @@ test('real admission estimates flow through the CLI and reject before acquisitio
   });
 
   // The expectation is computed from the REAL production exports: a fresh
-  // state directory charges the full callback estimate plus the trusted
-  // profile's image admission bound (diskMiB 8192 plus fixed headroom).
+  // state directory charges the full callback estimate; pinned-image
+  // admission is separate and runs inside ensureImage once the candidate set
+  // is known.
   const callbackInstall = require('../src/network/callback-install.cjs');
   const { imageAdmissionBytes } = require('../src/profile-image.cjs');
   const profile = pinnedProfile('pi-dev', 8192);
   const callbackBytes = await callbackInstall.callbackAdmissionBytes(harness.stateDir);
-  const expectedAdditional = callbackBytes + imageAdmissionBytes(profile);
   assert.ok(callbackBytes > 0);
-  assert.ok(imageAdmissionBytes(profile) > 0);
+  assert.ok((await imageAdmissionBytes(profile)) > 0);
 
   const cli = runCli(harness);
   assert.equal(cli.status, 1);
   assert.match(cli.stderr, /Insufficient free space/);
-  // The recorded admission requirement is exactly the sum of the real
-  // callback and image estimates, and nothing was acquired afterwards.
+  // The recorded core admission requirement is exactly the real callback
+  // estimate, and nothing was acquired afterwards.
   const events = readEvents(harness.config.eventsPath);
   assert.deepEqual(events, [
-    { type: 'prepare', additionalBytes: expectedAdditional },
+    { type: 'prepare', additionalBytes: callbackBytes },
   ]);
   assert.deepEqual(await listRuntimes({ stateDir: harness.stateDir }), {
     active: null,
     previous: null,
     runtimes: [],
   });
+});
+
+test('CLI pinned-image admission is image-specific and rejects before any pull', async (t) => {
+  const release = makeRelease({
+    version: '0.1.0',
+    archiveEntries: { 'boxlite-sdk': cliSdkEntries('0.1.0') },
+  });
+  const coreBytes = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: false,
+    cacheValid: {},
+  });
+  const callbackBytes = 64 * 1024 * 1024;
+  const harness = prepareHarness(t, 'image-admission', {
+    release,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+    availableBytes: coreBytes + callbackBytes,
+  });
+
+  const cli = runCli(harness);
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.match(cli.stderr, /Insufficient free space/);
+  // Core admission carries only the callback estimate: the image bound is no
+  // longer charged into runtime preparation.
+  const events = readEvents(harness.config.eventsPath);
+  assert.deepEqual(events, [
+    { type: 'prepare', additionalBytes: callbackBytes },
+    { type: 'callback' },
+  ]);
+  // The pinned image admission rejected before any SDK import or pull.
+  assert.equal(events.some((event) => event.source === 'sdk'), false);
+  assert.deepEqual(await listRuntimes({ stateDir: harness.stateDir }), {
+    active: null,
+    previous: null,
+    runtimes: [],
+  });
+});
+
+test('a small guest disk allowance cannot admit a larger pinned-image requirement', async (t) => {
+  const release = makeRelease({
+    version: '0.1.0',
+    archiveEntries: { 'boxlite-sdk': cliSdkEntries('0.1.0') },
+  });
+  const coreBytes = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: false,
+    cacheValid: {},
+  });
+  const callbackBytes = 64 * 1024 * 1024;
+  const availableBytes = coreBytes + callbackBytes;
+  // The retired formula (a 1 MiB guest disk limit plus 64 MiB headroom) would
+  // have been admitted by this capacity and started the pull.
+  assert.ok(availableBytes > 1024 * 1024 + 64 * 1024 * 1024);
+  const harness = prepareHarness(t, 'image-admission-tiny-guest', {
+    release,
+    diskMiB: 1,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+    availableBytes,
+  });
+
+  const cli = runCli(harness);
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.match(cli.stderr, /Insufficient free space/);
+  const events = readEvents(harness.config.eventsPath);
+  assert.equal(events.some((event) => event.source === 'sdk'), false);
+  assert.deepEqual(await listRuntimes({ stateDir: harness.stateDir }), {
+    active: null,
+    previous: null,
+    runtimes: [],
+  });
+});
+
+test('CLI reuses a verified image cache without charging a fresh acquisition', async (t) => {
+  const { createHash } = require('node:crypto');
+  const { imageAdmissionBytes } = require('../src/profile-image.cjs');
+  const profile = pinnedProfile('pi-dev', 8192, 512);
+  const release = makeRelease({
+    version: '0.1.0',
+    archiveEntries: { 'boxlite-sdk': cliSdkEntries('0.1.0') },
+  });
+
+  const first = prepareHarness(t, 'image-cache-first', {
+    release,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+  });
+  const firstRun = runCli(first);
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  const set = JSON.parse(firstRun.stdout).set;
+  const digest = profile.image.split('@')[1];
+  const firstEvents = readEvents(first.config.eventsPath);
+  assert.equal(firstEvents.filter((event) => event.type === 'sdk-pull').length, 1);
+
+  // The real wrapper recorded the verified acquisition for this candidate.
+  const cacheKey = createHash('sha256').update(set + '\n' + profile.image).digest('hex');
+  const marker = JSON.parse(fs.readFileSync(
+    path.join(first.stateDir, 'profile-images', cacheKey, 'manifest.json'),
+    'utf8'
+  ));
+  assert.deepEqual(marker, { image: profile.image, runtime: set, manifestDigest: digest });
+
+  // The second run's capacity only funds the intact core reinstall: it could
+  // never fund a fresh image acquisition.
+  const requiredFresh = await imageAdmissionBytes(profile);
+  const availableBytes = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: true,
+  });
+  assert.ok(requiredFresh > availableBytes);
+
+  const second = prepareHarness(t, 'image-cache-second', {
+    release,
+    stateDir: first.stateDir,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+    callbackBytes: 0,
+    availableBytes,
+  });
+  const secondRun = runCli(second);
+  assert.equal(secondRun.status, 0, secondRun.stderr);
+  assert.equal(JSON.parse(secondRun.stdout).set, set);
+  const secondEvents = readEvents(second.config.eventsPath);
+  assert.deepEqual(
+    secondEvents.map((event) => event.type),
+    ['prepare', 'callback', 'sdk-construct', 'sdk-get', 'sdk-close', 'commit']
+  );
+  assert.equal(secondEvents.some((event) => event.type === 'sdk-pull'), false);
+  const inventory = await listRuntimes({ stateDir: first.stateDir });
+  assert.equal(inventory.active.id, set);
+  assert.equal(inventory.previous, null);
 });

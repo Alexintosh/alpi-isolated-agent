@@ -127,8 +127,9 @@ function makeRelease({ version = '0.1.0', archiveEntries = {} } = {}) {
   const manifests = {};
   const archives = {};
   for (const component of COMPONENTS) {
-    const expected = entriesFor(component, version);
-    const actual = archiveEntries[component] ?? expected;
+    // The manifest must describe the actual archive contents, so content
+    // overrides also override the verified file list.
+    const actual = archiveEntries[component] ?? entriesFor(component, version);
     const archive = tarArchive(actual);
     const url = `${TEST_ORIGIN}/releases/${component}-${version}.tgz`;
     manifests[component] = {
@@ -142,7 +143,7 @@ function makeRelease({ version = '0.1.0', archiveEntries = {} } = {}) {
       allowedHosts: ['example.test'],
       bytes: archive.length,
       sha256: sha256(archive),
-      files: manifestFiles(expected),
+      files: manifestFiles(actual),
     };
     archives[url] = archive;
   }
@@ -180,11 +181,12 @@ function statfsWithAvailable(bytes) {
   return async () => ({ bavail: BigInt(bytes), bsize: 1n });
 }
 
-function pinnedProfile(name = 'pi-dev', diskMiB = 8192) {
+function pinnedProfile(name = 'pi-dev', diskMiB = 8192, imagePreparationMiB = 512) {
   return {
     name,
     engine: 'boxlite',
     image: 'registry.example/alpi/pi@sha256:' + 'a'.repeat(64),
+    imagePreparationMiB,
     projects: ['demo'],
     harnesses: ['pi'],
     providers: [],
