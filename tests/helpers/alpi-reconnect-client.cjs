@@ -23,6 +23,18 @@
 //       Reattach and require the explicit request-key lookup to fail with
 //       not_found: the caller's own (project, clientId, requestId) key has
 //       no job, proving the lookup cannot reach another client's job.
+//   submit-fresh <contextName> <receiptFile> [requestId]
+//       Create the caller's own-project sandbox and submit a job under the
+//       given request key (a fresh key when omitted), persisting the
+//       client-side receipt. The probe for cross-principal key namespacing:
+//       the same request key must admit independently in another
+//       principal's own (project, clientId) namespace.
+//   prepare-race <contextName> <receiptFile>
+//       Create the sandbox and persist a fixed, not-yet-submitted request
+//       key, so independent processes can race the same first submission.
+//   race-submit <contextName> <receiptFile>
+//       Submit exactly the recorded submission once and report the outcome:
+//       either the admitted receipt or a clean idempotency_conflict.
 //
 // Sever modes inject the abrupt connection loss at the TLS socket the
 // packaged transport opens for the POST .../jobs request only:
@@ -38,6 +50,7 @@ const { randomUUID } = require('node:crypto');
 const tls = require('node:tls');
 const { openStore } = require('../../packages/alpi-client/src/context.cjs');
 const { createClient, ClientError } = require('../../packages/alpi-client/src/client.cjs');
+const { openWorkStore } = require('../../packages/alpi-server/src/work-store.cjs');
 
 const SEVERABLE_JOB_POST = /^POST \/v1\/sandboxes\/[0-9a-f-]+\/jobs HTTP/;
 const EXPECTED_SEVER_CODES = new Set(['CONNECTION_CLOSED', 'CONNECTION_ERROR']);
@@ -51,7 +64,7 @@ function isSeveredJobPost(data) {
 // diversion only affects connections that carry a severable job POST: every
 // other request (capabilities preflights, sandbox creation) keeps the real
 // packaged transport behaviour.
-function armSever(mode) {
+function armSever(mode, onAckSever) {
   const originalConnect = tls.connect;
   tls.connect = function severedConnect(...args) {
     const socket = originalConnect.apply(this, args);
@@ -76,9 +89,13 @@ function armSever(mode) {
         if (!severed && isSeveredJobPost(data)) {
           severed = true;
           if (mode === 'on-response') {
-            // The first server bytes prove the admission committed; destroy
-            // before the packaged client can parse the receipt.
-            originalOn('data', () => socket.destroy());
+            // The first server bytes prove the admission committed; the
+            // ack-boundary audit runs before the destroy, and the destroy
+            // itself lands before the packaged client can parse the receipt.
+            originalOn('data', () => {
+              if (onAckSever) onAckSever();
+              socket.destroy();
+            });
           } else {
             // The request bytes were written; kill the transport before any
             // response can be processed. No data listener is attached, so
@@ -108,8 +125,53 @@ function loadClient(contextName) {
   return { store, client: createClient(context), context };
 }
 
-async function severSubmit(contextName, receiptFile, mode) {
-  const restoreTls = armSever(mode);
+// The client-owned receipt an app persists before submitting: with it, a
+// fresh process can replay the exact submission or resolve the job by its
+// request key after the process died.
+function writeReceipt(receiptFile, sandbox, submission) {
+  fs.writeFileSync(receiptFile, JSON.stringify({
+    version: 1,
+    sandboxId: sandbox.sandboxId,
+    workspaceId: sandbox.workspaceId,
+    engine: sandbox.engine,
+    submission,
+  }), { mode: 0o600 });
+}
+
+// Sever-time audit for the ack boundary: from an independent store
+// connection in this fresh process, check that the admission for the
+// caller's own key is already committed at the instant the first response
+// byte arrives. This pins the transport assumption the reconnect proof
+// relies on: the daemon writes the response only after the admission
+// transaction commits, so the first byte implies a committed admission.
+function auditAdmission(stateDir, clientId, requestId) {
+  const peer = openWorkStore(stateDir);
+  try {
+    const jobRows = peer.db
+      .prepare('SELECT COUNT(*) AS n FROM jobs WHERE client_id = ? AND request_id = ?')
+      .get(clientId, requestId).n;
+    const submittedRows = peer.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM events WHERE type = 'job.submitted'" +
+        ' AND job_id IN (SELECT job_id FROM jobs WHERE client_id = ? AND request_id = ?)'
+      )
+      .get(clientId, requestId).n;
+    return { jobRows, submittedRows };
+  } finally {
+    peer.close();
+  }
+}
+
+async function severSubmit(contextName, receiptFile, mode, stateDir) {
+  let admissionAtSever = null;
+  let submission = null;
+  const restoreTls = armSever(mode, mode === 'on-response' ? () => {
+    try {
+      admissionAtSever = auditAdmission(stateDir, context.clientId, submission.requestId);
+    } catch (error) {
+      admissionAtSever = { error: error instanceof Error ? error.message : String(error) };
+    }
+  } : null);
   const { store, client, context } = loadClient(contextName);
   try {
     const sandbox = await client.requestResource('createSandbox', {}, {
@@ -117,21 +179,12 @@ async function severSubmit(contextName, receiptFile, mode) {
       engine: 'fixture',
       profile: 'dev',
     });
-    const submission = {
+    submission = {
       requestId: randomUUID(),
       engine: sandbox.engine,
       payload: { prompt: 'reconnect-me' },
     };
-    // The client-owned receipt an app would persist before submitting: with
-      // it, a fresh process can replay the exact submission or resolve the
-    // job by its request key after the process died.
-    fs.writeFileSync(receiptFile, JSON.stringify({
-      version: 1,
-      sandboxId: sandbox.sandboxId,
-      workspaceId: sandbox.workspaceId,
-      engine: sandbox.engine,
-      submission,
-    }), { mode: 0o600 });
+    writeReceipt(receiptFile, sandbox, submission);
 
     let severedCode = null;
     let receiptLeaked = false;
@@ -157,11 +210,125 @@ async function severSubmit(contextName, receiptFile, mode) {
       clientId: context.clientId,
       sandboxId: sandbox.sandboxId,
       requestId: submission.requestId,
+      admissionAtSever,
     }) + '\n');
     return 0;
   } finally {
     store.close();
     restoreTls();
+  }
+}
+
+// Create the caller's own-project sandbox and submit under a specific
+// request key (or a fresh one). The caller's sandbox is provisioned in the
+// caller's own project, so another principal's credential must admit its
+// own independent job under the same request key the first principal used.
+async function submitFresh(contextName, receiptFile, requestId) {
+  if (requestId !== undefined && !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)) {
+    throw new Error('invalid request key: ' + String(requestId));
+  }
+  const { store, client, context } = loadClient(contextName);
+  try {
+    const sandbox = await client.requestResource('createSandbox', {}, {
+      requestId: randomUUID(),
+      engine: 'fixture',
+      profile: 'dev',
+    });
+    const submission = {
+      requestId: requestId ?? randomUUID(),
+      engine: sandbox.engine,
+      payload: { prompt: 'reconnect-me' },
+    };
+    writeReceipt(receiptFile, sandbox, submission);
+    const job = await client.requestResource(
+      'submitJob',
+      { sandboxId: sandbox.sandboxId },
+      submission,
+    );
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      phase: 'submit-fresh',
+      clientId: context.clientId,
+      project: context.project,
+      jobId: job.jobId,
+      workspaceId: job.workspaceId,
+      sandboxId: sandbox.sandboxId,
+      requestId: submission.requestId,
+    }) + '\n');
+    return 0;
+  } finally {
+    store.close();
+  }
+}
+
+// Create the sandbox and persist the fixed, not-yet-submitted request key.
+async function prepareRace(contextName, receiptFile) {
+  const { store, client, context } = loadClient(contextName);
+  try {
+    const sandbox = await client.requestResource('createSandbox', {}, {
+      requestId: randomUUID(),
+      engine: 'fixture',
+      profile: 'dev',
+    });
+    const submission = {
+      requestId: randomUUID(),
+      engine: sandbox.engine,
+      payload: { prompt: 'reconnect-me' },
+    };
+    writeReceipt(receiptFile, sandbox, submission);
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      phase: 'prepare-race',
+      clientId: context.clientId,
+      sandboxId: sandbox.sandboxId,
+      requestId: submission.requestId,
+    }) + '\n');
+    return 0;
+  } finally {
+    store.close();
+  }
+}
+
+// One uncoordinated racer: submit exactly the recorded submission and
+// report the outcome. Exit 0 for either a receipt or a clean
+// idempotency_conflict; anything else fails the run.
+async function raceSubmit(contextName, receiptFile) {
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  const { store, client, context } = loadClient(contextName);
+  try {
+    try {
+      const job = await client.requestResource(
+        'submitJob',
+        { sandboxId: receipt.sandboxId },
+        receipt.submission,
+      );
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        phase: 'race-submit',
+        clientId: context.clientId,
+        admitted: true,
+        jobId: job.jobId,
+        errorCode: null,
+      }) + '\n');
+      return 0;
+    } catch (error) {
+      const conflict = error instanceof ClientError &&
+        error.code === 'HTTP_STATUS' &&
+        error.statusCode === 409 &&
+        error.resourceCode === 'idempotency_conflict';
+      if (!conflict) throw error;
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        phase: 'race-submit',
+        clientId: context.clientId,
+        admitted: false,
+        jobId: null,
+        errorCode: error.resourceCode,
+      }) + '\n');
+      return 0;
+    }
+  } finally {
+    store.close();
   }
 }
 
@@ -240,7 +407,7 @@ async function main(argv) {
     if (!contextName || !receiptFile || (severMode !== 'on-response' && severMode !== 'after-request')) {
       throw new Error('usage: sever-submit <contextName> <receiptFile> <on-response|after-request>');
     }
-    return severSubmit(contextName, receiptFile, severMode);
+    return severSubmit(contextName, receiptFile, severMode, process.env.ALPI_TEST_SERVER_STATE_DIR);
   }
   if (mode === 'reconnect') {
     if (!contextName || !receiptFile) {
@@ -259,6 +426,24 @@ async function main(argv) {
       throw new Error('usage: lookup-expect-missing <contextName> <receiptFile>');
     }
     return reconnect(contextName, receiptFile, { expectMissing: true });
+  }
+  if (mode === 'submit-fresh') {
+    if (!contextName || !receiptFile) {
+      throw new Error('usage: submit-fresh <contextName> <receiptFile> [requestId]');
+    }
+    return submitFresh(contextName, receiptFile, argv[3]);
+  }
+  if (mode === 'prepare-race') {
+    if (!contextName || !receiptFile) {
+      throw new Error('usage: prepare-race <contextName> <receiptFile>');
+    }
+    return prepareRace(contextName, receiptFile);
+  }
+  if (mode === 'race-submit') {
+    if (!contextName || !receiptFile) {
+      throw new Error('usage: race-submit <contextName> <receiptFile>');
+    }
+    return raceSubmit(contextName, receiptFile);
   }
   throw new Error('unknown mode: ' + String(mode));
 }

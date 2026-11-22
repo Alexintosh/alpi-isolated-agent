@@ -168,8 +168,19 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
         const after = Number(params.after);
         return publicEvents(store.pollJobEvents(principal, { jobId: params.jobId, afterSeq: after }), after);
       }
-      case 'lookupJob':
+      case 'lookupJob': {
+        // Like the artifact routes, the lookup body carries exactly its
+        // declared keys: a missing or unknown field is a client error
+        // instead of a silent ignore, so a malformed reconnect lookup can
+        // never be mistaken for a missing job.
+        const fields = ['requestId'];
+        const body = request.body;
+        if (Object.keys(body).length !== fields.length ||
+            fields.some(key => !Object.hasOwn(body, key))) {
+          throw Object.assign(new Error('Unexpected job lookup request.'), { code: 'invalid_input' });
+        }
         return publicJob(jobService.lookupJob(principal, request.body));
+      }
       default:
         if (Object.hasOwn(services, name)) return services[name](request, store);
         throw Object.assign(new Error('Requested service unavailable.'),
