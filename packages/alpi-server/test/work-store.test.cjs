@@ -1266,3 +1266,154 @@ test('a legacy project journal migrates with explicit gaps and fences historical
   assert.throws(() => store.validateLease(ALPHA_RUNNER, old), assertCode('lease_missing'));
   assert.ok(store.acquireLease(ALPHA_RUNNER, { workspaceId }).epoch > old.epoch);
 });
+
+test('execution intents fence writers until done and uncertain outcomes fence handoff', (t) => {
+  const directory = tempDirectory(t, 'exec-intent');
+  const store = openWorkStore(directory);
+  t.after(() => store.close());
+
+  const receipt = reserve(store, ALPHA_OPERATOR);
+  const lease = store.acquireLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+  });
+
+  // The intent is persisted before any engine dispatch and records the
+  // engine execution handle once termination is confirmed.
+  const intent = store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+  });
+  assert.equal(intent.state, 'pending');
+  assert.equal(intent.executionId, null);
+  const done = store.markExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    state: 'done',
+    executionId: 'exec-9',
+  });
+  assert.equal(done.state, 'done');
+  assert.equal(done.executionId, 'exec-9');
+  assert.equal(store.listPendingExecIntents().length, 0);
+
+  // An aborted dispatch (failure before the engine ran) raises no fence.
+  store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+  });
+  store.markExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    state: 'aborted',
+    reason: 'lease_stale',
+  });
+  assert.equal(store.listWriterFences().length, 0);
+
+  // An uncertain outcome raises a durable writer fence.
+  store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+  });
+  store.markExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    state: 'uncertain',
+    reason: 'engine_termination_unverified',
+  });
+  assert.deepEqual(store.listWriterFences(), [
+    {
+      project: 'alpha',
+      workspaceId: receipt.workspaceId,
+      sandboxId: receipt.sandboxId,
+      reasonCode: 'engine_termination_unverified',
+      createdAt: store.listWriterFences()[0].createdAt,
+      updatedAt: store.listWriterFences()[0].updatedAt,
+    },
+  ]);
+
+  assert.throws(
+    () =>
+      store.validateLease(ALPHA_RUNNER, {
+        workspaceId: receipt.workspaceId,
+        epoch: lease.epoch,
+      }),
+    assertCode('writer_fenced')
+  );
+  assert.throws(
+    () => store.acquireLease(ALPHA_RUNNER, { workspaceId: receipt.workspaceId }),
+    assertCode('writer_fenced')
+  );
+  assert.throws(
+    () => store.acquireLease(BETA_OPERATOR, { workspaceId: receipt.workspaceId }),
+    assertCode('not_found')
+  );
+  assert.throws(
+    () =>
+      store.beginExecIntent(ALPHA_RUNNER, {
+        sandboxId: receipt.sandboxId,
+        workspaceId: receipt.workspaceId,
+      }),
+    assertCode('writer_fenced')
+  );
+
+  // Clearing the fence restores writes and lease handoff.
+  const cleared = store.clearWriterFence(ALPHA_OPERATOR, {
+    sandboxId: receipt.sandboxId,
+  });
+  assert.equal(cleared.cleared, true);
+  assert.equal(cleared.workspaceId, receipt.workspaceId);
+  assert.equal(store.clearWriterFence(ALPHA_OPERATOR, {
+    sandboxId: receipt.sandboxId,
+  }).cleared, false);
+  store.releaseLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+    epoch: lease.epoch,
+  });
+  const next = store.acquireLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+  });
+  assert.ok(next.epoch > lease.epoch);
+});
+
+test('an interrupted reservation is retired without stranding quota', (t) => {
+  const directory = tempDirectory(t, 'retire-reservation');
+  const store = openWorkStore(directory, {
+    limits: { vcpus: 1, memoryMiB: 512, diskMiB: 100 },
+  });
+  t.after(() => store.close());
+
+  const receipt = reserve(store, ALPHA_OPERATOR);
+  assert.equal(receipt.reservationState, 'pending');
+  assert.notEqual(receipt.reservationFingerprint, null);
+  assert.throws(
+    () => reserve(store, BETA_OPERATOR),
+    assertCode('quota_exceeded')
+  );
+
+  const retired = store.retireReservation(ALPHA_OPERATOR, {
+    sandboxId: receipt.sandboxId,
+    reason: 'recovery-test',
+  });
+  assert.equal(retired.deletedReason, 'recovery-test');
+  assert.notEqual(retired.deletedAt, null);
+  assert.equal(store.listSandboxes(ALPHA_OPERATOR).length, 0);
+
+  // Quota is released; a fresh reservation fits again.
+  const next = reserve(store, ALPHA_OPERATOR, { requestId: 'request-2' });
+  assert.match(next.sandboxId, UUID_PATTERN);
+
+  // Only an unattached reservation can be retired.
+  const confirmed = store.confirmReservation(ALPHA_OPERATOR, {
+    sandboxId: next.sandboxId,
+  });
+  assert.equal(confirmed.reservationState, 'committed');
+  assert.throws(
+    () =>
+      store.retireReservation(ALPHA_OPERATOR, {
+        sandboxId: next.sandboxId,
+      }),
+    assertCode('invalid_transition')
+  );
+  assert.throws(
+    () => store.retireReservation(ALPHA_RUNNER, {
+      sandboxId: next.sandboxId,
+    }),
+    assertCode('forbidden')
+  );
+});

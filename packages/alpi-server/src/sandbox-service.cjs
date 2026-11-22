@@ -134,6 +134,7 @@ const WORK_STORE_ERRORS = Object.freeze({
   lease_missing: { code: 'lease_missing', status: 409, retryable: false },
   lease_stale: { code: 'lease_stale', status: 409, retryable: false },
   lease_expired: { code: 'lease_expired', status: 403, retryable: false },
+  writer_fenced: { code: 'writer_fenced', status: 423, retryable: false },
   unsafe_state_directory: {
     code: 'internal_error',
     status: 500,
@@ -1197,6 +1198,13 @@ function createSandboxService(options = {}) {
     'deleteSandbox',
     'discardSandbox',
     'validateLease',
+    'confirmReservation',
+    'listPendingReservations',
+    'beginExecIntent',
+    'markExecIntent',
+    'clearWriterFence',
+    'listPendingExecIntents',
+    'listWriterFences',
   ]) {
     if (typeof store[method] !== 'function') {
       invalidInput('The work store is missing a required method.');
@@ -1314,6 +1322,19 @@ function createSandboxService(options = {}) {
         status: 503,
         retryable: false,
       });
+    }
+  }
+
+  /**
+   * Best-effort fence clear after a verified stop. A fence that cannot be
+   * cleared here is reconciled by restart recovery or the next verified
+   * stop; it is never cleared by an adapter rejection alone.
+   */
+  function clearWriterFenceQuietly(principal, receipt) {
+    try {
+      store.clearWriterFence(principal, { sandboxId: receipt.sandboxId });
+    } catch {
+      // Keep the stop result; the fence is reconciled later.
     }
   }
 
@@ -1589,7 +1610,9 @@ function createSandboxService(options = {}) {
 
   function principalForRow(row) {
     return Object.freeze({
-      clientId: row.clientId,
+      // Journal receipts use clientId; work-store receipts expose
+      // ownerClientId for the same identity.
+      clientId: row.clientId === undefined ? row.ownerClientId : row.clientId,
       project: row.project,
       role: 'operator',
     });
@@ -2189,13 +2212,29 @@ function createSandboxService(options = {}) {
         .find(
           (sandbox) =>
             sandbox.requestId === body.requestId &&
-            sandbox.ownerClientId === principal.clientId
+            sandbox.ownerClientId === principal.clientId &&
+            // Only pre-journal rows take the legacy fast path. A pending
+            // reservation is an interrupted create that must never be
+            // reported as a completed replay.
+            sandbox.reservationState === null
         );
       if (legacy) {
         return replayResult(legacy, null);
       }
 
-      checkProjectQuota(principal, profile.limits);
+      const interrupted = store
+        .listSandboxes(principal)
+        .find(
+          (sandbox) =>
+            sandbox.requestId === body.requestId &&
+            sandbox.ownerClientId === principal.clientId &&
+            sandbox.reservationState === 'pending'
+        );
+      if (!interrupted) {
+        checkProjectQuota(principal, profile.limits);
+      }
+      // Otherwise the reservation is replayed below without consuming a
+      // second quota unit, so it must not be counted twice here.
 
       const reservation = store.reserveSandbox(principal, {
         requestId: body.requestId,
@@ -2203,6 +2242,7 @@ function createSandboxService(options = {}) {
         engineVersion: profile.engineVersion,
         profile: profile.profile,
         imageDigest: profile.imageDigest,
+        networkMode: profile.networkMode,
         resources: profile.limits,
         retention: body.retention,
         ...(body.ttlSeconds === null
@@ -2215,22 +2255,32 @@ function createSandboxService(options = {}) {
         return replayResult(reservation, row);
       }
 
-      const row = journal.beginCreate({
-        project: principal.project,
+      // A missing journal row means a fresh reservation, or a replay of an
+      // interrupted create whose fingerprint reserveSandbox has just
+      // verified against the original caller payload. Completing the intent
+      // here is therefore safe and never re-resolves a changed profile.
+      let row = journal.get(principal.project, reservation.sandboxId);
+      if (!row) {
+        row = journal.beginCreate({
+          project: principal.project,
+          sandboxId: reservation.sandboxId,
+          clientId: principal.clientId,
+          requestId: body.requestId,
+          createHash,
+          allocationId: reservation.sandboxId,
+          launchGeneration: 1,
+          engine: profile.engine,
+          engineVersion: profile.engineVersion,
+          profile: profile.profile,
+          imageDigest: profile.imageDigest,
+          networkMode: profile.networkMode,
+          resources: profile.limits,
+          retention: reservation.retention,
+          expiresAt: reservation.expiresAt,
+        });
+      }
+      store.confirmReservation(principal, {
         sandboxId: reservation.sandboxId,
-        clientId: principal.clientId,
-        requestId: body.requestId,
-        createHash,
-        allocationId: reservation.sandboxId,
-        launchGeneration: 1,
-        engine: profile.engine,
-        engineVersion: profile.engineVersion,
-        profile: profile.profile,
-        imageDigest: profile.imageDigest,
-        networkMode: profile.networkMode,
-        resources: profile.limits,
-        retention: reservation.retention,
-        expiresAt: reservation.expiresAt,
       });
 
       return runExclusive(`sandbox:${reservation.sandboxId}`, () =>
@@ -2488,6 +2538,7 @@ function createSandboxService(options = {}) {
       receipt.desiredState === 'stopped' &&
       receipt.observedState === 'stopped'
     ) {
+      clearWriterFenceQuietly(principal, receipt);
       return Object.freeze({
         sandbox: buildSandbox(receipt, row),
         stopped: true,
@@ -2510,6 +2561,7 @@ function createSandboxService(options = {}) {
       receipt.desiredState === 'stopped' &&
       receipt.observedState === 'stopped'
     ) {
+      clearWriterFenceQuietly(principal, receipt);
       return Object.freeze({
         sandbox: buildSandbox(receipt, row),
         stopped: true,
@@ -2567,6 +2619,7 @@ function createSandboxService(options = {}) {
         operation: 'stop',
         state: 'done',
       });
+      clearWriterFenceQuietly(principal, latest);
       return Object.freeze({
         sandbox: buildSandbox(
           latest,
@@ -2603,6 +2656,7 @@ function createSandboxService(options = {}) {
             operation: 'stop',
             state: 'done',
           });
+          clearWriterFenceQuietly(principal, latest);
           return Object.freeze({
             sandbox: buildSandbox(
               latest,
@@ -2752,6 +2806,7 @@ function createSandboxService(options = {}) {
       project: row.project,
       sandboxId: row.sandboxId,
     });
+    clearWriterFenceQuietly(principal, latest);
     return Object.freeze({
       sandbox: buildSandbox(
         latest,
@@ -2824,11 +2879,26 @@ function createSandboxService(options = {}) {
       timeoutMs + 5000,
       operationTimeoutMs
     );
+
+    // Persist the execution intent before any engine dispatch. A workspace
+    // with an unresolved intent or an uncertain-writer fence is refused
+    // here, so no second writer can enter while termination is unknown.
+    try {
+      store.beginExecIntent(principal, {
+        sandboxId: body.sandboxId,
+        workspaceId: body.workspaceId,
+      });
+    } catch (error) {
+      throw mapError(error, 'exec');
+    }
+
+    let dispatched = false;
     try {
       const result = await callWithEngine(
         engineRecordFor(row, receipt),
         (adapter, signal) => {
           store.validateLease(principal, { workspaceId: body.workspaceId, epoch: body.leaseEpoch });
+          dispatched = true;
           return adapter.exec(refForRow(row), {
             signal,
             argv: body.argv,
@@ -2842,19 +2912,40 @@ function createSandboxService(options = {}) {
         ['exec'],
         execTimeoutMs
       );
-      return validateExecResult(result, maxOutputBytes);
-    } catch (error) {
-      if (
-        error instanceof SandboxServiceError &&
-        error.code === 'operation_timeout'
-      ) {
-        throw new SandboxServiceError(
-          'exec_uncertain',
-          'Execution outcome is uncertain.',
-          { status: 504, retryable: false, operation: 'exec' }
-        );
+      const validated = validateExecResult(result, maxOutputBytes);
+      try {
+        store.markExecIntent(principal, {
+          sandboxId: body.sandboxId,
+          state: 'done',
+          ...(typeof result.executionId === 'string' &&
+            result.executionId.length > 0
+            ? { executionId: result.executionId }
+            : {}),
+        });
+      } catch {
+        // A dangling pending intent is fenced conservatively at restart.
       }
-      throw mapError(error, 'exec');
+      return validated;
+    } catch (error) {
+      const settled = dispatched ? 'uncertain' : 'aborted';
+      const mapped =
+        error instanceof SandboxServiceError && error.code === 'operation_timeout'
+          ? new SandboxServiceError(
+              'exec_uncertain',
+              'Execution outcome is uncertain.',
+              { status: 504, retryable: false, operation: 'exec' }
+            )
+          : mapError(error, 'exec');
+      try {
+        store.markExecIntent(principal, {
+          sandboxId: body.sandboxId,
+          state: settled,
+          reason: mapped.code,
+        });
+      } catch {
+        // The intent stays pending; restart recovery fences the workspace.
+      }
+      throw mapped;
     }
   }
 
@@ -2944,8 +3035,28 @@ function createSandboxService(options = {}) {
       }
     }
 
+    // Reservations whose lifecycle intent was not confirmed: rows with a
+    // journal entry only need their marker reconciled; rows without one are
+    // interrupted creates that recovery completes from the stored pins.
+    const orphanReservations = [];
+    const unconfirmedReservations = [];
+    for (const reservation of store.listPendingReservations()) {
+      if (journal.get(reservation.project, reservation.sandboxId)) {
+        unconfirmedReservations.push(reservation);
+      } else {
+        orphanReservations.push(reservation);
+      }
+    }
+    const pendingExecIntents = store.listPendingExecIntents();
+    const activeFences = store.listWriterFences();
+
     const report = {
-      checked: candidates.length,
+      checked:
+        candidates.length +
+        orphanReservations.length +
+        unconfirmedReservations.length +
+        pendingExecIntents.length +
+        activeFences.length,
       reconciled: [],
       uncertain: [],
       retained: [],
@@ -3091,6 +3202,216 @@ function createSandboxService(options = {}) {
         });
       }
     }
+
+    for (const reservation of unconfirmedReservations) {
+      try {
+        await runExclusive(`sandbox:${reservation.sandboxId}`, async () => {
+          const current = journal.get(
+            reservation.project,
+            reservation.sandboxId
+          );
+          if (!current) {
+            return;
+          }
+          store.confirmReservation(principalForRow(reservation), {
+            sandboxId: reservation.sandboxId,
+          });
+          report.reconciled.push({
+            sandboxId: reservation.sandboxId,
+            project: reservation.project,
+            action: 'confirm-reservation',
+          });
+        });
+      } catch (error) {
+        report.uncertain.push({
+          sandboxId: reservation.sandboxId,
+          project: reservation.project,
+          code: mapError(error, 'recovery').code,
+        });
+      }
+    }
+
+    for (const orphan of orphanReservations) {
+      try {
+        await runExclusive(`sandbox:${orphan.sandboxId}`, async () => {
+          const current = journal.get(orphan.project, orphan.sandboxId);
+          if (current) {
+            store.confirmReservation(principalForRow(orphan), {
+              sandboxId: orphan.sandboxId,
+            });
+            report.reconciled.push({
+              sandboxId: orphan.sandboxId,
+              project: orphan.project,
+              action: 'confirm-reservation',
+            });
+            return;
+          }
+          const row = journal.beginCreate({
+            project: orphan.project,
+            sandboxId: orphan.sandboxId,
+            clientId: orphan.ownerClientId,
+            requestId: orphan.requestId,
+            createHash: digestOf({
+              requestId: orphan.requestId,
+              engine: orphan.engine,
+              profile: orphan.profile,
+              retention: orphan.retention,
+              ttlSeconds: orphan.ttlSeconds,
+            }),
+            allocationId: orphan.sandboxId,
+            launchGeneration: 1,
+            engine: orphan.engine,
+            engineVersion: orphan.engineVersion,
+            profile: orphan.profile,
+            imageDigest: orphan.imageDigest,
+            networkMode: orphan.reservationNetworkMode,
+            resources: orphan.resources,
+            retention: orphan.retention,
+            expiresAt: orphan.expiresAt,
+          });
+          const receipt = store.getSandbox(
+            principalForRow(orphan),
+            orphan.sandboxId
+          );
+          const outcome = await reconcileCreateLocked(
+            principalForRow(orphan),
+            receipt,
+            row
+          );
+          if (outcome.status === 'reconciled') {
+            store.confirmReservation(principalForRow(orphan), {
+              sandboxId: orphan.sandboxId,
+            });
+            report.reconciled.push({
+              sandboxId: orphan.sandboxId,
+              project: orphan.project,
+              action: 'create',
+            });
+          } else if (outcome.status === 'skipped') {
+            report.skipped.push({
+              sandboxId: orphan.sandboxId,
+              project: orphan.project,
+              code: outcome.code,
+            });
+          } else {
+            report.uncertain.push({
+              sandboxId: orphan.sandboxId,
+              project: orphan.project,
+              code: outcome.code,
+            });
+          }
+        });
+      } catch (error) {
+        report.uncertain.push({
+          sandboxId: orphan.sandboxId,
+          project: orphan.project,
+          code: mapError(error, 'recovery').code,
+        });
+      }
+    }
+
+    for (const intent of pendingExecIntents) {
+      const principal = {
+        clientId: intent.ownerClientId,
+        project: intent.project,
+        role: 'operator',
+      };
+      try {
+        await runExclusive(`sandbox:${intent.sandboxId}`, async () => {
+          let receipt = null;
+          try {
+            receipt = store.getSandbox(principal, intent.sandboxId);
+          } catch {
+            receipt = null;
+          }
+          if (
+            receipt === null ||
+            receipt.deletedAt !== null ||
+            receipt.observedState === 'removed'
+          ) {
+            store.markExecIntent(principal, {
+              sandboxId: intent.sandboxId,
+              state: 'aborted',
+              reason: 'already_deleted',
+            });
+            report.skipped.push({
+              sandboxId: intent.sandboxId,
+              project: intent.project,
+              code: 'already_deleted',
+            });
+            return;
+          }
+          if (receipt.observedState === 'stopped') {
+            store.markExecIntent(principal, {
+              sandboxId: intent.sandboxId,
+              state: 'aborted',
+              reason: 'verified_stop_observed',
+            });
+            report.skipped.push({
+              sandboxId: intent.sandboxId,
+              project: intent.project,
+              code: 'verified_stop_observed',
+            });
+            return;
+          }
+          store.markExecIntent(principal, {
+            sandboxId: intent.sandboxId,
+            state: 'uncertain',
+            reason: 'restart_unverified',
+          });
+          report.uncertain.push({
+            sandboxId: intent.sandboxId,
+            project: intent.project,
+            code: 'exec_unverified',
+          });
+        });
+      } catch (error) {
+        report.uncertain.push({
+          sandboxId: intent.sandboxId,
+          project: intent.project,
+          code: mapError(error, 'recovery').code,
+        });
+      }
+    }
+
+    for (const fence of activeFences) {
+      const principal = {
+        clientId: 'recovery',
+        project: fence.project,
+        role: 'operator',
+      };
+      try {
+        await runExclusive(`sandbox:${fence.sandboxId}`, async () => {
+          let receipt = null;
+          try {
+            receipt = store.getSandbox(principal, fence.sandboxId);
+          } catch {
+            receipt = null;
+          }
+          const verifiedStop =
+            receipt !== null &&
+            (receipt.observedState === 'stopped' ||
+              receipt.observedState === 'removed');
+          if (receipt === null || receipt.deletedAt !== null || verifiedStop) {
+            store.clearWriterFence(principal, {
+              sandboxId: fence.sandboxId,
+            });
+            report.reconciled.push({
+              sandboxId: fence.sandboxId,
+              project: fence.project,
+              action: 'clear-writer-fence',
+            });
+          }
+        });
+      } catch (error) {
+        report.uncertain.push({
+          sandboxId: fence.sandboxId,
+          project: fence.project,
+          code: mapError(error, 'recovery').code,
+        });
+      }
+    }
+
     return Object.freeze(report);
   }
 

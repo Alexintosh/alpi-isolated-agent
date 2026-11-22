@@ -13,13 +13,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const { openWorkStore } = require('../src/work-store.cjs');
+const { openWorkStore, WorkStoreError } = require('../src/work-store.cjs');
 const {
   SandboxServiceError,
   createSandboxService,
   httpErrorFor,
 } = require('../src/sandbox-service.cjs');
-const { openSandboxJournal } = require('../src/sandbox-journal.cjs');
+const {
+  SandboxJournalError,
+  openSandboxJournal,
+} = require('../src/sandbox-journal.cjs');
 
 const WORKSPACE = process.cwd();
 const UUID_1 = '11111111-1111-4111-8111-111111111111';
@@ -96,6 +99,14 @@ function createClock(start = 1_000_000) {
 function assertServiceCode(expectedCode) {
   return (error) => {
     assert.ok(error instanceof SandboxServiceError);
+    assert.equal(error.code, expectedCode);
+    return true;
+  };
+}
+
+function assertStoreCode(expectedCode) {
+  return (error) => {
+    assert.ok(error instanceof WorkStoreError);
     assert.equal(error.code, expectedCode);
     return true;
   };
@@ -1141,6 +1152,20 @@ test('exec requires a validated writer lease and is bounded', async (t) => {
   assert.equal(execError.code, 'exec_failed');
   assert.doesNotMatch(execError.message, /RAW|host|private/);
 
+  // A dispatched execution whose termination was not confirmed fences the
+  // workspace writer until a verified stop is observed.
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, {
+      sandboxId,
+      workspaceId,
+      leaseEpoch: freshLease.epoch,
+      argv: ['echo', 'hi'],
+    }),
+    assertServiceCode('writer_fenced')
+  );
+  await stopSandbox(service, ALPHA_RUNNER, sandboxId);
+  await startSandbox(service, ALPHA_RUNNER, sandboxId);
+
   engine.execHook = async () => {
     throw {
       code: 'engine_termination_unverified',
@@ -1163,6 +1188,32 @@ test('exec requires a validated writer lease and is bounded', async (t) => {
   assert.equal(terminationError.retryable, false);
   assert.doesNotMatch(terminationError.message, /RAW|host|private/);
 
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, {
+      sandboxId,
+      workspaceId,
+      leaseEpoch: freshLease.epoch,
+      argv: ['echo', 'hi'],
+    }),
+    assertServiceCode('writer_fenced')
+  );
+
+  // The fence also blocks lease handoff while it is active.
+  store.releaseLease(ALPHA_RUNNER, { workspaceId, epoch: freshLease.epoch });
+  assert.throws(
+    () => acquireLease(store, ALPHA_RUNNER, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+  assert.throws(
+    () => acquireLease(store, ALPHA_RUNNER_2, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+
+  // A verified stop clears the fence and writes resume afterwards.
+  await stopSandbox(service, ALPHA_RUNNER, sandboxId);
+  await startSandbox(service, ALPHA_RUNNER, sandboxId);
+  const resumedLease = acquireLease(store, ALPHA_RUNNER, workspaceId);
+
   engine.execHook = async () => ({
     exitCode: 0,
     stdout: '',
@@ -1174,7 +1225,7 @@ test('exec requires a validated writer lease and is bounded', async (t) => {
   const timedOut = await service.execInSandbox(ALPHA_RUNNER, {
     sandboxId,
     workspaceId,
-    leaseEpoch: freshLease.epoch,
+    leaseEpoch: resumedLease.epoch,
     argv: ['echo', 'hi'],
   });
   assert.equal(timedOut.timedOut, true);
@@ -1636,4 +1687,440 @@ test('recovery attaches a completed journal record only after inspecting its own
   assert.equal(receipt.observedState, 'stopped');
   assert.equal((await service.recoverStartup()).checked, 0);
   assert.equal(engine.calls.create.length, 1);
+});
+
+test('an interrupted reservation is completed by a create replay without losing quota', async (t) => {
+  const directory = tempDirectory(t, 'orphan-replay');
+  const clock = createClock();
+  const store = openWorkStore(directory, { now: clock.now });
+  const realJournal = openSandboxJournal(directory, { now: clock.now });
+  t.after(() => {
+    service.close();
+    store.close();
+    realJournal.close();
+  });
+
+  // Synthetic fault exactly between the reservation commit and the
+  // journal intent commit.
+  let faulted = false;
+  const journal = Object.create(realJournal);
+  journal.beginCreate = (input) => {
+    if (!faulted) {
+      faulted = true;
+      throw new SandboxJournalError(
+        'journal_error',
+        'synthetic interruption between the commit boundaries'
+      );
+    }
+    return realJournal.beginCreate(input);
+  };
+
+  const engine = new FakeEngineAdapter();
+  const service = createSandboxService({
+    store,
+    journal,
+    resolveProfile: makeResolver(),
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+
+  await assert.rejects(
+    createSandbox(service),
+    assertServiceCode('journal_error')
+  );
+  assert.equal(engine.calls.create.length, 0);
+  assert.equal(realJournal.listByProject('alpha').length, 0);
+  const stranded = store.listSandboxes(ALPHA_RUNNER);
+  assert.equal(stranded.length, 1);
+  assert.equal(stranded[0].reservationState, 'pending');
+  assert.notEqual(stranded[0].reservationFingerprint, null);
+  assert.equal(stranded[0].reservationNetworkMode, 'disabled');
+  const summary = await service.status(ALPHA_RUNNER);
+  assert.equal(summary.counts.sandboxes, 1);
+  assert.deepEqual(summary.pendingRecovery, []);
+
+  // The retry through the normal entry point verifies the original
+  // fingerprint and completes the interrupted reservation.
+  const completed = await createSandbox(service);
+  assert.equal(completed.replayed, false);
+  assert.equal(completed.created, true);
+  assert.equal(completed.metadataCreated, true);
+  assert.equal(engine.calls.create.length, 1);
+  assert.equal(realJournal.listByProject('alpha').length, 1);
+  const receipt = store.listSandboxes(ALPHA_RUNNER)[0];
+  assert.equal(receipt.reservationState, 'committed');
+  assert.equal(store.listSandboxes(ALPHA_RUNNER).length, 1);
+
+  // Quota accounting stays intact: exactly one unit is held.
+  const next = await createSandbox(service, ALPHA_RUNNER, {
+    requestId: 'request-2',
+  });
+  assert.equal(next.created, true);
+  assert.equal(store.listSandboxes(ALPHA_RUNNER).length, 2);
+});
+
+test('startup recovery completes a reservation interrupted between the commit boundaries', async (t) => {
+  const directory = tempDirectory(t, 'orphan-restart');
+  const clock = createClock();
+  const engine = new FakeEngineAdapter();
+  const resolver = makeResolver();
+  const realJournal = openSandboxJournal(directory, { now: clock.now });
+
+  let faulted = false;
+  const journal = Object.create(realJournal);
+  journal.beginCreate = (input) => {
+    if (!faulted) {
+      faulted = true;
+      throw new SandboxJournalError('journal_error', 'synthetic interruption');
+    }
+    return realJournal.beginCreate(input);
+  };
+
+  let store = openWorkStore(directory, { now: clock.now });
+  let service = createSandboxService({
+    store,
+    journal,
+    resolveProfile: resolver,
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+
+  await assert.rejects(
+    createSandbox(service),
+    assertServiceCode('journal_error')
+  );
+  const sandboxId = store.listSandboxes(ALPHA_RUNNER)[0].sandboxId;
+  service.close();
+  store.close();
+  journal.beginCreate = (input) => realJournal.beginCreate(input);
+
+  store = openWorkStore(directory, { now: clock.now });
+  service = createSandboxService({
+    store,
+    stateDir: directory,
+    resolveProfile: resolver,
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+  t.after(() => {
+    service.close();
+    store.close();
+    realJournal.close();
+  });
+
+  const recovery = await service.recoverStartup();
+  assert.equal(recovery.checked, 1);
+  assert.deepEqual(recovery.reconciled, [
+    { sandboxId, project: 'alpha', action: 'create' },
+  ]);
+  assert.equal(recovery.uncertain.length, 0);
+  assert.equal(engine.calls.create.length, 1);
+  assert.equal(engine.boxes.size, 1);
+  const receipt = store.getSandbox(ALPHA_RUNNER, sandboxId);
+  assert.equal(receipt.reservationState, 'committed');
+
+  const replay = await createSandbox(service);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.created, false);
+  assert.equal(replay.sandbox.sandboxId, sandboxId);
+  assert.equal(engine.calls.create.length, 1);
+  assert.equal((await service.recoverStartup()).checked, 0);
+
+  // Quota is held exactly once for the recovered reservation.
+  const next = await createSandbox(service, ALPHA_RUNNER, {
+    requestId: 'request-2',
+  });
+  assert.equal(next.created, true);
+  assert.equal(store.listSandboxes(ALPHA_RUNNER).length, 2);
+});
+
+test('an interrupted create never replays across a changed fingerprint', async (t) => {
+  const directory = tempDirectory(t, 'orphan-conflict');
+  const clock = createClock();
+  const engine = new FakeEngineAdapter();
+  let digest = IMAGE;
+  const resolver = async ({ engine, profile }) => ({
+    engine,
+    profile,
+    qualified: true,
+    available: true,
+    engineVersion: '0.14.1',
+    imageDigest: digest,
+    limits: { ...LIMITS },
+    networkMode: 'disabled',
+    capabilities: [...CAPABILITIES],
+  });
+  const realJournal = openSandboxJournal(directory, { now: clock.now });
+  t.after(() => realJournal.close());
+
+  let faulted = false;
+  const journal = Object.create(realJournal);
+  journal.beginCreate = (input) => {
+    if (!faulted) {
+      faulted = true;
+      throw new SandboxJournalError('journal_error', 'synthetic interruption');
+    }
+    return realJournal.beginCreate(input);
+  };
+  const store = openWorkStore(directory, { now: clock.now });
+  const service = createSandboxService({
+    store,
+    journal,
+    resolveProfile: resolver,
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+  t.after(() => {
+    service.close();
+    store.close();
+  });
+
+  await assert.rejects(
+    createSandbox(service),
+    assertServiceCode('journal_error')
+  );
+  const orphan = store.listSandboxes(ALPHA_RUNNER)[0];
+  assert.equal(orphan.reservationState, 'pending');
+
+  // A retry whose resolved pins differ conflicts and never re-resolves the
+  // stored profile silently.
+  digest = IMAGE_V2;
+  await assert.rejects(
+    createSandbox(service),
+    assertServiceCode('idempotency_conflict')
+  );
+  assert.equal(store.listSandboxes(ALPHA_RUNNER).length, 1);
+  assert.equal(realJournal.listByProject('alpha').length, 0);
+  assert.equal(engine.calls.create.length, 0);
+
+  // Recovery completes the original create with the stored pins.
+  const recovery = await service.recoverStartup();
+  assert.equal(recovery.checked, 1);
+  assert.deepEqual(recovery.reconciled, [
+    { sandboxId: orphan.sandboxId, project: 'alpha', action: 'create' },
+  ]);
+  const row = realJournal.listByProject('alpha')[0];
+  assert.equal(row.imageDigest, IMAGE);
+  const receipt = store.getSandbox(ALPHA_RUNNER, orphan.sandboxId);
+  assert.equal(receipt.imageDigest, IMAGE);
+  assert.equal(receipt.reservationState, 'committed');
+  assert.equal(engine.calls.create.length, 1);
+});
+
+test('a legacy work-store row without a journal keeps the legacy replay path', async (t) => {
+  const { service, engine, store, directory } = setup(t, {
+    label: 'legacy-row',
+  });
+
+  const reserved = store.reserveSandbox(ALPHA_RUNNER, {
+    requestId: 'request-1',
+    engine: 'boxlite',
+    engineVersion: '0.14.1',
+    profile: 'pi-dev',
+    imageDigest: IMAGE,
+    resources: { ...LIMITS },
+    retention: 'ephemeral',
+  });
+
+  // Model a row written before reservation state existed.
+  const db = new (require('node:sqlite').DatabaseSync)(
+    path.join(directory, 'work.sqlite')
+  );
+  try {
+    db.prepare(
+      `UPDATE sandboxes SET reservation_state = NULL,
+        reservation_fingerprint = NULL, reservation_network_mode = NULL
+        WHERE sandbox_id = ?`
+    ).run(reserved.sandboxId);
+  } finally {
+    db.close();
+  }
+  assert.equal(
+    store.getSandbox(ALPHA_RUNNER, reserved.sandboxId).reservationState,
+    null
+  );
+
+  const replay = await createSandbox(service);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.created, false);
+  assert.equal(replay.metadataCreated, false);
+  assert.equal(replay.sandbox.sandboxId, reserved.sandboxId);
+  assert.equal(replay.sandbox.createState, 'legacy');
+  assert.equal(engine.calls.create.length, 0);
+});
+
+test('an uncertain execution fences the workspace across restart until a verified stop', async (t) => {
+  const directory = tempDirectory(t, 'fence-restart');
+  const clock = createClock();
+  const engine = new FakeEngineAdapter();
+  const resolver = makeResolver();
+  let store = openWorkStore(directory, { now: clock.now });
+  let service = createSandboxService({
+    store,
+    stateDir: directory,
+    resolveProfile: resolver,
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+  t.after(() => {
+    service.close();
+    store.close();
+  });
+
+  const created = await createSandbox(service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['echo', 'hi'],
+  };
+
+  engine.execHook = async () => {
+    throw {
+      code: 'engine_termination_unverified',
+      message: 'RAW ENGINE TEXT: /host/private/termination',
+    };
+  };
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('exec_uncertain')
+  );
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('writer_fenced')
+  );
+  store.releaseLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+  assert.throws(
+    () => acquireLease(store, ALPHA_RUNNER, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+  assert.throws(
+    () => acquireLease(store, ALPHA_RUNNER_2, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+
+  // The fence is durable: it survives a service restart.
+  service.close();
+  store.close();
+  store = openWorkStore(directory, { now: clock.now });
+  service = createSandboxService({
+    store,
+    stateDir: directory,
+    resolveProfile: resolver,
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+
+  assert.equal(store.listWriterFences().length, 1);
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('writer_fenced')
+  );
+  const recovery = await service.recoverStartup();
+  assert.equal(recovery.checked, 1);
+  assert.equal(recovery.reconciled.length, 0);
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('writer_fenced')
+  );
+
+  // A verified stop clears the fence; writes resume afterwards.
+  await stopSandbox(service, ALPHA_RUNNER, sandboxId);
+  await startSandbox(service, ALPHA_RUNNER, sandboxId);
+  assert.equal(store.listWriterFences().length, 0);
+  const resumedLease = acquireLease(store, ALPHA_RUNNER, workspaceId);
+  engine.execHook = async () => ({
+    exitCode: 0,
+    stdout: 'resumed',
+    stderr: '',
+    truncated: false,
+    timedOut: false,
+    cancelled: false,
+  });
+  const result = await service.execInSandbox(ALPHA_RUNNER, {
+    ...execInput,
+    leaseEpoch: resumedLease.epoch,
+  });
+  assert.equal(result.stdout, 'resumed');
+});
+
+test('a crashed execution intent becomes a durable writer fence on restart', async (t) => {
+  const directory = tempDirectory(t, 'intent-restart');
+  const clock = createClock();
+  const engine = new FakeEngineAdapter();
+  let store = openWorkStore(directory, { now: clock.now });
+  let service = createSandboxService({
+    store,
+    stateDir: directory,
+    resolveProfile: makeResolver(),
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+  t.after(() => {
+    service.close();
+    store.close();
+  });
+
+  const created = await createSandbox(service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['echo', 'hi'],
+  };
+
+  // Simulate a crash after the intent is persisted and before the outcome
+  // is recorded: the outcome marking fails and the intent stays pending.
+  const originalMark = store.markExecIntent.bind(store);
+  store.markExecIntent = () => {
+    throw new WorkStoreError('store_error', 'synthetic crash');
+  };
+  engine.execHook = async () => {
+    throw {
+      code: 'engine_termination_unverified',
+      message: 'RAW ENGINE TEXT: /host/private/termination',
+    };
+  };
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('exec_uncertain')
+  );
+  assert.equal(store.listPendingExecIntents().length, 1);
+  store.markExecIntent = originalMark;
+
+  service.close();
+  store.close();
+  store = openWorkStore(directory, { now: clock.now });
+  service = createSandboxService({
+    store,
+    stateDir: directory,
+    resolveProfile: makeResolver(),
+    withEngine: async (record, fn) => fn(engine),
+    clock: clock.now,
+  });
+
+  const recovery = await service.recoverStartup();
+  assert.equal(recovery.checked, 1);
+  assert.equal(recovery.uncertain.length, 1);
+  assert.equal(recovery.uncertain[0].code, 'exec_unverified');
+  const fence = store.listWriterFences()[0];
+  assert.equal(fence.sandboxId, sandboxId);
+  assert.equal(fence.reasonCode, 'restart_unverified');
+
+  await assert.rejects(
+    service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('writer_fenced')
+  );
+  assert.throws(
+    () => acquireLease(store, ALPHA_RUNNER_2, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
 });

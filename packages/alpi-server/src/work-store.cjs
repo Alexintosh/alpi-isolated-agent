@@ -53,6 +53,8 @@ const MAX_JSON_DEPTH = 16;
 
 const ROLES = new Set(['observer', 'runner', 'operator']);
 const RETENTIONS = new Set(['ephemeral', 'ttl', 'until-export']);
+const NETWORK_MODES = new Set(['disabled', 'boundary']);
+const EXEC_INTENT_STATES = new Set(['pending', 'done', 'uncertain', 'aborted']);
 const OBSERVED_STATES = new Set([
   'unknown',
   'starting',
@@ -199,6 +201,13 @@ function normalizeInputObject(input) {
 
 function normalizePositiveInteger(value) {
   if (!Number.isSafeInteger(value) || value <= 0) {
+    invalidInput();
+  }
+  return value;
+}
+
+function normalizeEnum(value, allowed) {
+  if (typeof value !== 'string' || !allowed.has(value)) {
     invalidInput();
   }
   return value;
@@ -359,6 +368,9 @@ function sandboxReceipt(row) {
     exportDigest: row.export_digest,
     deletedAt: row.deleted_at,
     deletedReason: row.deleted_reason,
+    reservationState: row.reservation_state,
+    reservationFingerprint: row.reservation_fingerprint,
+    reservationNetworkMode: row.reservation_network_mode,
   };
 }
 
@@ -401,6 +413,31 @@ function leaseReceipt(row, nowMs) {
       row.holder !== null &&
       row.expires_at !== null &&
       row.expires_at > nowMs,
+  };
+}
+
+function execIntentReceipt(row) {
+  return {
+    project: row.project,
+    sandboxId: row.sandbox_id,
+    workspaceId: row.workspace_id,
+    ownerClientId: row.client_id,
+    state: row.state,
+    executionId: row.execution_id,
+    errorCode: row.error_code,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function writerFenceReceipt(row) {
+  return {
+    project: row.project,
+    workspaceId: row.workspace_id,
+    sandboxId: row.sandbox_id,
+    reasonCode: row.reason_code,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -593,6 +630,40 @@ function initializeSchema(db) {
       // Historical holder labels are operator-selected, so they cannot identify a client.
       db.exec('UPDATE workspace_leases SET holder = NULL, expires_at = NULL WHERE holder IS NOT NULL');
     }
+    if (!db.prepare('PRAGMA table_info(sandboxes)').all().some(column => column.name === 'reservation_state')) {
+      db.exec('ALTER TABLE sandboxes ADD COLUMN reservation_state TEXT');
+      db.exec('ALTER TABLE sandboxes ADD COLUMN reservation_fingerprint TEXT');
+      db.exec('ALTER TABLE sandboxes ADD COLUMN reservation_network_mode TEXT');
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS exec_intents (
+        project TEXT NOT NULL,
+        sandbox_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        execution_id TEXT,
+        error_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (project, sandbox_id)
+      );
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS exec_intents_by_state
+        ON exec_intents (state, project, sandbox_id);
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS writer_fences (
+        project TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        sandbox_id TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (project, workspace_id)
+      );
+    `);
   });
 }
 
@@ -814,6 +885,15 @@ class WorkStore {
       .get(workspaceId, project);
   }
 
+  _writerFence(project, workspaceId) {
+    return this.db
+      .prepare(
+        `SELECT * FROM writer_fences
+          WHERE workspace_id = ? AND project = ?`
+      )
+      .get(workspaceId, project);
+  }
+
   _checkIdempotency(project, clientId, operation, key, payloadHash) {
     const row = this.db
       .prepare(
@@ -895,6 +975,14 @@ class WorkStore {
       MAX_IMAGE_DIGEST_LENGTH
     );
 
+    let networkMode = null;
+    if (body.networkMode !== undefined) {
+      if (typeof body.networkMode !== 'string' || !NETWORK_MODES.has(body.networkMode)) {
+        invalidInput();
+      }
+      networkMode = body.networkMode;
+    }
+
     const resources = normalizeInputObject(body.resources);
     const vcpus = normalizePositiveInteger(resources.vcpus);
     const memoryMiB = normalizePositiveInteger(resources.memoryMiB);
@@ -950,6 +1038,15 @@ class WorkStore {
           if (!row) {
             fail('store_error', 'Work store operation failed.');
           }
+          if (
+            row.reservation_fingerprint !== null &&
+            row.reservation_fingerprint !== payloadHash
+          ) {
+            fail(
+              'idempotency_conflict',
+              'Request key was already used with a different payload.'
+            );
+          }
           return sandboxReceipt(row);
         }
 
@@ -995,9 +1092,12 @@ class WorkStore {
                vcpus, memory_mib, disk_mib, retention, ttl_seconds,
                expires_at, generation, desired_state, observed_state,
                native_id, created_at, updated_at, stopped_at, exported_at,
-               export_digest, deleted_at, deleted_reason)
+               export_digest, deleted_at, deleted_reason,
+               reservation_state, reservation_fingerprint,
+               reservation_network_mode)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     NULL, ?, ?, NULL, NULL, NULL, NULL, NULL)`
+                     NULL, ?, ?, NULL, NULL, NULL, NULL, NULL,
+                     'pending', ?, ?)`
           )
           .run(
             sandboxId,
@@ -1019,7 +1119,9 @@ class WorkStore {
             'running',
             'unknown',
             nowMs,
-            nowMs
+            nowMs,
+            payloadHash,
+            networkMode
           );
 
         this._rememberIdempotency(
@@ -1035,6 +1137,363 @@ class WorkStore {
           this._sandbox(principal.project, sandboxId)
         );
       });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Mark a reservation's replayable lifecycle intent as durably recorded
+   * elsewhere. Legacy rows (no reservation state) are left untouched.
+   */
+  confirmReservation(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireWriter(principal);
+    const body = normalizeInputObject(input);
+    const sandboxId = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
+
+    try {
+      return transact(this.db, () => {
+        const row = this._sandbox(principal.project, sandboxId);
+        if (!row) {
+          notFound();
+        }
+        if (row.reservation_state === 'pending') {
+          this.db
+            .prepare(
+              `UPDATE sandboxes
+                  SET reservation_state = 'committed', updated_at = ?
+                WHERE sandbox_id = ? AND project = ?
+                  AND reservation_state = 'pending'`
+              )
+            .run(this._now(), sandboxId, principal.project);
+          return sandboxReceipt(
+            this._sandbox(principal.project, sandboxId)
+          );
+        }
+        return sandboxReceipt(row);
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Safely retire an interrupted reservation that never reached an engine
+   * allocation. Quota accounting is released through the normal deleted
+   * marker, and the caller fingerprint stays replayable.
+   */
+  retireReservation(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireOperator(principal);
+    const body = normalizeInputObject(input);
+    const sandboxId = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
+    const reason =
+      body.reason === undefined
+        ? 'orphaned-reservation'
+        : normalizeText(body.reason, MAX_REASON_LENGTH);
+
+    try {
+      return transact(this.db, () => {
+        const row = this._sandbox(principal.project, sandboxId);
+        if (!row) {
+          notFound();
+        }
+        if (row.deleted_at !== null) {
+          return sandboxReceipt(row);
+        }
+        if (row.reservation_state !== 'pending') {
+          fail(
+            'invalid_transition',
+            'Only an unattached reservation can be retired.'
+          );
+        }
+        if (row.native_id !== null || row.observed_state !== 'unknown') {
+          fail(
+            'invalid_transition',
+            'Reservation already reached an engine allocation.'
+          );
+        }
+        const nowMs = this._now();
+        this.db
+          .prepare(
+            `UPDATE sandboxes
+                SET deleted_at = ?, deleted_reason = ?,
+                    generation = generation + 1, updated_at = ?
+              WHERE sandbox_id = ? AND project = ?
+                AND reservation_state = 'pending'`
+          )
+          .run(nowMs, reason, nowMs, sandboxId, principal.project);
+        return sandboxReceipt(
+          this._sandbox(principal.project, sandboxId)
+        );
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Enumerate reservations whose replayable lifecycle intent has not been
+   * confirmed yet. Used by startup recovery, across all projects.
+   */
+  listPendingReservations() {
+    this._ensureOpen();
+    try {
+      return this.db
+        .prepare(
+          `SELECT * FROM sandboxes
+            WHERE reservation_state = 'pending' AND deleted_at IS NULL
+            ORDER BY created_at ASC, sandbox_id ASC`
+        )
+        .all()
+        .map(sandboxReceipt);
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Persist an execution/ownership intent before the engine dispatch.
+   * Fails while the workspace carries an uncertain-writer fence or an
+   * unresolved earlier intent.
+   */
+  beginExecIntent(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireWriter(principal);
+    const body = normalizeInputObject(input);
+    const sandboxId = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
+    const workspaceId = normalizeText(
+      body.workspaceId,
+      MAX_REQUEST_ID_LENGTH
+    );
+
+    try {
+      return transact(this.db, () => {
+        const sandbox = this._activeSandbox(principal.project, sandboxId);
+        if (!sandbox) {
+          notFound();
+        }
+        if (sandbox.workspace_id !== workspaceId) {
+          invalidInput();
+        }
+        if (this._writerFence(principal.project, workspaceId)) {
+          fail(
+            'writer_fenced',
+            'Workspace is fenced by an uncertain execution.'
+          );
+        }
+        const nowMs = this._now();
+        const existing = this.db
+          .prepare(
+            'SELECT * FROM exec_intents WHERE project = ? AND sandbox_id = ?'
+          )
+          .get(principal.project, sandboxId);
+        if (existing && existing.state === 'pending') {
+          fail(
+            'writer_fenced',
+            'An earlier execution intent is still unresolved.'
+          );
+        }
+        if (existing) {
+          this.db
+            .prepare(
+              `UPDATE exec_intents
+                  SET state = 'pending', execution_id = NULL,
+                      error_code = NULL, client_id = ?, updated_at = ?
+                WHERE project = ? AND sandbox_id = ?`
+            )
+            .run(principal.clientId, nowMs, principal.project, sandboxId);
+        } else {
+          this.db
+            .prepare(
+              `INSERT INTO exec_intents
+                (project, sandbox_id, workspace_id, client_id, state,
+                 execution_id, error_code, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`
+            )
+            .run(
+              principal.project,
+              sandboxId,
+              workspaceId,
+              principal.clientId,
+              nowMs,
+              nowMs
+            );
+        }
+        return execIntentReceipt(
+          this.db
+            .prepare(
+              'SELECT * FROM exec_intents WHERE project = ? AND sandbox_id = ?'
+            )
+            .get(principal.project, sandboxId)
+        );
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Record an execution outcome. `done` confirms termination and records
+   * the engine execution handle when the adapter exposed one. `uncertain`
+   * raises a durable writer fence on the workspace. `aborted` closes an
+   * intent whose dispatch never happened.
+   */
+  markExecIntent(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireWriter(principal);
+    const body = normalizeInputObject(input);
+    const sandboxId = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
+    const state = normalizeEnum(body.state, EXEC_INTENT_STATES);
+    if (state === 'pending') {
+      invalidInput();
+    }
+    const executionId =
+      body.executionId === undefined || body.executionId === null
+        ? null
+        : normalizeText(body.executionId, MAX_NATIVE_ID_LENGTH);
+    const reason =
+      body.reason === undefined || body.reason === null
+        ? null
+        : normalizeText(body.reason, MAX_REASON_LENGTH);
+
+    try {
+      return transact(this.db, () => {
+        const intent = this.db
+          .prepare(
+            'SELECT * FROM exec_intents WHERE project = ? AND sandbox_id = ?'
+          )
+          .get(principal.project, sandboxId);
+        if (!intent) {
+          notFound();
+        }
+        const nowMs = this._now();
+        this.db
+          .prepare(
+            `UPDATE exec_intents
+                SET state = ?,
+                    execution_id = ?,
+                    error_code = ?,
+                    updated_at = ?
+              WHERE project = ? AND sandbox_id = ?`
+          )
+          .run(
+            state,
+            state === 'done' ? executionId : null,
+            state === 'done' ? null : reason,
+            nowMs,
+            principal.project,
+            sandboxId
+          );
+        if (state === 'uncertain') {
+          this.db
+            .prepare(
+              `INSERT INTO writer_fences
+                (project, workspace_id, sandbox_id, reason_code,
+                 created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (project, workspace_id) DO UPDATE SET
+                 sandbox_id = excluded.sandbox_id,
+                 reason_code = excluded.reason_code,
+                 updated_at = excluded.updated_at`
+            )
+            .run(
+              intent.project,
+              intent.workspace_id,
+              intent.sandbox_id,
+              reason === null ? 'exec_uncertain' : reason,
+              nowMs,
+              nowMs
+            );
+        }
+        return execIntentReceipt(
+          this.db
+            .prepare(
+              'SELECT * FROM exec_intents WHERE project = ? AND sandbox_id = ?'
+            )
+            .get(principal.project, sandboxId)
+        );
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Clear the uncertain-writer fence for a sandbox's workspace. Used after
+   * a verified stop or confirmed removal; a missing fence is a no-op.
+   */
+  clearWriterFence(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireWriter(principal);
+    const body = normalizeInputObject(input);
+    const sandboxId = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
+
+    try {
+      return transact(this.db, () => {
+        const fence = this.db
+          .prepare(
+            'SELECT * FROM writer_fences WHERE project = ? AND sandbox_id = ?'
+          )
+          .get(principal.project, sandboxId);
+        if (!fence) {
+          return { sandboxId, cleared: false };
+        }
+        this.db
+          .prepare(
+            'DELETE FROM writer_fences WHERE project = ? AND workspace_id = ?'
+          )
+          .run(principal.project, fence.workspace_id);
+        return {
+          sandboxId,
+          workspaceId: fence.workspace_id,
+          cleared: true,
+        };
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Enumerate unresolved execution intents across every project. Used by
+   * startup recovery.
+   */
+  listPendingExecIntents() {
+    this._ensureOpen();
+    try {
+      return this.db
+        .prepare(
+          `SELECT * FROM exec_intents WHERE state = 'pending'
+            ORDER BY created_at ASC, project ASC, sandbox_id ASC`
+        )
+        .all()
+        .map(execIntentReceipt);
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Enumerate active writer fences across every project. Used by startup
+   * recovery.
+   */
+  listWriterFences() {
+    this._ensureOpen();
+    try {
+      return this.db
+        .prepare(
+          `SELECT * FROM writer_fences
+            ORDER BY created_at ASC, project ASC, workspace_id ASC`
+        )
+        .all()
+        .map(writerFenceReceipt);
     } catch (error) {
       throw translateError(error);
     }
@@ -1915,6 +2374,12 @@ class WorkStore {
         if (!this._workspace(principal.project, workspaceId)) {
           notFound();
         }
+        if (this._writerFence(principal.project, workspaceId)) {
+          fail(
+            'writer_fenced',
+            'Workspace is fenced by an uncertain execution.'
+          );
+        }
         const nowMs = this._now();
         const expiresAt = nowMs + ttlSeconds * 1000;
         if (!Number.isSafeInteger(expiresAt)) {
@@ -1989,6 +2454,12 @@ class WorkStore {
     try {
       if (!this._workspace(principal.project, workspaceId)) {
         notFound();
+      }
+      if (this._writerFence(principal.project, workspaceId)) {
+        fail(
+          'writer_fenced',
+          'Workspace is fenced by an uncertain execution.'
+        );
       }
       const row = this._lease(principal.project, workspaceId);
       if (!row || row.holder === null) {
