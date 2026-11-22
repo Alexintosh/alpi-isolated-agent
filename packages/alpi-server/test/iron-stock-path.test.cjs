@@ -177,16 +177,17 @@ test('stock Iron tunnel denies an ordinary request through the production callba
   const headerEnd = text.indexOf('\r\n\r\n');
   assert.ok(headerEnd !== -1, 'the response headers are complete');
   const statusLine = text.slice(0, text.indexOf('\r\n'));
-  assert.match(statusLine, /^HTTP\/1\.[01] 403 /);
+  assert.equal(statusLine, 'HTTP/1.1 403 Forbidden');
   const body = text.slice(headerEnd + 4);
   assert.equal(body, DENIED_BODY);
-  assert.equal(body.replace(/\n$/, ''), 'Request denied by Alpi policy.');
 
   // (4) A graceful stop closes the tunnel listener for good.
+  const ironPid = lifecycle.pid;
+  assert.ok(Number.isInteger(ironPid) && ironPid > 0);
   const stopped = await lifecycle.stop();
   assert.equal(stopped.phase, 'stopped');
   const closeError = await expectConnectionRefused(port);
   assert.equal(closeError.code, 'ECONNREFUSED');
-  assert.equal(await ownsLoopbackListener(lifecycle.pid, port), false);
+  assert.equal(await ownsLoopbackListener(ironPid, port), false);
   assert.ok(fenceCalls >= 1, 'the synchronous relay fence ran at least once');
 });
