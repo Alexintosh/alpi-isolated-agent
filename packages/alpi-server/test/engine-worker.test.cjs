@@ -1581,3 +1581,201 @@ test('late watchdog verifier results are discarded after an epoch advance', asyn
   assert.equal(snapshot.lastProofAt, proofAtBeforeStall);
   assert.equal(snapshot.bridge.open, false);
 });
+
+// ---------------------------------------------------------------------------
+// Boundary recovery over a reattached control connection (B5 client side)
+// ---------------------------------------------------------------------------
+
+test('boundary recovery reattaches a disconnected worker client within the start deadline', async (t) => {
+  const setup = await setupWorker(t);
+  const systemctl = makeSystemctl(UUID_A);
+  const boundary = createLaunchBoundary({
+    stateRoot: setup.root,
+    tunnelPort: setup.tunnelPort,
+    ironIngressRoot: setup.config.ironIngressRoot,
+    sdkModulePath: setup.config.sdkModulePath,
+    image: IMAGE,
+    imageDigest: IMAGE_DIGEST,
+    profile: PROFILE,
+    uid: currentUid(),
+    systemctl: systemctl.client,
+    proc: setup.proc,
+    net: setup.netEvidence,
+    heartbeatIntervalMs: 500,
+    proofMaxAgeMs: 5000,
+    ownerHeartbeatTimeoutMs: 5000,
+    startTimeoutMs: 3000,
+    stopTimeoutMs: 3000,
+    connectRetryMs: 50,
+  });
+  t.after(() => boundary.close());
+  const ready = await boundary.start(makeLaunch(setup.root));
+  const created = await ready.client.engine.createBox({
+    allocationId: UUID_A,
+    launchGeneration: 1,
+    profile: { network: 'boundary' },
+  });
+  const ref = {
+    allocationId: UUID_A,
+    launchGeneration: 1,
+    name: `alpi-${UUID_A}-g1`,
+    nativeId: created.nativeId,
+  };
+  await ready.client.engine.start(ref);
+
+  // The unit stays active; only the control stream is lost. Recovery must
+  // start the disconnected client instead of hanging on a stale handshake.
+  ready.client.socket.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(ready.client.connected, false);
+
+  const recovered = await boundary.recover({
+    ...makeLaunch(setup.root),
+    nativeId: ref.nativeId,
+  });
+  assert.equal(recovered.forwarding, false);
+  assert.equal(recovered.reason, 'requires-explicit-arm');
+  assert.ok(recovered.proof, 'recovery surfaces the running shim proof');
+  assert.equal(ready.client.connected, true);
+});
+
+// ---------------------------------------------------------------------------
+// Worker chunked exec-result transport (B6 worker side)
+// ---------------------------------------------------------------------------
+
+test('worker streams oversized exec results as ordered bounded chunks with a chunked terminator', async (t) => {
+  const adapter = makeAdapter();
+  const stdout = '"'.repeat(80 * 1024) + '\u{1F600}'.repeat(32);
+  adapter.exec = async (ref, spec) =>
+    spec.argv[0] === 'big'
+      ? { exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, cancelled: false }
+      : { exitCode: 0, stdout: 'ok', stderr: '', truncated: false, timedOut: false, cancelled: false };
+  const setup = await setupWorker(t, { adapter });
+
+  const socket = net.connect({ path: setup.config.controlSocketPath });
+  socket.setEncoding('utf8');
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  t.after(() => socket.destroy());
+
+  // A single reader owns the socket stream and queues parsed frames; each
+  // nextFrame() await shifts one frame off the queue.
+  const frameQueue = [];
+  let frameWaiting = null;
+  let frameBuffer = '';
+  socket.on('data', (chunk) => {
+    frameBuffer += chunk;
+    let newline = frameBuffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = frameBuffer.slice(0, newline);
+      frameBuffer = frameBuffer.slice(newline + 1);
+      newline = frameBuffer.indexOf('\n');
+      if (!line) continue;
+      const parsed = JSON.parse(line);
+      if (frameWaiting) {
+        const pending = frameWaiting;
+        frameWaiting = null;
+        clearTimeout(pending.timer);
+        pending.resolve(parsed);
+      } else {
+        frameQueue.push(parsed);
+      }
+    }
+  });
+  const nextFrame = () =>
+    new Promise((resolve, reject) => {
+      if (frameQueue.length > 0) {
+        resolve(frameQueue.shift());
+        return;
+      }
+      const timer = setTimeout(() => {
+        frameWaiting = null;
+        reject(new Error('timed out waiting for a worker frame'));
+      }, 3000);
+      frameWaiting = { resolve, timer };
+    });
+
+  socket.write(`${JSON.stringify({
+    id: null,
+    op: 'hello',
+    protocolVersion: 1,
+    allocationId: UUID_A,
+    launchGeneration: 1,
+    token: TOKEN,
+  })}\n`);
+  const hello = await nextFrame();
+  assert.equal(hello.ok, true);
+
+  socket.write(`${JSON.stringify({
+    id: 1,
+    op: 'create',
+    ref: { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1` },
+    generation: 1,
+  })}\n`);
+  const created = await nextFrame();
+  assert.equal(created.ok, true);
+
+  socket.write(`${JSON.stringify({
+    id: 2,
+    op: 'exec',
+    ref: {
+      allocationId: UUID_A,
+      launchGeneration: 1,
+      name: `alpi-${UUID_A}-g1`,
+      nativeId: created.result.nativeId,
+    },
+    spec: { argv: ['big'], timeoutMs: 30_000 },
+    generation: 1,
+  })}\n`);
+
+  let seq = 0;
+  const decoded = [];
+  for (;;) {
+    const frame = await nextFrame();
+    if (frame.id !== 2) {
+      continue;
+    }
+    if (frame.ok !== true && frame.part === undefined) {
+      assert.fail(`exec failed: ${JSON.stringify(frame.error)}`);
+    }
+    if (frame.part !== undefined) {
+      assert.equal(frame.seq, seq, 'chunk sequence is globally zero-based and gapless');
+      seq += 1;
+      assert.ok(frame.part === 'stdout' || frame.part === 'stderr');
+      const chunk = Buffer.from(frame.data, 'base64');
+      assert.ok(chunk.length > 0 && chunk.length <= 32 * 1024, `chunk size ${chunk.length}`);
+      decoded.push({ part: frame.part, chunk });
+      continue;
+    }
+    assert.equal(frame.chunked, true, 'the terminator carries the chunked marker');
+    assert.equal(frame.result.stdout, '');
+    assert.equal(frame.result.stderr, '');
+    assert.equal(frame.result.exitCode, 0);
+    break;
+  }
+
+  assert.ok(seq >= 2, 'more than one chunk was emitted');
+  const reassembled = Buffer.concat(decoded.map((entry) => entry.chunk)).toString('utf8');
+  assert.equal(reassembled, stdout);
+
+  // Small results remain ordinary single-frame responses.
+  socket.write(`${JSON.stringify({
+    id: 3,
+    op: 'exec',
+    ref: {
+      allocationId: UUID_A,
+      launchGeneration: 1,
+      name: `alpi-${UUID_A}-g1`,
+      nativeId: created.result.nativeId,
+    },
+    spec: { argv: ['echo', 'hello'], timeoutMs: 30_000 },
+    generation: 1,
+  })}\n`);
+  const small = await nextFrame();
+  assert.equal(small.id, 3);
+  assert.equal(small.ok, true);
+  assert.equal(small.chunked, undefined);
+  assert.equal(small.result.stdout, 'ok');
+});

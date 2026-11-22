@@ -68,6 +68,7 @@ const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
+const EXEC_CHUNK_BYTES = 32 * 1024;
 const TUNNEL_HOST = '127.0.0.1';
 const TUNNEL_ALIAS = '192.168.127.254';
 
@@ -1001,6 +1002,107 @@ function createEngineWorker(options = {}) {
     }
   }
 
+  // Large exec results must not be serialized into one JSON line: the owner
+  // frame bound would destroy the control connection for ordinary output.
+  // This chunked path is used only for exec results that exceed one chunk;
+  // ordinary small results keep the single-frame response. Writes honor
+  // socket backpressure and never reissue a chunk once sent.
+  function writeFrame(socket, frame) {
+    return new Promise((resolve) => {
+      if (!socket || socket.destroyed) {
+        resolve(false);
+        return;
+      }
+      let settled = false;
+      const finish = (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        socket.off('drain', onDrain);
+        socket.off('error', onFailure);
+        socket.off('close', onFailure);
+        resolve(value);
+      };
+      const onDrain = () => finish(true);
+      const onFailure = () => finish(false);
+      socket.on('drain', onDrain);
+      socket.on('error', onFailure);
+      socket.on('close', onFailure);
+      let writable = true;
+      try {
+        writable = socket.write(frame);
+      } catch {
+        finish(false);
+        return;
+      }
+      if (writable) {
+        finish(true);
+      }
+    });
+  }
+
+  function execResultNeedsChunks(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return false;
+    }
+    const stdout = typeof payload.stdout === 'string' ? payload.stdout : '';
+    const stderr = typeof payload.stderr === 'string' ? payload.stderr : '';
+    return (
+      Buffer.byteLength(stdout, 'utf8') > EXEC_CHUNK_BYTES ||
+      Buffer.byteLength(stderr, 'utf8') > EXEC_CHUNK_BYTES
+    );
+  }
+
+  async function sendChunkedExecResult(socket, id, payload) {
+    const stdout = Buffer.from(typeof payload.stdout === 'string' ? payload.stdout : '', 'utf8');
+    const stderr = Buffer.from(typeof payload.stderr === 'string' ? payload.stderr : '', 'utf8');
+    if (stdout.length > MAX_EXEC_OUTPUT_BYTES || stderr.length > MAX_EXEC_OUTPUT_BYTES) {
+      send(socket, {
+        id,
+        ok: false,
+        error: {
+          code: 'output_limit_exceeded',
+          message: 'The guest execution output exceeded the encoded result budget.',
+        },
+      });
+      return true;
+    }
+    let seq = 0;
+    const emit = async (part, buffer) => {
+      for (let offset = 0; offset < buffer.length; offset += EXEC_CHUNK_BYTES) {
+        const slice = buffer.subarray(offset, Math.min(offset + EXEC_CHUNK_BYTES, buffer.length));
+        const frame = `${JSON.stringify({
+          id,
+          part,
+          seq,
+          data: slice.toString('base64'),
+        })}\n`;
+        seq += 1;
+        const delivered = await writeFrame(socket, frame);
+        if (!delivered) {
+          return false;
+        }
+      }
+      return true;
+    };
+    if (!(await emit('stdout', stdout))) {
+      return false;
+    }
+    if (!(await emit('stderr', stderr))) {
+      return false;
+    }
+    return writeFrame(
+      socket,
+      `${JSON.stringify({
+        id,
+        ok: true,
+        result: { ...payload, stdout: '', stderr: '' },
+        chunked: true,
+      })}\n`
+    );
+  }
+
   function errorPayload(error) {
     const code = error instanceof EngineWorkerError ? error.code : 'worker_internal_error';
     const message =
@@ -1412,6 +1514,11 @@ function createEngineWorker(options = {}) {
           }
           if (payload && payload.ok === false) {
             send(socket, { id: message.id ?? null, ...payload });
+          } else if (message.op === 'exec' && execResultNeedsChunks(payload)) {
+            const delivered = await sendChunkedExecResult(socket, message.id ?? null, payload);
+            if (!delivered) {
+              socket.destroy();
+            }
           } else {
             send(socket, { id: message.id ?? null, ok: true, result: payload });
           }

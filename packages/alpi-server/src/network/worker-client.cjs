@@ -47,6 +47,13 @@ const DEFAULT_SYSTEMCTL_TIMEOUT_MS = 15_000;
 const DEFAULT_START_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_TIMEOUT_MS = 15_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
+const EXEC_CLEANUP_GRACE_MS = 10_000;
+const MAX_EXEC_TIMEOUT_MS = 300_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
+const MAX_EXEC_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_EXEC_CHUNK_BYTES = 32 * 1024;
+const MAX_CHUNKED_FRAMES_PER_REQUEST = 4096;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 2_000;
 const DEFAULT_PROOF_MAX_AGE_MS = 5_000;
 const DEFAULT_CONNECT_RETRY_MS = 100;
@@ -479,6 +486,7 @@ function createWorkerClient(options = {}) {
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
   const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+  const execCleanupGraceMs = options.execCleanupGraceMs ?? EXEC_CLEANUP_GRACE_MS;
   const heartbeatIntervalMs =
     options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const proofMaxAgeMs = options.proofMaxAgeMs ?? DEFAULT_PROOF_MAX_AGE_MS;
@@ -488,6 +496,8 @@ function createWorkerClient(options = {}) {
   let hello = null;
   let connected = false;
   let closed = false;
+  let connectionEpoch = 0;
+  let activeHandshake = null;
   const pendingRequests = new Map();
   let requestCounter = 0;
   let heartbeatTimer = null;
@@ -512,6 +522,18 @@ function createWorkerClient(options = {}) {
   function markUnavailable(error) {
     connected = false;
     bridgeOpen = false;
+    const pendingHandshake = activeHandshake;
+    activeHandshake = null;
+    if (pendingHandshake) {
+      pendingHandshake.settle(
+        error instanceof WorkerClientError
+          ? error
+          : new WorkerClientError(
+              'worker_unavailable',
+              error && error.message ? error.message : 'The worker control connection was lost.'
+            )
+      );
+    }
     if (socket) {
       try {
         socket.destroy();
@@ -541,7 +563,7 @@ function createWorkerClient(options = {}) {
     socket.write(`${JSON.stringify(payload)}\n`);
   }
 
-  function request(op, payload = {}) {
+  function request(op, payload = {}, transport = {}) {
     requireConnected();
     const id = ++requestCounter;
     const message = { id, op, ...payload };
@@ -554,9 +576,19 @@ function createWorkerClient(options = {}) {
         pendingRequests.delete(id);
         markUnavailable(new Error('Worker request timed out.'));
         reject(new WorkerClientError('worker_timeout', 'The worker request timed out.'));
-      }, requestTimeoutMs);
+          }, transport.timeoutMs ?? requestTimeoutMs);
       timer.unref?.();
-      pendingRequests.set(id, { resolve, reject, timer });
+      const streams = transport.streams
+        ? {
+            limitBytes: transport.streams.limitBytes,
+            seq: 0,
+            totals: { stdout: 0, stderr: 0 },
+            buffers: { stdout: [], stderr: [] },
+            chunkCount: 0,
+            exceeded: false,
+          }
+        : null;
+      pendingRequests.set(id, { id, resolve, reject, timer, streams });
       try {
         send(message);
       } catch (error) {
@@ -564,6 +596,85 @@ function createWorkerClient(options = {}) {
         pendingRequests.delete(id);
         reject(error);
       }
+    });
+  }
+
+  function rejectStreamBounded(current) {
+    clearTimeout(current.timer);
+    pendingRequests.delete(current.id);
+    current.reject(
+      new WorkerClientError(
+        'output_limit_exceeded',
+        'The guest execution output exceeded the encoded result budget.'
+      )
+    );
+  }
+
+  function handleStreamFrame(current, message) {
+    const streams = current.streams;
+    const part = message.part;
+    if (
+      !streams ||
+      (part !== 'stdout' && part !== 'stderr') ||
+      message.seq !== streams.seq ||
+      typeof message.data !== 'string'
+    ) {
+      markUnavailable(new Error('The worker stream frame was invalid.'));
+      return;
+    }
+    let decoded;
+    try {
+      decoded = Buffer.from(message.data, 'base64');
+    } catch {
+      markUnavailable(new Error('The worker stream frame was invalid.'));
+      return;
+    }
+    if (
+      decoded.length === 0 ||
+      decoded.length > MAX_EXEC_CHUNK_BYTES ||
+      decoded.toString('base64') !== message.data
+    ) {
+      markUnavailable(new Error('The worker stream frame was invalid.'));
+      return;
+    }
+    streams.seq += 1;
+    streams.chunkCount += 1;
+    if (streams.chunkCount > MAX_CHUNKED_FRAMES_PER_REQUEST) {
+      rejectStreamBounded(current);
+      return;
+    }
+    const total = streams.totals[part] + decoded.length;
+    if (total > streams.limitBytes) {
+      // Stop buffering but keep consuming frames so the final chunked result
+      // keeps the protocol consistent; the connection stays usable.
+      streams.exceeded = true;
+      return;
+    }
+    streams.totals[part] = total;
+    streams.buffers[part].push(decoded);
+  }
+
+  function finalizeChunkedResult(current, result) {
+    const streams = current.streams;
+    if (!streams || !result || typeof result !== 'object' || Array.isArray(result)) {
+      markUnavailable(new Error('The worker chunked result was invalid.'));
+      return;
+    }
+    clearTimeout(current.timer);
+    pendingRequests.delete(current.id);
+    if (streams.exceeded) {
+      current.reject(
+        new WorkerClientError(
+          'output_limit_exceeded',
+          'The guest execution output exceeded the encoded result budget.'
+        )
+      );
+      return;
+    }
+    current.resolve({
+      ...result,
+      stdout: Buffer.concat(streams.buffers.stdout).toString('utf8'),
+      stderr: Buffer.concat(streams.buffers.stderr).toString('utf8'),
     });
   }
 
@@ -629,6 +740,10 @@ function createWorkerClient(options = {}) {
 
   async function connectControl() {
     requireOpen();
+    // Every connection owns its handshake state and identity epoch. A
+    // reconnect must never inherit a settled handshake from a previous socket,
+    // and callbacks from a superseded socket must not clear its replacement.
+    const epoch = ++connectionEpoch;
     const resolved = assertPrivateSocket(controlSocketPath, uid);
     const raw = connect(resolved);
     if (!raw || typeof raw.on !== 'function') {
@@ -637,31 +752,85 @@ function createWorkerClient(options = {}) {
     socket = raw;
     socket.setEncoding('utf8');
     socket.setNoDelay(true);
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new WorkerClientError('worker_timeout', 'Connecting to the worker control socket timed out.'));
-      }, requestTimeoutMs);
-      timer.unref?.();
-      socket.once('connect', () => {
-        clearTimeout(timer);
-        resolve();
+    const isCurrent = () => !closed && epoch === connectionEpoch && socket === raw;
+    const abandonAttempt = () => {
+      if (socket === raw) {
+        socket = null;
+      }
+      try {
+        raw.destroy();
+      } catch {}
+    };
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new WorkerClientError('worker_timeout', 'Connecting to the worker control socket timed out.'));
+        }, requestTimeoutMs);
+        timer.unref?.();
+        const onConnect = () => {
+          clearTimeout(timer);
+          raw.off('error', onError);
+          resolve();
+        };
+        const onError = () => {
+          clearTimeout(timer);
+          raw.off('connect', onConnect);
+          reject(new WorkerClientError('worker_unavailable', 'The worker control socket is unavailable.'));
+        };
+        raw.once('connect', onConnect);
+        raw.once('error', onError);
       });
-      socket.once('error', (error) => {
-        clearTimeout(timer);
-        reject(new WorkerClientError('worker_unavailable', 'The worker control socket is unavailable.'));
-      });
-    });
+    } catch (error) {
+      abandonAttempt();
+      throw error;
+    }
     let buffer = '';
-    let helloResolve;
-    let helloReject;
-    const helloPromise = new Promise((resolve, reject) => {
-      helloResolve = resolve;
-      helloReject = reject;
+    let handshakeDone = false;
+    let handshakeResolve;
+    let handshakeReject;
+    const handshakePromise = new Promise((resolve, reject) => {
+      handshakeResolve = resolve;
+      handshakeReject = reject;
     });
-    socket.on('data', (chunk) => {
+    const handshakeState = {
+      settle(error, result) {
+        if (handshakeDone) {
+          return;
+        }
+        handshakeDone = true;
+        clearTimeout(handshakeTimer);
+        if (activeHandshake === handshakeState) {
+          activeHandshake = null;
+        }
+        if (error) {
+          handshakeReject(error);
+        } else {
+          handshakeResolve(result);
+        }
+      },
+    };
+    const handshakeTimer = setTimeout(() => {
+      handshakeState.settle(
+        new WorkerClientError(
+          'worker_timeout',
+          'The worker control handshake did not complete in time.'
+        )
+      );
+      if (isCurrent()) {
+        markUnavailable(new Error('The worker control handshake did not complete in time.'));
+      }
+      abandonAttempt();
+    }, startTimeoutMs);
+    handshakeTimer.unref?.();
+    activeHandshake = handshakeState;
+    const onData = (chunk) => {
+      if (!isCurrent()) {
+        return;
+      }
       buffer += chunk;
       if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES) {
         markUnavailable(new Error('The worker response exceeded the frame bound.'));
+        abandonAttempt();
         return;
       }
       let newline = buffer.indexOf('\n');
@@ -677,13 +846,14 @@ function createWorkerClient(options = {}) {
           message = JSON.parse(line);
         } catch {
           markUnavailable(new Error('The worker response was not valid JSON.'));
+          abandonAttempt();
           return;
         }
-        if (!hello) {
+        if (!handshakeDone) {
           if (message.id === null && message.ok === true && message.result) {
-            helloResolve(message.result);
+            handshakeState.settle(null, message.result);
           } else {
-            helloReject(
+            handshakeState.settle(
               new WorkerClientError(
                 message.error && message.error.code ? message.error.code : 'handshake_rejected',
                 message.error && message.error.message
@@ -695,36 +865,52 @@ function createWorkerClient(options = {}) {
           continue;
         }
         const current = pendingRequests.get(message.id);
-        if (current) {
-          clearTimeout(current.timer);
-          pendingRequests.delete(message.id);
-          if (message.ok === true) {
-            current.resolve(message.result);
+        if (!current) {
+          continue;
+        }
+        if (typeof message.part === 'string') {
+          handleStreamFrame(current, message);
+          continue;
+        }
+        clearTimeout(current.timer);
+        pendingRequests.delete(message.id);
+        if (message.ok === true) {
+          if (message.chunked === true) {
+            finalizeChunkedResult(current, message.result);
           } else {
-            current.reject(
-              new WorkerClientError(
-                message.error && message.error.code ? message.error.code : 'worker_error',
-                message.error && message.error.message
-                  ? message.error.message
-                  : 'The worker operation failed.'
-              )
-            );
+            current.resolve(message.result);
           }
+        } else {
+          current.reject(
+            new WorkerClientError(
+              message.error && message.error.code ? message.error.code : 'worker_error',
+              message.error && message.error.message
+                ? message.error.message
+                : 'The worker operation failed.'
+            )
+          );
         }
       }
-    });
-    socket.on('error', (error) => {
-      if (!hello) {
-        helloReject(new WorkerClientError('worker_unavailable', 'The worker control connection failed.'));
+    };
+    const onError = () => {
+      if (!isCurrent()) {
+        return;
       }
+      handshakeState.settle(new WorkerClientError('worker_unavailable', 'The worker control connection failed.'));
       markUnavailable(new Error('The worker control connection failed.'));
-    });
-    socket.on('close', () => {
-      if (!hello) {
-        helloReject(new WorkerClientError('worker_unavailable', 'The worker control connection closed.'));
+      abandonAttempt();
+    };
+    const onClose = () => {
+      if (!isCurrent()) {
+        return;
       }
+      handshakeState.settle(new WorkerClientError('worker_unavailable', 'The worker control connection closed.'));
       markUnavailable(new Error('The worker control connection closed.'));
-    });
+      abandonAttempt();
+    };
+    socket.on('data', onData);
+    socket.on('error', onError);
+    socket.on('close', onClose);
     try {
       send({
         id: null,
@@ -735,11 +921,24 @@ function createWorkerClient(options = {}) {
         token,
       });
     } catch (error) {
-      helloReject(error);
-      markUnavailable(error);
+      handshakeState.settle(
+        error instanceof WorkerClientError
+          ? error
+          : new WorkerClientError('worker_unavailable', error && error.message ? error.message : 'The worker handshake could not be sent.')
+      );
+      if (isCurrent()) {
+        markUnavailable(error);
+      }
+      abandonAttempt();
       throw error;
     }
-    const handshake = await helloPromise;
+    let handshake;
+    try {
+      handshake = await handshakePromise;
+    } catch (error) {
+      abandonAttempt();
+      throw error;
+    }
     if (
       !handshake ||
       handshake.protocolVersion !== PROTOCOL_VERSION ||
@@ -937,7 +1136,32 @@ function createWorkerClient(options = {}) {
       const abort = () => markUnavailable(new Error('Guest execution interrupted.'));
       signal?.addEventListener('abort', abort, { once: true });
       try {
-        return await request('exec', { ref: bounded, spec: boundedSpec, generation: launchGeneration });
+        // The exec transport deadline must cover the validated execution and
+        // cleanup budget of the command itself; every other control request
+        // keeps the default request bound. The stream state carries the
+        // encoded result budget used by the chunked large-result transport.
+        const requestedTimeout = boundedSpec.timeoutMs;
+        const executionTimeoutMs =
+          Number.isSafeInteger(requestedTimeout) &&
+          requestedTimeout >= 1 &&
+          requestedTimeout <= MAX_EXEC_TIMEOUT_MS
+            ? requestedTimeout
+            : DEFAULT_EXEC_TIMEOUT_MS;
+        const requestedOutput = boundedSpec.maxOutputBytes;
+        const outputLimitBytes =
+          Number.isSafeInteger(requestedOutput) &&
+          requestedOutput >= 1 &&
+          requestedOutput <= MAX_EXEC_OUTPUT_BYTES
+            ? requestedOutput
+            : DEFAULT_MAX_OUTPUT_BYTES;
+        return await request(
+          'exec',
+          { ref: bounded, spec: boundedSpec, generation: launchGeneration },
+          {
+            timeoutMs: executionTimeoutMs + execCleanupGraceMs,
+            streams: { limitBytes: outputLimitBytes },
+          }
+        );
       } catch (error) {
         // Loss of the control stream alone cannot confirm termination in the guest.
         if (signal?.aborted || ['worker_timeout', 'worker_unavailable', 'worker_internal_error', 'worker_error'].includes(error.code)) {
@@ -1127,6 +1351,9 @@ function createWorkerClient(options = {}) {
       }
       bridgeOpen = false;
       connected = false;
+      // Connection callbacks are guarded against stale sockets, so in-flight
+      // requests are rejected here rather than through the close handler.
+      markUnavailable(new Error('The worker client is closed.'));
       if (socket) {
         try {
           socket.destroy();
