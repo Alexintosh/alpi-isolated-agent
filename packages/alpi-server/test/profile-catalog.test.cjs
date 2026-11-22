@@ -624,3 +624,113 @@ test('real ensureImage re-enforces the fresh requirement when a retained receipt
     image: profile.image, runtime: candidateSet, manifestDigest: digest,
   });
 });
+
+test('real ensureImage never starts a pull after a cancellation during the fresh-capacity recheck', async (t) => {
+  const harness = await imageHarness(t, { sdkSource: [
+    'import { existsSync, readFileSync, writeFileSync } from "node:fs";',
+    'const events = (globalThis.__alpiImageProbe ??= []);',
+    'export class JsBoxlite {',
+    '  constructor(options) {',
+    '    events.push({ type: "construct", homeDir: options.homeDir });',
+    '    // The native cache state lives in its own store file, independent of',
+    '    // the wrapper receipt marker, so a receipt can survive a native miss.',
+    '    const store = options.homeDir + "/native-store.json";',
+    '    let versions = existsSync(store) ? JSON.parse(readFileSync(store, "utf8")) : [];',
+    '    this.images = {',
+    '      async get(repository) {',
+    '        events.push({ type: "get", repository });',
+    '        return { versions };',
+    '      },',
+    '      async pull(reference) {',
+    '        events.push({ type: "pull", reference });',
+    '        versions = [{ digest: reference.split("@")[1] }];',
+    '        writeFileSync(store, JSON.stringify(versions));',
+    '      },',
+    '    };',
+    '  }',
+    '  close() { events.push({ type: "close" }); }',
+    '}',
+  ].join("\n") + "\n" });
+  const profile = config().profiles[0];
+  const candidateSet = 'boxlite-0.9.0-0123456789abcdef';
+  const digest = profile.image.split('@')[1];
+  const cacheKey = require('node:crypto')
+    .createHash('sha256')
+    .update(candidateSet + '\n' + profile.image)
+    .digest('hex');
+  const cacheDir = path.join(harness.stateDir, 'profile-images', cacheKey);
+  const receiptPath = path.join(cacheDir, 'manifest.json');
+
+  // First acquisition at ample capacity: an authentic receipt written by the
+  // real wrapper after a fully verified pull.
+  const first = await harness.ensureImage({
+    stateDir: harness.stateDir, profile, set: candidateSet,
+    statfs: async () => ({ bavail: 1n << 40n, bsize: 1n }),
+  });
+  assert.deepEqual(first, {
+    profile: 'pi-dev', image: profile.image, runtime: candidateSet, manifestDigest: digest,
+  });
+  const receiptBefore = await fs.readFile(receiptPath, 'utf8');
+
+  // The native cache loses the pinned manifest while the receipt survives.
+  await fs.rm(path.join(cacheDir, 'native-store.json'));
+
+  // The second statfs call is the fresh-capacity recheck after the actual
+  // miss: defer it, abort with a distinct reason while it is pending, then
+  // release it with ample capacity. Only a cancellation check adjacent to
+  // the pull dispatch can keep this window from starting a new acquisition.
+  let statfsCalls = 0;
+  let markEnteredFresh;
+  const enteredFresh = new Promise((resolve) => { markEnteredFresh = resolve; });
+  let releaseFresh;
+  const freshGate = new Promise((resolve) => { releaseFresh = resolve; });
+  const statfs = async () => {
+    statfsCalls += 1;
+    if (statfsCalls === 2) {
+      markEnteredFresh();
+      await freshGate;
+    }
+    return { bavail: 1n << 40n, bsize: 1n };
+  };
+  const controller = new AbortController();
+  const abortReason = new Error('operator aborted during fresh image admission');
+
+  const pending = harness.ensureImage({
+    stateDir: harness.stateDir, profile, set: candidateSet,
+    signal: controller.signal, statfs,
+  });
+  try {
+    // Deterministic: the wrapper is parked inside the deferred fresh
+    // capacity recheck.
+    await enteredFresh;
+    controller.abort(abortReason);
+  } finally {
+    releaseFresh();
+  }
+  await assert.rejects(pending, (error) => error === abortReason);
+  assert.equal(statfsCalls, 2);
+  // Exactly one pull exists: the authentic first acquisition. The cancelled
+  // window must not have dispatched a second one.
+  assert.equal(harness.events.filter((event) => event.type === 'pull').length, 1);
+  assert.deepEqual(
+    harness.events.slice(5).map((event) => event.type),
+    ['construct', 'get', 'close']
+  );
+  assert.equal(await fs.readFile(receiptPath, 'utf8'), receiptBefore);
+  await assert.rejects(
+    fs.lstat(path.join(harness.stateDir, 'runtimes', 'current.json')),
+    { code: 'ENOENT' }
+  );
+
+  // The per-image process guard was released by the cancelled run: the next
+  // acquisition for the same candidate succeeds and pulls exactly once.
+  const retry = await harness.ensureImage({
+    stateDir: harness.stateDir, profile, set: candidateSet,
+    statfs: async () => ({ bavail: 1n << 40n, bsize: 1n }),
+  });
+  assert.deepEqual(retry, first);
+  assert.deepEqual(
+    harness.events.slice(8).map((event) => event.type),
+    ['construct', 'get', 'pull', 'get', 'close']
+  );
+});

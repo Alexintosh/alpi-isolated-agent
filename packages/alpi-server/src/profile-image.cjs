@@ -98,6 +98,9 @@ async function assertImageAdmission({ stateDir, profile, set, signal, statfs, fr
       ' bytes are required and ' + available +
       ' bytes are available to the service user. Capacity admission is advisory against unrelated writers.');
   }
+  // The awaited capacity read is a cancellation window: an abort while the
+  // statfs was pending must never be reported as a successful admission.
+  signal?.throwIfAborted();
   return { required, available };
 }
 
@@ -133,6 +136,10 @@ async function cachePinnedImage(native, image, signal, admission = {}) {
   if (admission.profile !== undefined) {
     await assertImageAdmission({ ...admission, signal, fresh: true });
   }
+  // The awaited fresh-capacity recheck above is another cancellation window:
+  // recheck immediately before dispatching the pull so an abort while that
+  // admission was pending can never start a new acquisition.
+  signal?.throwIfAborted();
   // Once dispatched, the pull is supervised rather than interruptible: this
   // SDK boundary exposes no cancellation contract, so the pull runs to
   // completion under the per-cache process guard and close() in the caller's
