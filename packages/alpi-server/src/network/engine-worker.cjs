@@ -991,15 +991,19 @@ function createEngineWorker(options = {}) {
     });
   }
 
-  function send(socket, payload) {
+  function sendFrame(socket, frame) {
     if (!socket || socket.destroyed) {
       return;
     }
     try {
-      socket.write(`${JSON.stringify(payload)}\n`);
+      socket.write(frame);
     } catch {
       socket.destroy();
     }
+  }
+
+  function send(socket, payload) {
+    sendFrame(socket, `${JSON.stringify(payload)}\n`);
   }
 
   // Large exec results must not be serialized into one JSON line: the owner
@@ -1009,8 +1013,11 @@ function createEngineWorker(options = {}) {
   // ordinary small results keep the single-frame response. Writes honor
   // socket backpressure and never reissue a chunk once sent. The transport
   // bound here is per stream (MAX_EXEC_OUTPUT_BYTES on the wire); the
-  // per-command output budget itself is aggregate across stdout and stderr
-  // and is enforced by the adapter's shared output collector, not here.
+  // per-command output budget is aggregate across stdout and stderr. The
+  // adapter's shared output collector counts source bytes, and a truncated
+  // result is normalized to that shared budget before framing (see
+  // normalizeTruncatedExecResult) so the owner-side client bound accepts a
+  // completed truncated result instead of rejecting it.
   function writeFrame(socket, frame) {
     return new Promise((resolve) => {
       if (!socket || socket.destroyed) {
@@ -1046,9 +1053,15 @@ function createEngineWorker(options = {}) {
     });
   }
 
-  function execResultNeedsChunks(payload) {
+  // Encode the exact single-frame success response for an exec result using
+  // the actual bounded request id, or return null when the result must take
+  // the chunked path. The frame bytes that are measured are the frame bytes
+  // that are written: a surrogate id would undercount a multi-digit request
+  // id by exactly the id-size delta and let the real frame exceed the owner
+  // frame bound, disconnecting the owner although the command succeeded.
+  function encodeExecSuccessFrame(id, payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return false;
+      return `${JSON.stringify({ id, ok: true, result: payload })}\n`;
     }
     const stdout = typeof payload.stdout === 'string' ? payload.stdout : '';
     const stderr = typeof payload.stderr === 'string' ? payload.stderr : '';
@@ -1056,14 +1069,14 @@ function createEngineWorker(options = {}) {
       Buffer.byteLength(stdout, 'utf8') > EXEC_CHUNK_BYTES ||
       Buffer.byteLength(stderr, 'utf8') > EXEC_CHUNK_BYTES
     ) {
-      return true;
+      return null;
     }
     // Raw byte length alone is not enough: JSON escape expansion can push a
     // result whose raw output is within the chunk budget past the owner frame
     // bound, which would destroy the control connection. Measure the complete
     // encoded success frame before taking the single-frame path.
-    const encodedFrame = `${JSON.stringify({ id: 0, ok: true, result: payload })}\n`;
-    return Buffer.byteLength(encodedFrame, 'utf8') > MAX_FRAME_BYTES;
+    const frame = `${JSON.stringify({ id, ok: true, result: payload })}\n`;
+    return Buffer.byteLength(frame, 'utf8') > MAX_FRAME_BYTES ? null : frame;
   }
 
   async function sendChunkedExecResult(socket, id, payload) {
@@ -1122,6 +1135,59 @@ function createEngineWorker(options = {}) {
         ? error.message
         : 'The engine worker operation failed.';
     return { ok: false, error: { code, message } };
+  }
+
+  // Truncate a string to at most maxBytes UTF-8 bytes without splitting a
+  // multibyte character: walk the cut point back to a sequence boundary so
+  // the removed tail cannot decode into a partial character.
+  function truncateUtf8ToBoundary(value, maxBytes) {
+    const bytes = Buffer.from(value, 'utf8');
+    if (bytes.length <= maxBytes) {
+      return value;
+    }
+    let cut = maxBytes;
+    while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) {
+      cut -= 1;
+    }
+    return bytes.subarray(0, cut).toString('utf8');
+  }
+
+  // The shared exec output budget is aggregate across stdout and stderr. A
+  // collector that truncates inside a multibyte character emits U+FFFD for
+  // the partial tail, whose 3-byte encoding can push the returned strings
+  // slightly past the source-byte budget the collector counted, and the
+  // owner-side client bound would then reject the whole completed result.
+  // Normalize a truncated result to the shared budget by trimming the stream
+  // tails at valid UTF-8 boundaries (the trailing stream first, where the
+  // partial-character artifact lives), preserving truncated:true. Bounded:
+  // it runs only when the encoded strings already exceed the budget.
+  function normalizeTruncatedExecResult(result, maxOutputBytes) {
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      Array.isArray(result) ||
+      result.truncated !== true ||
+      typeof result.stdout !== 'string' ||
+      typeof result.stderr !== 'string'
+    ) {
+      return result;
+    }
+    const stdoutBytes = Buffer.byteLength(result.stdout, 'utf8');
+    const stderrBytes = Buffer.byteLength(result.stderr, 'utf8');
+    if (stdoutBytes + stderrBytes <= maxOutputBytes) {
+      return result;
+    }
+    let stdout = result.stdout;
+    let stderr = result.stderr;
+    if (stdoutBytes <= maxOutputBytes) {
+      stderr = truncateUtf8ToBoundary(stderr, maxOutputBytes - stdoutBytes);
+    } else {
+      // One stream alone exceeds the shared budget: keep as much of it as
+      // fits at a valid boundary and drop the remainder.
+      stdout = truncateUtf8ToBoundary(result.stdout, maxOutputBytes);
+      stderr = '';
+    }
+    return { ...result, stdout, stderr };
   }
 
   async function handleOperation(message, signal, receivedEpoch) {
@@ -1292,7 +1358,10 @@ function createEngineWorker(options = {}) {
       case 'exec': {
         const ref = assertOwnedRef(config, message.ref);
         const spec = normalizeExecSpec(config, message.spec);
-        return adapter.exec(ref, { ...spec, signal });
+        const result = await adapter.exec(ref, { ...spec, signal });
+        // A truncated result is normalized to the exec's shared output
+        // budget before framing; see normalizeTruncatedExecResult.
+        return normalizeTruncatedExecResult(result, spec.maxOutputBytes);
       }
       case 'openBridge': {
         if (config.profile.network !== 'boundary') fail('forward_denied', 'This profile disables networking.');
@@ -1536,10 +1605,18 @@ function createEngineWorker(options = {}) {
           }
           if (payload && payload.ok === false) {
             send(socket, { id: message.id ?? null, ...payload });
-          } else if (message.op === 'exec' && execResultNeedsChunks(payload)) {
-            const delivered = await sendChunkedExecResult(socket, message.id ?? null, payload);
-            if (!delivered) {
-              socket.destroy();
+          } else if (message.op === 'exec') {
+            // The exact success frame is encoded once with the actual
+            // bounded request id and reused for sending, so the bytes
+            // written always satisfy the owner frame bound.
+            const frame = encodeExecSuccessFrame(message.id ?? null, payload);
+            if (frame === null) {
+              const delivered = await sendChunkedExecResult(socket, message.id ?? null, payload);
+              if (!delivered) {
+                socket.destroy();
+              }
+            } else {
+              sendFrame(socket, frame);
             }
           } else {
             send(socket, { id: message.id ?? null, ok: true, result: payload });

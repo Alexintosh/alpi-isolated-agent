@@ -583,6 +583,9 @@ function createWorkerClient(options = {}) {
             // The encoded result budget is aggregate across stdout and
             // stderr, matching the adapter's shared output collector budget
             // (a combined stdout+stderr totalBytes bound), not per stream.
+            // The worker normalizes truncated collector results to this
+            // shared budget before framing, so a completed truncated:true
+            // result always arrives within this bound.
             limitBytes: transport.streams.limitBytes,
             seq: 0,
             totalBytes: 0,
@@ -889,6 +892,16 @@ function createWorkerClient(options = {}) {
               abandonAttempt();
               return;
             }
+          } else if (current.streams && current.streams.chunkCount > 0) {
+            // After stream chunks were received, only the exact success
+            // terminator may retire the request: an ordinary-looking success
+            // would silently discard the accumulated chunks. Route it
+            // through the pending-request failure path like any other
+            // invalid terminator; markUnavailable rejects the request (and
+            // every other in-flight request) while its deadline is intact.
+            markUnavailable(new Error('The worker chunked result terminator was invalid.'));
+            abandonAttempt();
+            return;
           } else {
             clearTimeout(current.timer);
             pendingRequests.delete(message.id);
@@ -1157,7 +1170,9 @@ function createWorkerClient(options = {}) {
         // keeps the default request bound. The stream state carries the
         // encoded result budget used by the chunked large-result transport;
         // that budget is aggregate across stdout and stderr, matching the
-        // adapter's shared output collector budget.
+        // adapter's shared output collector budget. The worker normalizes
+        // truncated collector results to this shared budget, so a completed
+        // truncated:true result is delivered within it rather than rejected.
         const requestedTimeout = boundedSpec.timeoutMs;
         const executionTimeoutMs =
           Number.isSafeInteger(requestedTimeout) &&

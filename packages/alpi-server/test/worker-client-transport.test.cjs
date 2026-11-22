@@ -774,6 +774,151 @@ test('the exec output budget is shared across stdout and stderr', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// R3-B6: the framing decision must measure the exact success frame including
+// the actual request id. create (request 1) plus eight inspects (2-9) put the
+// exec at request 10, so a frame sized with a surrogate id 0 is one byte
+// short of the bytes actually written. NUL escaping inflates the encoded
+// frame while both raw streams stay within the 32 KiB chunk threshold.
+// ---------------------------------------------------------------------------
+
+const R3_MAX_FRAME_BYTES = 256 * 1024;
+const R3_EXEC_REQUEST_ID = 10;
+
+function r3ExecResult(stdout, stderr) {
+  return {
+    exitCode: 0,
+    stdout,
+    stderr,
+    truncated: false,
+    timedOut: false,
+    cancelled: false,
+  };
+}
+
+function r3FrameBytes(result) {
+  return Buffer.byteLength(
+    `${JSON.stringify({ id: R3_EXEC_REQUEST_ID, ok: true, result })}\n`,
+    'utf8'
+  );
+}
+
+function r3BoundaryResult(frameTarget) {
+  let fill = frameTarget - r3FrameBytes(r3ExecResult('', ''));
+  const stdoutNuls = Math.min(Math.floor(fill / 6), 32 * 1024);
+  fill -= 6 * stdoutNuls;
+  const stderrNuls = Math.min(Math.floor(fill / 6), 32 * 1024);
+  fill -= 6 * stderrNuls;
+  const result = r3ExecResult(
+    '\u0000'.repeat(stdoutNuls),
+    '\u0000'.repeat(stderrNuls) + 'a'.repeat(fill)
+  );
+  assert.equal(r3FrameBytes(result), frameTarget, 'the fixture frame size must be exact');
+  return result;
+}
+
+test('an exact-boundary encoded frame with a multi-digit request id is delivered in one frame', async (t) => {
+  const adapter = makeAdapter();
+  // Both raw streams stay within the 32 KiB chunk threshold while the exact
+  // encoded success frame (with the actual request id 10) sits exactly on
+  // the owner frame bound: still a single-frame response.
+  const payload = r3BoundaryResult(R3_MAX_FRAME_BYTES);
+  adapter.exec = async () => payload;
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const ref = await createOwnedRef(client);
+  for (let i = 0; i < 8; i += 1) {
+    await client.engine.inspect(ref);
+  }
+
+  const result = await client.engine.exec(ref, { argv: ['boundary'], timeoutMs: 30_000 });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, payload.stdout);
+  assert.equal(result.stderr, payload.stderr);
+  assert.equal(result.chunked, undefined, 'an exact-boundary frame stays a single-frame response');
+  assert.equal(client.connected, true, 'the owner connection survived the boundary frame');
+  assert.equal((await client.engine.inspect(ref)).nativeId, 'native-1');
+});
+
+test('a boundary-plus-one encoded frame with a multi-digit request id still delivers the result and keeps the connection', async (t) => {
+  const adapter = makeAdapter();
+  // Measured with a surrogate id 0 the frame would sit exactly at the bound,
+  // while the frame actually written (with request id 10) exceeds it by the
+  // id-size delta; the owner used to disconnect with
+  // engine_termination_unverified although the command succeeded.
+  const payload = r3BoundaryResult(R3_MAX_FRAME_BYTES + 1);
+  adapter.exec = async () => payload;
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const ref = await createOwnedRef(client);
+  for (let i = 0; i < 8; i += 1) {
+    await client.engine.inspect(ref);
+  }
+
+  const result = await client.engine.exec(ref, { argv: ['boundary-plus-one'], timeoutMs: 30_000 });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, payload.stdout);
+  assert.equal(result.stderr, payload.stderr);
+  assert.equal(result.chunked, undefined, 'the reassembled result hides the wire detail');
+  assert.equal(client.connected, true, 'the owner connection survived the oversized frame');
+  assert.equal((await client.engine.inspect(ref)).nativeId, 'native-1');
+});
+
+test('a collector-shaped truncated result cut inside a multibyte character is bounded to the shared budget', async (t) => {
+  const adapter = makeAdapter();
+  // Mirror the real BoxLite collector: with maxOutputBytes 65536, stdout is
+  // 32768 ASCII source bytes and stderr input is 32767 ASCII bytes followed
+  // by one multibyte character. The collector cuts inside that character and
+  // emits the partial tail as U+FFFD, so its returned stderr encodes to
+  // 32770 bytes and the aggregate encoded strings reach 65538 bytes even
+  // though the collector counted only 65536 source bytes. The completed
+  // truncated:true result must be returned within the shared budget, not
+  // rejected with output_limit_exceeded.
+  const stdout = 'a'.repeat(32768);
+  const stderr = 'b'.repeat(32767) + '\uFFFD';
+  assert.equal(Buffer.byteLength(stdout, 'utf8'), 32768);
+  assert.equal(Buffer.byteLength(stderr, 'utf8'), 32770);
+  assert.equal(
+    Buffer.byteLength(stdout, 'utf8') + Buffer.byteLength(stderr, 'utf8'),
+    65538
+  );
+  adapter.exec = async (ref, spec) =>
+    spec.argv[0] === 'collector-cut'
+      ? { exitCode: 0, stdout, stderr, truncated: true, timedOut: false, cancelled: false }
+      : { exitCode: 0, stdout: 'ok', stderr: '', truncated: false, timedOut: false, cancelled: false };
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const ref = await createOwnedRef(client);
+
+  const result = await client.engine.exec(ref, {
+    argv: ['collector-cut'],
+    timeoutMs: 30_000,
+    maxOutputBytes: 65536,
+  });
+  assert.equal(result.truncated, true, 'the completed truncated result is returned, not rejected');
+  assert.equal(result.stdout, 'a'.repeat(32768));
+  // The transport normalizes the truncated result to the shared budget at a
+  // valid UTF-8 boundary: the replacement tail is dropped, not the data.
+  assert.equal(result.stderr, 'b'.repeat(32767));
+  assert.ok(
+    Buffer.byteLength(result.stdout, 'utf8') + Buffer.byteLength(result.stderr, 'utf8') <= 65536,
+    'the normalized result fits the shared aggregate budget'
+  );
+  assert.equal(result.chunked, undefined);
+  assert.equal(client.connected, true);
+  const next = await client.engine.exec(ref, { argv: ['echo', 'hello'], timeoutMs: 30_000 });
+  assert.equal(next.stdout, 'ok');
+});
+
+// ---------------------------------------------------------------------------
 // Protocol failures on injected malformed chunked responses: every invalid
 // terminator must settle the pending operation instead of hanging it.
 // ---------------------------------------------------------------------------
@@ -819,6 +964,51 @@ test('a chunked terminator on a request without stream state settles as a protoc
   assert.equal(outcome.error.code, 'worker_unavailable');
   assert.equal(client.connected, false);
 });
+
+// R3-C1: after at least one canonical stream chunk, only the exact success
+// terminator (chunked === true with a valid result) may retire the request.
+// A missing or wrongly typed marker must not take the ordinary success path,
+// which would silently discard the accumulated chunks.
+for (const markerCase of [
+  { label: 'missing', marker: undefined },
+  { label: 'chunked:false', marker: false },
+  { label: "chunked:'true'", marker: 'true' },
+]) {
+  test(`an ordinary success with a ${markerCase.label} chunked marker after stream chunks settles as a protocol failure`, async (t) => {
+    const { socketPath } = await startFakeWorker(t, (message, socket) => {
+      if (message.op !== 'exec') return;
+      socket.write(`${JSON.stringify({
+        id: message.id,
+        part: 'stdout',
+        seq: 0,
+        data: Buffer.from('actual output').toString('base64'),
+      })}\n`);
+      socket.write(`${JSON.stringify({
+        id: message.id,
+        ok: true,
+        result: { exitCode: 0, stdout: '', stderr: '' },
+        ...(markerCase.marker === undefined ? {} : { chunked: markerCase.marker }),
+      })}\n`);
+    });
+    const { client } = await setupFakeClient(t, socketPath);
+    const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1`, nativeId: 'native-1' };
+
+    const outcome = await settleWithin(
+      client.engine.exec(ref, { argv: ['markerless'], timeoutMs: 30_000 }),
+      1000
+    );
+    try {
+      assert.equal(outcome.settled, true, 'the exec promise must not resolve by silently discarding the chunks');
+      assert.ok(outcome.error, `a ${markerCase.label} chunked marker after chunks must not resolve the request`);
+      assert.equal(outcome.error.code, 'engine_termination_unverified');
+      assert.equal(client.connected, false);
+    } finally {
+      // A markerless success (the pre-fix bug) leaves the connection open;
+      // close deterministically so the fake worker teardown cannot stall.
+      client.close();
+    }
+  });
+}
 
 test('a chunk sequence violation settles the exec and drops the connection', async (t) => {
   const { socketPath } = await startFakeWorker(t, (message, socket) => {
