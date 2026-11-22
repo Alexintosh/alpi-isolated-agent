@@ -18,9 +18,12 @@
  * - The job row is committed durably in the work store before the submission
  *   is acknowledged, and the returned receipt is the persisted receipt. A
  *   restart on the same state directory finds the acknowledged job.
- * - The `job.submitted` event is appended once per job, on the first
- *   admission. An idempotent replay returns the persisted receipt without
- *   appending another event.
+ * - The `job.submitted` event is committed atomically with the job row:
+ *   the work store appends it inside the same admission transaction, so an
+ *   acknowledged job always has exactly one submitted event, even if the
+ *   process dies between the commit and the caller receiving the receipt.
+ *   An idempotent replay returns the persisted receipt without appending
+ *   another event.
  * - A job is scoped to the engine of its sandbox workspace. A submission that
  *   names a different engine than the workspace is refused.
  * - Workspaces are provisioned and released through the sandbox service; this
@@ -126,25 +129,16 @@ function createJobService(options = {}) {
       );
     }
 
-    // Durability boundary: the work store commits the acknowledged job row
-    // (and its idempotency receipt) before this call returns, so the caller
-    // is only acknowledged after the submission survives a restart.
-    const job = store.submitJob(principalInput, {
+    // Durability boundary: the work store commits the acknowledged job row,
+    // its idempotency receipt and the `job.submitted` event in a single
+    // BEGIN IMMEDIATE transaction, so the caller is only acknowledged after
+    // the submission survives a restart and the event can never lag the job.
+    const { job } = store.submitJob(principalInput, {
       requestId,
       workspaceId: workspace.workspaceId,
       payload: body.payload === undefined ? {} : body.payload,
     });
 
-    // The submission event gives observers a defined event cursor through the
-    // same packaged route. It is appended exactly once, on the first
-    // admission of the job: an idempotent replay reuses the same job id and
-    // returns the persisted receipt without appending a duplicate event.
-    if (job.duplicate !== true) {
-      store.appendEvent(principalInput, {
-        type: 'job.submitted',
-        jobId: job.jobId,
-      });
-    }
     return job;
   }
 

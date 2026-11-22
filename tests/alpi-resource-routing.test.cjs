@@ -311,7 +311,9 @@ test('paired observer follows a persisted job after restart using its own cursor
   try {
     sandbox = store.reserveSandbox(principal, { requestId: randomUUID(), engine: 'boxlite', engineVersion: '0.14.1',
       profile: 'pi-dev', imageDigest: 'sha256:' + '1'.repeat(64), resources: { vcpus: 1, memoryMiB: 512, diskMiB: 2048 } });
-    job = store.submitJob(principal, { requestId: randomUUID(), workspaceId: sandbox.workspaceId, payload: { prompt: 'private-input' } });
+    // Admission returns { job, admission }; the submitted event is already
+    // committed inside the admission transaction.
+    job = store.submitJob(principal, { requestId: randomUUID(), workspaceId: sandbox.workspaceId, payload: { prompt: 'private-input' } }).job;
     store.appendEvent(principal, { type: 'message', jobId: job.jobId, data: { text: 'result', rawProviderBody: 'hidden' } });
   } finally { store.close(); }
   const server = await startServer({ stateDir, port: 0, handleSignals: false, openResources: openHostResources });
@@ -332,7 +334,9 @@ test('paired observer follows a persisted job after restart using its own cursor
     assert.equal(status.sessionUuid, job.sessionUuid);
     assert.ok(!JSON.stringify(status).includes('private-input'));
     const page = await reader.requestResource('getEvents', { jobId: job.jobId, after: '0' });
-    assert.equal(page.events[0].untrustedText, 'result');
+    // Admission itself emits job.submitted; the adapter message follows it.
+    assert.deepEqual(page.events.map(item => item.type), ['job.submitted', 'message']);
+    assert.equal(page.events[1].untrustedText, 'result');
     assert.ok(!JSON.stringify(page).includes('rawProviderBody'));
     const next = await reader.requestResource('getEvents', { jobId: job.jobId, after: String(page.nextSeq) });
     assert.deepEqual(next.events, []);

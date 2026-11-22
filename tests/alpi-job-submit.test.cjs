@@ -6,6 +6,8 @@
 // (the same stack the MCP bridge and CLI use):
 // - durable persistence: the acknowledged job survives a peer store handle
 //   and a full server restart on the same state directory;
+// - atomic admission: the job row and its job.submitted event commit in one
+//   transaction, so an acknowledged job always has its submitted event;
 // - exactly-once admission events: an idempotent replay never appends a
 //   duplicate job.submitted event and concurrent duplicate submissions
 //   serialize to one job;
@@ -330,6 +332,11 @@ test('a cancelled job releases its disposable workspace while the receipt stays 
   const receipt = await observer.requestResource('getJob', { jobId: job.jobId });
   assert.equal(receipt.disposition, 'cancelled');
   assert.equal(receipt.workspaceId, sandbox.workspaceId);
+
+  // The event stream stays defined for the cancelled job: admission commits
+  // its single job.submitted event atomically with the job row.
+  const stream = await observer.requestResource('getEvents', { jobId: job.jobId, after: '0' });
+  assert.deepEqual(stream.events.map(event => event.type), ['job.submitted']);
 
   // A deleted sandbox refuses admission as not_found, whatever engine the
   // request names.

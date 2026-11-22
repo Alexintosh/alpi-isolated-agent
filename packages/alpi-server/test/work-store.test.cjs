@@ -284,11 +284,22 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
   assert.notEqual(other.sandboxId, first.sandboxId);
 
   const workspaceId = first.workspaceId;
-  const job = store.submitJob(ALPHA_RUNNER, {
+  const firstAdmission = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-lost-1',
     workspaceId,
     payload: { prompt: 'hello', options: { temperature: 0 } },
   });
+  const job = firstAdmission.job;
+  // Admission is a structured result: the first call is not a duplicate and
+  // reports the committed job.submitted event, which is already visible.
+  assert.equal(firstAdmission.admission.duplicate, false);
+  assert.equal(typeof firstAdmission.admission.submittedEventSeq, 'number');
+  assert.deepEqual(
+    store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId }).events.map(
+      (event) => event.type
+    ),
+    ['job.submitted']
+  );
   assert.match(job.jobId, UUID_PATTERN);
   assert.match(job.sessionUuid, UUID_PATTERN);
   assert.equal(job.disposition, 'acknowledged');
@@ -298,8 +309,12 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
     workspaceId,
     payload: { options: { temperature: 0 }, prompt: 'hello' },
   });
-  assert.equal(jobReplay.jobId, job.jobId);
-  assert.equal(jobReplay.sessionUuid, job.sessionUuid);
+  assert.equal(jobReplay.job.jobId, job.jobId);
+  assert.equal(jobReplay.job.sessionUuid, job.sessionUuid);
+  assert.deepEqual(jobReplay.admission, {
+    duplicate: true,
+    submittedEventSeq: null,
+  });
   assert.equal(store.listJobs(ALPHA_RUNNER).length, 1);
 
   assert.throws(
@@ -320,7 +335,7 @@ test('lost reply replay is stable and changed payloads conflict', (t) => {
       requestId: 'job-lost-1',
       workspaceId,
       payload: { prompt: 'hello', options: { temperature: 0 } },
-    }).jobId,
+    }).job.jobId,
     job.jobId
   );
   assert.equal(
@@ -410,7 +425,7 @@ test('cross-project identifiers are indistinguishable from missing', (t) => {
   t.after(() => store.close());
 
   const sandbox = reserve(store, ALPHA_OPERATOR);
-  const job = store.submitJob(ALPHA_RUNNER, {
+  const { job } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'alpha-job',
     workspaceId: sandbox.workspaceId,
     payload: { prompt: 'secret' },
@@ -496,7 +511,7 @@ test('pending recovery enumerates unsettled sandboxes and jobs', (t) => {
   t.after(() => store.close());
 
   const sandbox = reserve(store, ALPHA_OPERATOR);
-  const job = store.submitJob(ALPHA_RUNNER, {
+  const { job } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'recovery-job',
     workspaceId: sandbox.workspaceId,
   });
@@ -567,12 +582,12 @@ test('two jobs on different workspaces are independent', (t) => {
     requestId: 'ws-2',
   });
 
-  const firstJob = store.submitJob(ALPHA_RUNNER, {
+  const { job: firstJob } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-1',
     workspaceId: firstSandbox.workspaceId,
     payload: { prompt: 'one' },
   });
-  const secondJob = store.submitJob(ALPHA_RUNNER, {
+  const { job: secondJob } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'job-2',
     workspaceId: secondSandbox.workspaceId,
     payload: { prompt: 'two' },
@@ -613,7 +628,7 @@ test('job dispositions enforce strict transitions and never resend uncertain', (
   t.after(() => store.close());
 
   const sandbox = reserve(store, ALPHA_OPERATOR);
-  const job = store.submitJob(ALPHA_RUNNER, {
+  const { job } = store.submitJob(ALPHA_RUNNER, {
     requestId: 'transition-job',
     workspaceId: sandbox.workspaceId,
   });
@@ -1152,16 +1167,18 @@ test('job cursors are independent and advance across a fully pruned window', t =
   const store = openWorkStore(tempDirectory(t, 'job-cursors'), { maxEvents: 2 });
   t.after(() => store.close());
   const sandbox = reserve(store, ALPHA_RUNNER, { requestId: 'cursor-box' });
-  const job = name => store.submitJob(ALPHA_RUNNER, { requestId: name, workspaceId: sandbox.workspaceId }).jobId;
+  // Admission commits each job's submitted event, which occupies job_seq 1;
+  // progress appends continue from there.
+  const job = name => store.submitJob(ALPHA_RUNNER, { requestId: name, workspaceId: sandbox.workspaceId }).job.jobId;
   const first = job('one'), second = job('two');
   const append = jobId => store.appendEvent(ALPHA_RUNNER, { jobId, sandboxId: sandbox.sandboxId, type: 'progress' });
   const poll = (jobId, afterSeq = 0) => store.pollJobEvents(ALPHA_OBSERVER, { jobId, afterSeq });
-  append(first); append(second);
   assert.deepEqual(poll(second).events.map(e => [e.jobId, e.seq]), [[second, 1]]);
+  append(first); append(second);
   append(second);
-  assert.deepEqual(poll(first), { events: [], firstSeq: 2, lastSeq: 1, nextSeq: 1, gap: true, reset: false });
+  assert.deepEqual(poll(first), { events: [], firstSeq: 3, lastSeq: 2, nextSeq: 2, gap: true, reset: false });
   append(first);
-  assert.deepEqual(poll(first, 1).events.map(e => e.seq), [2]);
+  assert.deepEqual(poll(first, 1).events.map(e => e.seq), [3]);
   assert.equal(poll(first, 20).reset, true);
   assert.throws(() => store.pollJobEvents(BETA_OPERATOR, { jobId: first }), assertCode('not_found'));
 });
@@ -1219,9 +1236,52 @@ test('every dispatch key preserves all JSON object keys through restart', t => {
   const first = store.submitJob(ALPHA_RUNNER, input);
   store.close();
   store = openWorkStore(directory);
-  assert.deepEqual(store.submitJob(ALPHA_RUNNER, input).payload, payload);
-  assert.equal(store.submitJob(ALPHA_RUNNER, input).jobId, first.jobId);
+  assert.deepEqual(store.submitJob(ALPHA_RUNNER, input).job.payload, payload);
+  assert.equal(store.submitJob(ALPHA_RUNNER, input).job.jobId, first.job.jobId);
   assert.throws(() => store.submitJob(ALPHA_RUNNER, { ...input, payload: { nested: {} } }), assertCode('idempotency_conflict'));
+});
+
+test('a crash between the admission commit and the ack still leaves the submitted event', t => {
+  const directory = tempDirectory(t, 'submit-crash');
+  let store = openWorkStore(directory);
+  t.after(() => store.close());
+  const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'crash-box' });
+  const input = { requestId: 'crash-job', workspaceId, payload: { prompt: 'hello' } };
+
+  // Simulate process death at the exact former crash boundary: the admission
+  // transaction commits, then the caller never receives the receipt. The
+  // job row and its job.submitted event live in that one transaction, so
+  // both are durable the moment the commit lands.
+  const originalExec = store.db.exec.bind(store.db);
+  let armed = false;
+  store.db.exec = (sql) => {
+    if (armed && sql === 'COMMIT') {
+      armed = false;
+      originalExec(sql);
+      throw new Error('simulated crash after the admission commit');
+    }
+    return originalExec(sql);
+  };
+  armed = true;
+  assert.throws(
+    () => store.submitJob(ALPHA_RUNNER, input),
+    (error) => error.code === 'store_error'
+  );
+  store.db.exec = originalExec;
+  store.close();
+
+  // Reopening finds the acknowledged job WITH its job.submitted event: the
+  // replay reuses the job and appends no second event, so an observer never
+  // sees an acknowledged job without a submitted event.
+  store = openWorkStore(directory);
+  const replay = store.submitJob(ALPHA_RUNNER, input);
+  assert.equal(replay.admission.duplicate, true);
+  const page = store.pollJobEvents(ALPHA_RUNNER, { jobId: replay.job.jobId });
+  assert.deepEqual(page.events.map(event => event.type), ['job.submitted']);
+  const rows = store.db.prepare(
+    'SELECT count(*) AS n FROM events WHERE job_id = ? AND type = \'job.submitted\''
+  ).get(replay.job.jobId);
+  assert.equal(rows.n, 1);
 });
 
 test('store clients get typed retryable database errors and cannot renew retired workspaces', t => {
@@ -1230,7 +1290,7 @@ test('store clients get typed retryable database errors and cannot renew retired
   const peer = openWorkStore(directory);
   t.after(() => { store.close(); peer.close(); });
   const box = reserve(store, ALPHA_OPERATOR, { requestId: 'box' });
-  const job = store.submitJob(ALPHA_OPERATOR, { requestId: 'job', workspaceId: box.workspaceId });
+  const { job } = store.submitJob(ALPHA_OPERATOR, { requestId: 'job', workspaceId: box.workspaceId });
   const lease = store.acquireLease(ALPHA_OPERATOR, { workspaceId: box.workspaceId });
   const ref = { sandboxId: box.sandboxId, generation: box.generation };
   store.db.exec('PRAGMA busy_timeout=0');
@@ -1250,7 +1310,7 @@ test('a legacy project journal migrates with explicit gaps and fences historical
   t.after(() => store.close());
   const { workspaceId } = reserve(store, ALPHA_RUNNER, { requestId: 'legacy' });
   const old = store.acquireLease(ALPHA_RUNNER, { workspaceId, holder: 'label' });
-  const job = store.submitJob(ALPHA_RUNNER, { workspaceId, requestId: 'job' });
+  const { job } = store.submitJob(ALPHA_RUNNER, { workspaceId, requestId: 'job' });
   for (let i = 0; i < 3; i++) store.appendEvent(ALPHA_RUNNER, { type: 'progress', jobId: job.jobId });
   store.db.exec(`DROP INDEX events_per_job;
     ALTER TABLE events DROP COLUMN job_seq;
@@ -1260,9 +1320,9 @@ test('a legacy project journal migrates with explicit gaps and fences historical
   store = openWorkStore(directory, { maxEvents: 2 });
   const page = store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId });
   assert.equal(page.gap, true);
-  assert.deepEqual(page.events.map(item => item.seq), [2, 3]);
+  assert.deepEqual(page.events.map(item => item.seq), [3, 4]);
   store.appendEvent(ALPHA_RUNNER, { type: 'progress', jobId: job.jobId });
-  assert.equal(store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId, afterSeq: 3 }).nextSeq, 4);
+  assert.equal(store.pollJobEvents(ALPHA_RUNNER, { jobId: job.jobId, afterSeq: 4 }).nextSeq, 5);
   assert.throws(() => store.validateLease(ALPHA_RUNNER, old), assertCode('lease_missing'));
   assert.ok(store.acquireLease(ALPHA_RUNNER, { workspaceId }).epoch > old.epoch);
 });

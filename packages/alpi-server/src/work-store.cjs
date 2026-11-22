@@ -2043,12 +2043,18 @@ class WorkStore {
    *
    * input: {requestId, workspaceId, payload?}
    *
-   * Returns a job receipt with a stable jobId and a persisted `sessionUuid`
-   * used for the native session. Replaying the same requestId/payload returns
-   * the same job in its current disposition; a changed payload raises
-   * `idempotency_conflict`. The receipt carries `duplicate: true` when it
-   * comes from an idempotent replay and `duplicate: false` on first
-   * admission.
+   * Returns { job, admission } where `job` is the persisted job receipt with
+   * a stable jobId and `sessionUuid` used for the native session, and
+   * `admission` describes how the call resolved: { duplicate: false,
+   * submittedEventSeq } on first admission, { duplicate: true,
+   * submittedEventSeq: null } on an idempotent replay; a changed payload
+   * raises `idempotency_conflict`.
+   *
+   * First admission also appends the `job.submitted` event inside the same
+   * BEGIN IMMEDIATE transaction that commits the job row, so an acknowledged
+   * job always has exactly one submitted event: a crash between the commit
+   * and this call returning cannot separate them, and a replay never appends
+   * a second event.
    */
   submitJob(principalInput, input) {
     this._ensureOpen();
@@ -2089,7 +2095,10 @@ class WorkStore {
           if (!row) {
             fail('store_error', 'Work store operation failed.');
           }
-          return { ...jobReceipt(row), duplicate: true };
+          return {
+            job: jobReceipt(row),
+            admission: { duplicate: true, submittedEventSeq: null },
+          };
         }
 
         const workspace = this._workspace(
@@ -2132,7 +2141,23 @@ class WorkStore {
           { jobId }
         );
 
-        return { ...jobReceipt(this._job(principal.project, jobId)), duplicate: false };
+        // The acknowledgement and its observer-visible submitted event commit
+        // atomically: one admission transaction, exactly one event.
+        const submittedEvent = this._appendEventInTransaction(principal, {
+          type: 'job.submitted',
+          sandboxId: null,
+          jobId,
+          cursor: null,
+          dataJson: '{}',
+        });
+
+        return {
+          job: jobReceipt(this._job(principal.project, jobId)),
+          admission: {
+            duplicate: false,
+            submittedEventSeq: submittedEvent.seq,
+          },
+        };
       });
     } catch (error) {
       throw translateError(error);
@@ -2238,6 +2263,97 @@ class WorkStore {
   }
 
   /**
+   * Append one event row inside an already-open write transaction.
+   *
+   * Shared core of `appendEvent` and job admission: admission must commit
+   * the job row and its `job.submitted` event atomically, so it calls this
+   * while holding its own transaction. Callers normalize inputs and own the
+   * transaction; this method validates references, maintains per-job and
+   * project sequence bookkeeping and prunes the retained window.
+   */
+  _appendEventInTransaction(principal, { type, sandboxId, jobId, cursor, dataJson }) {
+    if (sandboxId !== null && !this._activeSandbox(
+      principal.project,
+      sandboxId
+    )) {
+      notFound();
+    }
+    let jobSeq = null;
+    if (jobId !== null) {
+      const job = this._job(principal.project, jobId);
+      if (!job || (sandboxId !== null && this._sandbox(principal.project, sandboxId).workspace_id !== job.workspace_id)) notFound();
+      jobSeq = job.last_event_seq + 1;
+      this.db.prepare('UPDATE jobs SET last_event_seq = ? WHERE job_id = ?').run(jobSeq, jobId);
+    }
+
+    let meta = this.db
+      .prepare(
+        'SELECT first_seq, last_seq FROM event_meta WHERE project = ?'
+      )
+      .get(principal.project);
+    if (!meta) {
+      this.db
+        .prepare(
+          `INSERT INTO event_meta (project, first_seq, last_seq)
+           VALUES (?, 1, 0)`
+        )
+        .run(principal.project);
+      meta = { first_seq: 1, last_seq: 0 };
+    }
+
+    const seq = meta.last_seq + 1;
+    const nowMs = this._now();
+    this.db
+      .prepare(
+        `INSERT INTO events
+          (project, seq, type, sandbox_id, job_id, job_seq, upstream_cursor,
+           data_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        principal.project,
+        seq,
+        type,
+        sandboxId,
+        jobId,
+        jobSeq,
+        cursor,
+        dataJson,
+        nowMs
+      );
+
+    let firstSeq = meta.first_seq;
+    if (seq - firstSeq + 1 > this._maxEvents) {
+      const newFirst = seq - this._maxEvents + 1;
+      this.db
+        .prepare(
+          `DELETE FROM events
+            WHERE project = ? AND seq < ?`
+        )
+        .run(principal.project, newFirst);
+      firstSeq = newFirst;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE event_meta
+            SET first_seq = ?, last_seq = ?
+          WHERE project = ?`
+      )
+      .run(firstSeq, seq, principal.project);
+
+    return {
+      seq,
+      type,
+      sandboxId,
+      jobId,
+      cursor,
+      data: parseJson(dataJson, {}),
+      createdAt: nowMs,
+    };
+  }
+
+  /**
    * Append a project-scoped ordered event.
    *
    * input: {type, sandboxId?, jobId?, cursor?, data?}
@@ -2269,87 +2385,15 @@ class WorkStore {
     );
 
     try {
-      return transact(this.db, () => {
-        if (sandboxId !== null && !this._activeSandbox(
-          principal.project,
-          sandboxId
-        )) {
-          notFound();
-        }
-        let jobSeq = null;
-        if (jobId !== null) {
-          const job = this._job(principal.project, jobId);
-          if (!job || (sandboxId !== null && this._sandbox(principal.project, sandboxId).workspace_id !== job.workspace_id)) notFound();
-          jobSeq = job.last_event_seq + 1;
-          this.db.prepare('UPDATE jobs SET last_event_seq = ? WHERE job_id = ?').run(jobSeq, jobId);
-        }
-
-        let meta = this.db
-          .prepare(
-            'SELECT first_seq, last_seq FROM event_meta WHERE project = ?'
-          )
-          .get(principal.project);
-        if (!meta) {
-          this.db
-            .prepare(
-              `INSERT INTO event_meta (project, first_seq, last_seq)
-               VALUES (?, 1, 0)`
-            )
-            .run(principal.project);
-          meta = { first_seq: 1, last_seq: 0 };
-        }
-
-        const seq = meta.last_seq + 1;
-        const nowMs = this._now();
-        this.db
-          .prepare(
-            `INSERT INTO events
-              (project, seq, type, sandbox_id, job_id, job_seq, upstream_cursor,
-               data_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
-            principal.project,
-            seq,
-            type,
-            sandboxId,
-            jobId,
-            jobSeq,
-            cursor,
-            dataJson,
-            nowMs
-          );
-
-        let firstSeq = meta.first_seq;
-        if (seq - firstSeq + 1 > this._maxEvents) {
-          const newFirst = seq - this._maxEvents + 1;
-          this.db
-            .prepare(
-              `DELETE FROM events
-                WHERE project = ? AND seq < ?`
-            )
-            .run(principal.project, newFirst);
-          firstSeq = newFirst;
-        }
-
-        this.db
-          .prepare(
-            `UPDATE event_meta
-                SET first_seq = ?, last_seq = ?
-              WHERE project = ?`
-          )
-          .run(firstSeq, seq, principal.project);
-
-        return {
-          seq,
+      return transact(this.db, () =>
+        this._appendEventInTransaction(principal, {
           type,
           sandboxId,
           jobId,
           cursor,
-          data: parseJson(dataJson, {}),
-          createdAt: nowMs,
-        };
-      });
+          dataJson,
+        })
+      );
     } catch (error) {
       throw translateError(error);
     }
