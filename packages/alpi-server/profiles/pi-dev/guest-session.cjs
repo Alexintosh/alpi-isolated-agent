@@ -811,6 +811,11 @@ function createSupervisor(config) {
   };
   const ownershipPath = `${statePath}.owner`;
   const ambiguityPath = `${statePath}.ambiguous`;
+  const committedPath = `${statePath}.committed`;
+  // The newest generation whose state file, fence retirement, and directory
+  // entries were all proven durable. A state file newer than this record was
+  // never acknowledged as committed and must not be granted after a restart.
+  let lastCommittedGeneration = 0;
   let reclaimPath = null;
   let lockStartedAt = null;
   let guardStartedAt = null;
@@ -940,6 +945,7 @@ function createSupervisor(config) {
       sessionId,
       kind: operation,
       generation,
+      committedGeneration: lastCommittedGeneration,
       intent: `${operation} transition of guest supervisor session state`,
       recordedAt: nowIso(),
     }, null, 2);
@@ -987,12 +993,46 @@ function createSupervisor(config) {
       // Stage 3: the transition is durably committed; retire the fence.
       unlinkDurable(ambiguityPath);
     } catch (error) {
+      // The unlink may already have taken effect: the marker can be absent
+      // from the live namespace even though its removal was never proven
+      // durable. A missing marker alone must never authorize the newer state
+      // file, so first try to re-establish the fence durably.
+      try {
+        writeAtomic(ambiguityPath, marker, { requireDurableDirectory: true });
+      } catch {
+        // The same failing storage defeated the re-establishment too: the
+        // state is genuinely ambiguous. Keep the failure report; the
+        // committed-generation record written below (or its absence) keeps
+        // the newer state file from being granted after a restart.
+      }
       if (!storageFault) {
         recordStorageFault(operation, error);
       }
       throw new SupervisorError('state_write_failed', 'Guest supervisor transition marker could not be cleared.', {
         operation,
       });
+    }
+    try {
+      // Stage 4: record the generation whose state file and fence retirement
+      // are both durable. Until this record lands, a restart treats the state
+      // file as unverified even without an ambiguity marker, so a transition
+      // reported as failure (or a crash at this boundary) can never be granted.
+      writeAtomic(committedPath, JSON.stringify({
+        version: 1,
+        sessionId,
+        generation,
+        committedAt: nowIso(),
+      }, null, 2), { requireDurableDirectory: true });
+      lastCommittedGeneration = generation;
+    } catch (error) {
+      if (!storageFault) {
+        recordStorageFault(operation, error);
+      }
+      throw error instanceof SupervisorError
+        ? error
+        : new SupervisorError('state_write_failed', 'Guest supervisor committed generation could not be recorded.', {
+          operation,
+        });
     }
   }
 
@@ -2407,27 +2447,134 @@ function createSupervisor(config) {
   }
 
   /**
-   * Put a record captured by rename back at its public path. The restore
-   * uses link(), which never replaces an existing file: if another starter
-   * published at the public path while the record was captured, the captured
-   * record is left orphaned at its private path (inert) instead of being
-   * renamed over — or deleted from — the newer publication. Deleting or
-   * superseding a guard/lock published after our liveness observation is
-   * therefore impossible; the caller fails closed either way.
+   * Capture a private hard-link alias of the record at publicPath. link()
+   * copies the directory entry without removing it, so the public pathname
+   * never becomes vacant while a live record exists — unlike a rename-based
+   * capture, no third starter can publish into a capture window. Returns the
+   * alias path, or null when publicPath was already absent.
    */
-  function restoreCapturedRecord(capturedPath, publicPath) {
+  function captureRecordAlias(publicPath) {
+    const aliasPath = publicPath + '.' + process.pid + '.' +
+      crypto.randomBytes(6).toString('hex') + '.captured';
     try {
-      fs.linkSync(capturedPath, publicPath);
+      fs.linkSync(publicPath, aliasPath);
     } catch (error) {
       if (error && error.code === 'EEXIST') {
-        return;
+        // An alias name collision is practically impossible (pid + random
+        // suffix); retry with a fresh name instead of displacing anything.
+        return captureRecordAlias(publicPath);
+      }
+      if (error && error.code === 'ENOENT') {
+        return null;
       }
       throw error;
     }
+    return aliasPath;
+  }
+
+  /**
+   * Remove a private capture alias. The alias is a private name this
+   * supervisor created; removing it never touches the public pathname.
+   */
+  function discardCapturedAlias(aliasPath) {
     try {
-      fs.unlinkSync(capturedPath);
+      fs.unlinkSync(aliasPath);
     } catch {
-      // The public hard link carries the record; the private name is spare.
+      // The alias is private and inert either way.
+    }
+  }
+
+  /**
+   * Replace a record that was proven dead with our own record, without ever
+   * vacating the public pathname while it still names a live record:
+   *
+   * 1. Capture a private hard-link alias; the public pathname keeps naming
+   *    the observed record, so no third starter can publish into the capture.
+   * 2. Verify the alias is exactly the observed dead record.
+   * 3. Confirm the public pathname still resolves to the captured inode; a
+   *    replacement published in between is never displaced.
+   * 4. Run the caller's final ownership check, then remove the public name —
+   *    at that instant it provably names the dead record.
+   * 5. Publish our fully written record via link(), which is atomic: EEXIST
+   *    means another publisher won the vacancy and the caller fails closed.
+   *    A post-publish re-read and inode comparison must confirm the published
+   *    record is ours before this supervisor acts on it.
+   *
+   * The captured alias is always discarded; no captured record is ever
+   * restored, so an EEXIST restore can never orphan a live record.
+   *
+   * Residual window: two stale actors can both pass step 3 and race their
+   * unlinks, so one actor's unlink can remove the other's fresh publication.
+   * The displaced owner re-verifies record ownership before every destructive
+   * step and fails closed, so at most one actor ever proceeds and no live
+   * record is left orphaned while its owner acts on it.
+   *
+   * Returns "published" when our record is public and verified, "contested"
+   * when another publication owns the pathname (caller fails closed or
+   * retries), and "vanished" when the record disappeared before removal.
+   */
+  function replaceDeadRecord(publicPath, observed, replacementPayload, options = {}) {
+    const aliasPath = captureRecordAlias(publicPath);
+    if (!aliasPath) {
+      return 'vanished';
+    }
+    try {
+      const captured = readLockRecord(aliasPath);
+      if (!capturedRecordMatchesObserved(captured, observed)) {
+        // The pathname named a replacement, not the dead record observed.
+        return 'contested';
+      }
+      let publicStat;
+      try {
+        publicStat = fs.statSync(publicPath);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') {
+          return 'vanished';
+        }
+        throw error;
+      }
+      const aliasStat = fs.statSync(aliasPath);
+      if (publicStat.ino !== aliasStat.ino) {
+        // The public name was replaced between the capture and now.
+        return 'contested';
+      }
+      if (options.beforeRemove) {
+        options.beforeRemove();
+      }
+      try {
+        fs.unlinkSync(publicPath);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') {
+          return 'vanished';
+        }
+        throw error;
+      }
+      let publishedIno;
+      try {
+        publishedIno = publishExclusiveFile(publicPath, replacementPayload);
+      } catch (error) {
+        if (error && error.code === 'EEXIST') {
+          // Another publisher (a fresh starter or a competing recovery actor)
+          // won the vacancy. Never unlink or replace its record.
+          return 'contested';
+        }
+        throw error;
+      }
+      const current = readLockRecord(publicPath);
+      let stat;
+      try {
+        stat = fs.statSync(publicPath);
+      } catch {
+        return 'contested';
+      }
+      if (!lockRecordIdentifies(current) || stat.ino !== publishedIno) {
+        // The published record was displaced before we could verify it; the
+        // caller must not act on this publication.
+        return 'contested';
+      }
+      return 'published';
+    } finally {
+      discardCapturedAlias(aliasPath);
     }
   }
 
@@ -2449,11 +2596,13 @@ function createSupervisor(config) {
    * Serialize every reclamation decision behind a guard file published with
    * the same link-based protocol as the lock itself, so a guard record is
    * never observed partially written. A guard whose owner is provably dead
-   * (ESRCH) is taken over by capturing it with a rename — an atomic operation
-   * only one contender can win — and verifying the captured record against
-   * the dead one observed BEFORE publishing a replacement. If the pathname
-   * had come to name a newer guard, the captured record is restored intact
-   * and the takeover fails closed; it is never deleted or superseded.
+   * (ESRCH) is taken over with replaceDeadRecord: the public pathname never
+   * becomes vacant while the dead guard's record is captured, the captured
+   * alias is verified against the dead record observed BEFORE the public
+   * name is removed, and the replacement is published atomically with a
+   * post-publish ownership verification. If the pathname had come to name a
+   * newer guard, the alias is discarded and the takeover fails closed; a
+   * newer publication is never deleted or superseded.
    */
   function acquireRecoveryGuard() {
     const guardRecord = {
@@ -2478,47 +2627,16 @@ function createSupervisor(config) {
       if (liveness === 'unknown') {
         fail('lock_failed', 'Guest supervisor recovery guard is not verifiable.');
       }
-      const capturedPath = reclaimPath + '.' + process.pid + '.' +
-        crypto.randomBytes(6).toString('hex') + '.captured';
-      try {
-        fs.renameSync(reclaimPath, capturedPath);
-      } catch (error) {
-        if (error && error.code === 'ENOENT') {
-          continue;
-        }
-        fail('lock_failed', 'Guest supervisor recovery guard could not be recovered.');
-      }
-      const captured = readLockRecord(capturedPath);
-      if (!capturedRecordMatchesObserved(captured, existing)) {
-        // The pathname named a replacement guard, not the dead one observed.
-        restoreCapturedRecord(capturedPath, reclaimPath);
-        const replacement = readLockRecord(reclaimPath);
-        if (supervisorLiveness(replacement) === 'alive') {
-          fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
-        }
-        // The replacement guard is gone or dead again; retry the takeover.
-        continue;
-      }
-      if (createLockFile(reclaimPath, guardRecord)) {
-        // The captured record was verified dead; removing the private copy
-        // is safe.
-        try {
-          fs.unlinkSync(capturedPath);
-        } catch {
-          // The private copy is inert.
-        }
+      const outcome = replaceDeadRecord(reclaimPath, existing, JSON.stringify(guardRecord));
+      if (outcome === 'published') {
         return;
       }
-      try {
-        fs.unlinkSync(capturedPath);
-      } catch {
-        // The captured record was verified dead; the private copy is inert.
-      }
-      const current = readLockRecord(reclaimPath);
-      if (supervisorLiveness(current) === 'alive') {
-        fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
-      }
-      // The replacement guard is gone or dead again; retry the takeover.
+      // "contested": the pathname named a replacement guard, or another
+      // publisher won the vacancy. "vanished": the record disappeared before
+      // removal. Either way, re-read from the top of the loop: a live
+      // replacement fails closed there, a dead one is taken over, and an
+      // absent one is published by the fast path.
+      continue;
     }
   }
 
@@ -2572,52 +2690,33 @@ function createSupervisor(config) {
         }
         // The record was proven dead. Under the guard no protocol participant
         // can replace it legitimately. Re-read to confirm the identity, then
-        // capture the dead lock with a rename and verify the captured record
-        // at its private location before publishing the replacement: the
-        // capture is atomic, so a lock published after the liveness
-        // observation is never unlinked or superseded on the strength of a
-        // stale observation.
+        // replace it with replaceDeadRecord: the public pathname keeps naming
+        // the dead record while a private hard-link alias is captured and
+        // verified, the guard ownership is re-checked immediately before the
+        // public name is removed, and the replacement is published atomically
+        // with a post-publish ownership verification. The public name is never
+        // vacated by the capture itself, so a fresh starter cannot publish
+        // into a capture window, and no captured record is ever restored.
         const recheck = readLockRecord(lockPath);
         if (!lockRecordIdentifies(recheck) ||
           recheck.pid !== existing.pid || recheck.startedAt !== existing.startedAt) {
           fail('lock_busy', 'Guest supervisor lock changed during ownership recovery.');
         }
         verifyRecoveryGuardOwnership();
-        const capturedPath = lockPath + '.' + process.pid + '.' +
-          crypto.randomBytes(6).toString('hex') + '.captured';
-        try {
-          fs.renameSync(lockPath, capturedPath);
-        } catch (error) {
-          if (error && error.code === 'ENOENT') {
-            fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
-          }
-          fail('lock_failed', 'A stale guest supervisor lock could not be cleared.');
-        }
-        let capturedDead = false;
-        let published = false;
-        try {
-          const captured = readLockRecord(capturedPath);
-          if (!capturedRecordMatchesObserved(captured, existing)) {
-            // The pathname named a newer lock, not the dead one observed.
-            restoreCapturedRecord(capturedPath, lockPath);
-            fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
-          }
-          capturedDead = true;
-          verifyRecoveryGuardOwnership();
-          published = createLockFile(lockPath, lockRecord);
-        } finally {
-          // Only a captured record verified to be the observed dead lock is
-          // ever removed here; an unverified capture is left in place.
-          if (capturedDead) {
-            try {
-              fs.unlinkSync(capturedPath);
-            } catch {
-              // The private copy is inert.
-            }
-          }
-        }
-        if (!published) {
+        const outcome = replaceDeadRecord(lockPath, existing, JSON.stringify(lockRecord), {
+          beforeRemove: verifyRecoveryGuardOwnership,
+        });
+        if (outcome === 'contested') {
           fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+        }
+        if (outcome === 'vanished') {
+          // The dead record's public name disappeared after the capture. The
+          // guard is still ours, so absence proves no live owner: publish
+          // while the pathname is still vacant.
+          verifyRecoveryGuardOwnership();
+          if (!createLockFile(lockPath, lockRecord)) {
+            fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+          }
         }
       } else {
         // Absence proves no live owner. Publish while the guard still names
@@ -2675,6 +2774,9 @@ function createSupervisor(config) {
         fail('state_corrupt', 'Guest supervisor state has an invalid generation.');
       }
       assertNoAmbiguousTransition(loaded);
+      // The state is at or below the last verified committed generation, so
+      // this startup's own critical writes fence from there.
+      lastCommittedGeneration = loaded.generation;
       if (typeof loaded.paused !== 'boolean' || typeof loaded.status !== 'string') {
         fail('state_corrupt', 'Guest supervisor state has an invalid lifecycle.');
       }
@@ -2777,10 +2879,33 @@ function createSupervisor(config) {
    * not survive: the loaded generation is older than the fenced target (or a
    * fenced first create never produced a state file). That stale marker is
    * cleared durably and startup continues.
+   *
+   * The marker's absence alone is not authorization either: a marker can be
+   * absent because its retirement (unlink plus directory fsync) failed after
+   * the state rename, or because a crash landed on that boundary. The durable
+   * committed-generation record is only advanced after the state rename and
+   * the fence retirement are both proven durable, so a state file newer than
+   * that record is unverified and must be refused.
    */
   function assertNoAmbiguousTransition(loaded) {
     const ambiguity = readTransitionAmbiguity(ambiguityPath);
     if (!ambiguity) {
+      if (loaded) {
+        const committed = readCommittedGenerationRecord();
+        const committedGeneration = committed && !committed.invalid &&
+          Number.isSafeInteger(committed.generation)
+          ? committed.generation
+          : 0;
+        if (loaded.generation > committedGeneration) {
+          fail('cleanup_pending', 'Guest supervisor state is newer than the last verified committed generation; refusing to honor it.', {
+            cleanupPending: true,
+            unverifiedCommit: {
+              stateGeneration: loaded.generation,
+              committedGeneration,
+            },
+          });
+        }
+      }
       return;
     }
     const survived = ambiguity.invalid === true || (loaded
@@ -2800,6 +2925,34 @@ function createSupervisor(config) {
       });
     }
     unlinkDurable(ambiguityPath);
+  }
+
+  /**
+   * Read the durable record of the newest fully committed generation. A
+   * missing or unreadable record proves nothing was ever verified committed,
+   * which the caller treats as generation zero.
+   */
+  function readCommittedGenerationRecord() {
+    let raw;
+    try {
+      raw = fs.readFileSync(committedPath, 'utf8');
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        return null;
+      }
+      return { invalid: true };
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+        parsed.version === 1 && Number.isSafeInteger(parsed.generation) &&
+        parsed.generation >= 1) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to the invalid record below.
+    }
+    return { invalid: true };
   }
 
   function bindServer() {
