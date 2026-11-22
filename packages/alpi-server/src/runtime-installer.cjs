@@ -37,6 +37,17 @@ const MAX_PAX_BYTES = 1024 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 const LOCK_POLL_MS = 100;
 const LIST_LIMIT = 32;
+// Advisory disk admission. Extracted files are charged at whole filesystem
+// blocks plus a small per-file directory overhead; staging also carries a
+// bounded proportional overhead, metadata and a fixed headroom for selection
+// receipts and filesystem journal traffic. These are deliberately conservative
+// and are advisory against unrelated writers, not a hard quota.
+const DISK_BLOCK_BYTES = 4096;
+const DISK_FILE_OVERHEAD_BYTES = 512;
+const DISK_STAGING_OVERHEAD_RATIO = 0.05;
+const DISK_STAGING_OVERHEAD_MAX = 8 * 1024 * 1024;
+const DISK_METADATA_BYTES = 1024 * 1024;
+const DISK_ADMISSION_HEADROOM_BYTES = 16 * 1024 * 1024;
 const HOST_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -1334,9 +1345,9 @@ function makeGuardedFetch(manifest, fetchImpl) {
   };
 }
 
-async function ensureCachedArtifact({ cachePath, manifest, fetchImpl, signal }) {
+async function ensureCachedArtifact({ cachePath, manifest, fetchImpl, signal, knownValid = false }) {
   await ensurePrivateDir(path.dirname(cachePath), 0o700);
-  const valid = await cachedArtifactIsValid(cachePath, manifest, signal);
+  const valid = knownValid || (await cachedArtifactIsValid(cachePath, manifest, signal));
   if (!valid) {
     await removeInvalidCacheEntry(cachePath);
     await acquireArtifact({
@@ -1485,27 +1496,9 @@ async function withInstallLock(root, timeoutMs, signal, fn) {
   }
 }
 
-/**
- * Install the pinned BoxLite runtime (Iron proxy, Node SDK, and native addon)
- * beneath stateDir/runtimes. The only accepted artifacts are the trusted
- * manifests shipped with this package, or a trusted manifest object supplied
- * by an embedding caller. The function never accepts a URL or path from an
- * untrusted CLI caller.
- *
- * @param {object} options
- * @param {string} options.stateDir absolute private service state directory
- * @param {'boxlite'} [options.engine]
- * @param {'linux'} [options.platform]
- * @param {'x64'} [options.arch]
- * @param {AbortSignal} [options.signal]
- * @param {typeof fetch} [options.fetch] trusted fetch implementation
- * @param {object} [options.manifests] trusted manifest override for embedders/tests
- * @param {number} [options.lockTimeoutMs] trusted lock wait override for tests
- * @returns {Promise<object>} installed metadata with engine, versions, and paths
- */
-async function installRuntime(options = {}) {
+function validateRuntimeOptions(options, label) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
-    throw new TypeError('installRuntime options are required.');
+    throw new TypeError(`${label} options are required.`);
   }
   assertStateDirPath(options.stateDir);
   const engine = options.engine ?? ENGINE;
@@ -1532,25 +1525,135 @@ async function installRuntime(options = {}) {
   if (options.fetch !== undefined && typeof options.fetch !== 'function') {
     throw new TypeError('fetch must be a function.');
   }
+  if (options.statfs !== undefined && typeof options.statfs !== 'function') {
+    throw new TypeError('statfs must be a function.');
+  }
   const lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs < 0) {
     throw new TypeError('lockTimeoutMs must be a nonnegative integer.');
   }
+  const additionalBytes = options.additionalBytes ?? 0;
+  if (!Number.isSafeInteger(additionalBytes) || additionalBytes < 0) {
+    throw new TypeError('additionalBytes must be a nonnegative safe integer.');
+  }
+  return {
+    lockTimeoutMs,
+    signal: options.signal,
+    additionalBytes,
+    statfs: options.statfs,
+  };
+}
 
+function roundUpToBlock(bytes) {
+  return Math.ceil(bytes / DISK_BLOCK_BYTES) * DISK_BLOCK_BYTES;
+}
+
+/**
+ * Advisory requirement for the bytes this operation may add. Intact releases
+ * and verified cache entries are not charged because they are not rewritten.
+ * `additionalBytes` carries the caller's conservative estimate for optional
+ * callback and image preparation.
+ */
+function diskAdmissionBytes({ manifests, existingValid, cacheValid = {}, additionalBytes = 0 }) {
+  let required = DISK_ADMISSION_HEADROOM_BYTES + additionalBytes;
+  if (existingValid) return required;
+  let extracted = DISK_METADATA_BYTES;
+  for (const component of COMPONENT_ORDER) {
+    const manifest = manifests[component];
+    for (const file of manifest.files) {
+      extracted += roundUpToBlock(file.bytes) + DISK_FILE_OVERHEAD_BYTES;
+    }
+    if (!cacheValid[component]) required += manifest.bytes;
+  }
+  required +=
+    extracted +
+    Math.min(
+      Math.ceil(extracted * DISK_STAGING_OVERHEAD_RATIO),
+      DISK_STAGING_OVERHEAD_MAX
+    );
+  if (!Number.isSafeInteger(required)) {
+    fail('disk_admission_invalid', 'Runtime disk admission requirement is too large.');
+  }
+  return required;
+}
+
+function availableToUserBytes(stat) {
+  if (!stat || stat.bavail === undefined || stat.bsize === undefined) {
+    fail('disk_check_failed', 'Destination filesystem capacity is unavailable.');
+  }
+  let bavail;
+  let bsize;
+  try {
+    bavail = BigInt(stat.bavail);
+    bsize = BigInt(stat.bsize);
+  } catch {
+    fail('disk_check_failed', 'Destination filesystem capacity is invalid.');
+  }
+  if (bavail < 0n || bsize <= 0n) {
+    fail('disk_check_failed', 'Destination filesystem capacity is invalid.');
+  }
+  return bavail * bsize;
+}
+
+async function assertDiskAdmission({ root, required, statfs }) {
+  let stat;
+  try {
+    stat = await (statfs ?? fsp.statfs)(root, { bigint: true });
+  } catch (error) {
+    fail(
+      'disk_check_failed',
+      `Unable to read destination filesystem capacity (${error && error.code ? error.code : 'unknown'}).`
+    );
+  }
+  const available = availableToUserBytes(stat);
+  if (available < BigInt(required)) {
+    fail(
+      'insufficient_disk_space',
+      `Insufficient free space on the destination filesystem: about ${required} bytes are required and ${available} bytes are available to the service user. Capacity admission is advisory against unrelated writers.`
+    );
+  }
+  return { required, available };
+}
+
+/**
+ * Prepare a verified runtime candidate beneath stateDir/runtimes without
+ * changing the active/previous selection. Core artifacts are acquired and
+ * published under the serial install lock, and the candidate is fully verified
+ * against the trusted manifests before this function returns. Completed
+ * downloads and unselected verified candidates may remain on disk; the caller
+ * commits selection separately after any required callback or image work.
+ *
+ * @param {object} options same trusted options as installRuntime plus
+ * @param {number} [options.additionalBytes] conservative caller estimate for
+ *   optional callback/image preparation, charged during admission
+ * @param {Function} [options.statfs] test injection for filesystem capacity
+ * @returns {Promise<object>} verified candidate metadata with engine, versions, paths
+ */
+async function prepareRuntime(options = {}) {
+  const { lockTimeoutMs, signal, additionalBytes, statfs } =
+    validateRuntimeOptions(options, 'prepareRuntime');
   const manifests = await resolveManifests(options.manifests);
   const setId = computeSetId(manifests);
   const { root, runtimes } = await prepareStateDir(options.stateDir);
-  checkAbort(options.signal);
+  checkAbort(signal);
 
-  return withInstallLock(root, lockTimeoutMs, options.signal, async () => {
+  return withInstallLock(root, lockTimeoutMs, signal, async () => {
     await cleanStaging(runtimes);
     await cleanCacheTemps(runtimes);
-    await cleanSelectionTemps(runtimes);
     const current = await readSelection(root);
     const existing = await inspectRelease(root, setId, manifests);
     if (existing.valid) {
-      checkAbort(options.signal);
-      await selectSet(root, current, setId);
+      checkAbort(signal);
+      await assertDiskAdmission({
+        root,
+        required: diskAdmissionBytes({
+          manifests,
+          existingValid: true,
+          additionalBytes,
+        }),
+        statfs,
+      });
+      checkAbort(signal);
       return buildResult(root, existing.meta);
     }
     if (existing.exists) {
@@ -1564,16 +1667,41 @@ async function installRuntime(options = {}) {
     }
 
     const cachePaths = new Map();
+    const cacheValid = {};
     for (const component of COMPONENT_ORDER) {
       const manifest = manifests[component];
       const cachePath = path.join(runtimes, 'cache', manifest.sha256);
-      await ensureCachedArtifact({
+      cachePaths.set(component, cachePath);
+      cacheValid[component] = await cachedArtifactIsValid(
         cachePath,
         manifest,
+        signal
+      );
+    }
+
+    // Reject before any fetch or staging write when the destination cannot
+    // admit the incremental cache and extraction this operation would add.
+    await assertDiskAdmission({
+      root,
+      required: diskAdmissionBytes({
+        manifests,
+        existingValid: false,
+        cacheValid,
+        additionalBytes,
+      }),
+      statfs,
+    });
+    checkAbort(signal);
+
+    for (const component of COMPONENT_ORDER) {
+      const manifest = manifests[component];
+      await ensureCachedArtifact({
+        cachePath: cachePaths.get(component),
+        manifest,
         fetchImpl: options.fetch,
-        signal: options.signal,
+        signal,
+        knownValid: cacheValid[component],
       });
-      cachePaths.set(component, cachePath);
     }
 
     const stagingDirectory = path.join(
@@ -1591,7 +1719,7 @@ async function installRuntime(options = {}) {
           archivePath: cachePaths.get(component),
           manifest,
           destinationRoot,
-          signal: options.signal,
+          signal,
         });
       }
       const meta = buildMetadata(setId, manifests);
@@ -1603,12 +1731,104 @@ async function installRuntime(options = {}) {
       if (!verified.valid) {
         fail('runtime_corrupt', `Published runtime set ${setId} failed verification.`);
       }
-      checkAbort(options.signal);
-      await selectSet(root, current, setId);
+      checkAbort(signal);
       return buildResult(root, verified.meta);
     } finally {
       await fsp.rm(stagingDirectory, { recursive: true, force: true }).catch(() => {});
     }
+  });
+}
+
+/**
+ * Commit a prepared runtime candidate as the active selection exactly once.
+ * The candidate must still match the trusted release manifests and verify
+ * under the serial install lock. The final cancellation check happens after
+ * verification and immediately before the atomic selection write, so any
+ * failure or cancellation before this point leaves active/previous untouched.
+ *
+ * @param {object} options
+ * @param {string} options.stateDir
+ * @param {string} options.set prepared candidate set identifier
+ * @param {object} [options.manifests] trusted manifest override for embedders/tests
+ * @param {AbortSignal} [options.signal]
+ * @param {number} [options.lockTimeoutMs]
+ * @returns {Promise<object>} committed metadata with engine, versions, paths
+ */
+async function commitRuntimeSelection(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('commitRuntimeSelection options are required.');
+  }
+  assertStateDirPath(options.stateDir);
+  if (!isSafeSetId(options.set)) {
+    fail('invalid_options', 'A prepared runtime set identifier is required.');
+  }
+  if (options.signal !== undefined) {
+    if (
+      typeof options.signal !== 'object' ||
+      options.signal === null ||
+      typeof options.signal.aborted !== 'boolean'
+    ) {
+      throw new TypeError('signal must be an AbortSignal.');
+    }
+  }
+  const lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs < 0) {
+    throw new TypeError('lockTimeoutMs must be a nonnegative integer.');
+  }
+  const manifests = await resolveManifests(options.manifests);
+  const setId = computeSetId(manifests);
+  if (options.set !== setId) {
+    fail(
+      'runtime_untrusted',
+      'The prepared runtime set does not match the trusted release manifests.'
+    );
+  }
+  const { root, runtimes } = await prepareStateDir(options.stateDir);
+  checkAbort(options.signal);
+
+  return withInstallLock(root, lockTimeoutMs, options.signal, async () => {
+    await cleanSelectionTemps(runtimes);
+    const current = await readSelection(root);
+    const inspected = await inspectRelease(root, setId, manifests);
+    if (!inspected.valid) {
+      fail('runtime_corrupt', `Prepared runtime set ${setId} failed verification.`);
+    }
+    checkAbort(options.signal);
+    await selectSet(root, current, setId);
+    return buildResult(root, inspected.meta);
+  });
+}
+
+/**
+ * Install the pinned BoxLite runtime (Iron proxy, Node SDK, and native addon)
+ * beneath stateDir/runtimes. The only accepted artifacts are the trusted
+ * manifests shipped with this package, or a trusted manifest object supplied
+ * by an embedding caller. The function never accepts a URL or path from an
+ * untrusted CLI caller. It prepares a verified candidate and commits the
+ * selection once the candidate is complete.
+ *
+ * @param {object} options
+ * @param {string} options.stateDir absolute private service state directory
+ * @param {'boxlite'} [options.engine]
+ * @param {'linux'} [options.platform]
+ * @param {'x64'} [options.arch]
+ * @param {AbortSignal} [options.signal]
+ * @param {typeof fetch} [options.fetch] trusted fetch implementation
+ * @param {object} [options.manifests] trusted manifest override for embedders/tests
+ * @param {number} [options.lockTimeoutMs] trusted lock wait override for tests
+ * @param {number} [options.additionalBytes] conservative caller estimate for
+ *   optional callback/image preparation, charged during admission
+ * @param {Function} [options.statfs] test injection for filesystem capacity
+ * @returns {Promise<object>} installed metadata with engine, versions, and paths
+ */
+async function installRuntime(options = {}) {
+  const prepared = await prepareRuntime(options);
+  return commitRuntimeSelection({
+    stateDir: options.stateDir,
+    set: prepared.set,
+    manifests: options.manifests,
+    signal: options.signal,
+    lockTimeoutMs: options.lockTimeoutMs,
   });
 }
 
@@ -1690,7 +1910,12 @@ async function listRuntimes(options = {}) {
       );
     }
   );
-  const limited = records.slice(0, LIST_LIMIT);
+  // Inventory only reports sets named by the selection; a prepared but
+  // uncommitted candidate stays on disk without appearing here.
+  const selected = records.filter(
+    (record) => record.id === current.active || record.id === current.previous
+  );
+  const limited = selected.slice(0, LIST_LIMIT);
   const activeRecord = limited.find((record) => record.id === current.active) || null;
   const previousRecord = limited.find((record) => record.id === current.previous) || null;
   if (current.active && !activeRecord) {
@@ -1777,6 +2002,9 @@ async function verifyRuntime({ stateDir, set, manifests: suppliedManifests }) {
 module.exports = {
   RuntimeInstallerError,
   installRuntime,
+  prepareRuntime,
+  commitRuntimeSelection,
+  diskAdmissionBytes,
   listRuntimes,
   rollbackRuntime,
   verifyRuntime,

@@ -264,10 +264,48 @@ async function runRuntime(action, args) {
       const { loadHostProfiles } = require('../src/profile-catalog.cjs');
       profile = (await loadHostProfiles(values.profiles)).installedProfile(engine, values.profile);
     }
-    result = await installer.installRuntime({ stateDir, engine });
-    const { digest } = await require('../src/network/callback-install.cjs').ensureIronCallback(stateDir);
-    result.ironCallback = { digest };
-    if (profile) result.profile = await require('../src/profile-image.cjs').ensureImage({ stateDir, profile });
+    // Preparation, including the required callback and any explicitly requested
+    // image, runs against this exact candidate. Selection is committed once,
+    // after all of it succeeds and a final cancellation check passes.
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    process.on('SIGINT', abort);
+    process.on('SIGTERM', abort);
+    try {
+      const callback = require('../src/network/callback-install.cjs');
+      const images = require('../src/profile-image.cjs');
+      let additionalBytes = await callback.callbackAdmissionBytes(stateDir);
+      if (profile) additionalBytes += images.imageAdmissionBytes(profile);
+      const prepared = await installer.prepareRuntime({
+        stateDir,
+        engine,
+        signal: controller.signal,
+        additionalBytes,
+      });
+      const { digest } = await callback.ensureIronCallback(stateDir, {
+        signal: controller.signal,
+      });
+      let image;
+      if (profile) {
+        image = await images.ensureImage({
+          stateDir,
+          profile,
+          set: prepared.set,
+          signal: controller.signal,
+        });
+      }
+      controller.signal.throwIfAborted();
+      result = await installer.commitRuntimeSelection({
+        stateDir,
+        set: prepared.set,
+        signal: controller.signal,
+      });
+      result.ironCallback = { digest };
+      if (image) result.profile = image;
+    } finally {
+      process.off('SIGINT', abort);
+      process.off('SIGTERM', abort);
+    }
   } else if (action === 'rollback') {
     result = await installer.rollbackRuntime({ stateDir });
   } else {
@@ -296,6 +334,9 @@ function safeErrorMessage(error) {
     'PairingStoreError',
   ]);
   if (error.name === 'ProfileError' && error.code === 'profile_unavailable') return 'Profile unavailable. Configure a pinned image in the host profile catalog.';
+  if (error.name === 'RuntimeInstallerError' && error.code === 'insufficient_disk_space') {
+    return 'Insufficient free space for runtime installation; no selection was changed.';
+  }
   if (error.name === 'RuntimeInstallerError' && /^[a-z_]{1,64}$/.test(error.code)) {
     return 'Runtime operation failed (' + error.code + ').';
   }

@@ -11,6 +11,9 @@ const zlib = require('node:zlib');
 const {
   RuntimeInstallerError,
   installRuntime,
+  prepareRuntime,
+  commitRuntimeSelection,
+  diskAdmissionBytes,
   verifyRuntime,
   listRuntimes,
   rollbackRuntime,
@@ -1122,4 +1125,317 @@ test('reports a broken active selection to inventory and the doctor CLI', async 
   assert.equal(doctor.status, 1);
   assert.match(doctor.stderr, /runtime_corrupt/);
   assert.equal(doctor.stdout, '');
+});
+
+function statfsWithAvailable(bytes) {
+  return async () => ({ bavail: BigInt(bytes), bsize: 1n });
+}
+
+const PLENTIFUL_DISK = statfsWithAvailable(1n << 40n);
+
+test('prepare publishes a verified candidate without selecting it, then commits once', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'prepare'), 'state');
+  const release = makeRelease({ version: '0.1.0' });
+  const fixture = makeFetch(release.archives);
+
+  const prepared = await prepareRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: fixture.fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+
+  assertInstalledPaths(prepared, stateDir);
+  assert.deepEqual(await listRuntimes({ stateDir }), {
+    active: null,
+    previous: null,
+    runtimes: [],
+  });
+  assert.equal(releaseDirectories(stateDir).length, 1);
+  assert.deepEqual(stagingEntries(stateDir), []);
+
+  const committed = await commitRuntimeSelection({
+    stateDir,
+    set: prepared.set,
+    manifests: release.manifests,
+  });
+  assert.deepEqual(committed, prepared);
+  const inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, prepared.set);
+  assert.equal(inventory.previous, null);
+});
+
+test('precommit failures and cancellation leave active and previous unchanged', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'precommit'), 'state');
+  const firstRelease = makeRelease({ version: '0.1.0' });
+  const secondRelease = makeRelease({ version: '0.2.0' });
+  const first = await installRuntime({
+    stateDir,
+    manifests: firstRelease.manifests,
+    fetch: makeFetch(firstRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+  const second = await installRuntime({
+    stateDir,
+    manifests: secondRelease.manifests,
+    fetch: makeFetch(secondRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+
+  const badRelease = makeRelease({
+    version: '0.3.0',
+    manifestOverrides: { 'iron-proxy': { sha256: '0'.repeat(64) } },
+  });
+  await assert.rejects(
+    prepareRuntime({
+      stateDir,
+      manifests: badRelease.manifests,
+      fetch: makeFetch(badRelease.archives).fetch,
+      statfs: PLENTIFUL_DISK,
+    }),
+    /SHA-256 mismatch/
+  );
+  let inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, second.set);
+  assert.equal(inventory.previous.id, first.set);
+  assert.equal(releaseDirectories(stateDir).length, 2);
+  assert.deepEqual(stagingEntries(stateDir), []);
+
+  const thirdRelease = makeRelease({ version: '0.4.0' });
+  const prepared = await prepareRuntime({
+    stateDir,
+    manifests: thirdRelease.manifests,
+    fetch: makeFetch(thirdRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    commitRuntimeSelection({
+      stateDir,
+      set: prepared.set,
+      manifests: thirdRelease.manifests,
+      signal: controller.signal,
+    }),
+    (error) => error && error.name === 'AbortError'
+  );
+  inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, second.set);
+  assert.equal(inventory.previous.id, first.set);
+  assert.equal(releaseDirectories(stateDir).length, 3);
+});
+
+test('commit refuses a candidate that does not match the trusted manifests', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'commit-manifest'), 'state');
+  const firstRelease = makeRelease({ version: '0.1.0' });
+  const first = await installRuntime({
+    stateDir,
+    manifests: firstRelease.manifests,
+    fetch: makeFetch(firstRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+  const secondRelease = makeRelease({ version: '0.2.0' });
+  const prepared = await prepareRuntime({
+    stateDir,
+    manifests: secondRelease.manifests,
+    fetch: makeFetch(secondRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+
+  await assert.rejects(
+    commitRuntimeSelection({
+      stateDir,
+      set: prepared.set,
+      manifests: firstRelease.manifests,
+    }),
+    { code: 'runtime_untrusted' }
+  );
+  const inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, first.set);
+  assert.equal(inventory.previous, null);
+});
+
+test('commit and rollback serialize with concurrent installs without losing pointers', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'interleaved'), 'state');
+  const releases = ['0.1.0', '0.2.0', '0.3.0'].map((version) =>
+    makeRelease({ version })
+  );
+  const installed = [];
+  for (const release of releases) {
+    installed.push(
+      await installRuntime({
+        stateDir,
+        manifests: release.manifests,
+        fetch: makeFetch(release.archives).fetch,
+        statfs: PLENTIFUL_DISK,
+      })
+    );
+  }
+
+  const fourthRelease = makeRelease({ version: '0.4.0' });
+  const prepared = await prepareRuntime({
+    stateDir,
+    manifests: fourthRelease.manifests,
+    fetch: makeFetch(fourthRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+
+  const rolled = await rollbackRuntime({ stateDir });
+  assert.equal(rolled.set, installed[1].set);
+  let inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, installed[1].set);
+  assert.equal(inventory.previous.id, installed[2].set);
+
+  const committed = await commitRuntimeSelection({
+    stateDir,
+    set: prepared.set,
+    manifests: fourthRelease.manifests,
+  });
+  assert.equal(committed.set, prepared.set);
+  inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, prepared.set);
+  assert.equal(inventory.previous.id, installed[1].set);
+
+  const fifthRelease = makeRelease({ version: '0.5.0' });
+  const fifthPrepared = await prepareRuntime({
+    stateDir,
+    manifests: fifthRelease.manifests,
+    fetch: makeFetch(fifthRelease.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+  const [commitResult, installResult] = await Promise.all([
+    commitRuntimeSelection({
+      stateDir,
+      set: fifthPrepared.set,
+      manifests: fifthRelease.manifests,
+    }),
+    installRuntime({
+      stateDir,
+      manifests: fifthRelease.manifests,
+      fetch: makeFetch(fifthRelease.archives).fetch,
+      statfs: PLENTIFUL_DISK,
+    }),
+  ]);
+  assert.equal(commitResult.set, fifthPrepared.set);
+  assert.equal(installResult.set, fifthPrepared.set);
+
+  inventory = await listRuntimes({ stateDir });
+  assert.equal(inventory.active.id, fifthPrepared.set);
+  assert.ok(inventory.previous);
+  assert.notEqual(inventory.previous.id, inventory.active.id);
+  assert.ok(
+    [prepared.set, fifthPrepared.set].includes(inventory.previous.id)
+  );
+  for (const result of [...installed, committed, commitResult]) {
+    assert.ok(fs.statSync(result.paths.root).isDirectory());
+  }
+});
+
+test('disk admission rejects before acquisition and accepts sufficient capacity', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'admission'), 'state');
+  const release = makeRelease({ version: '0.1.0' });
+  const required = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: false,
+    cacheValid: {},
+  });
+  assert.ok(required > 0);
+
+  const rejected = makeFetch(release.archives);
+  await assert.rejects(
+    installRuntime({
+      stateDir,
+      manifests: release.manifests,
+      fetch: rejected.fetch,
+      statfs: statfsWithAvailable(required - 1),
+    }),
+    (error) =>
+      error instanceof RuntimeInstallerError &&
+      error.code === 'insufficient_disk_space'
+  );
+  assert.equal(rejected.requests.length, 0);
+  assert.deepEqual(releaseDirectories(stateDir), []);
+  assert.deepEqual(
+    fs.readdirSync(path.join(stateDir, 'runtimes', 'cache')),
+    []
+  );
+
+  const accepted = makeFetch(release.archives);
+  const result = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: accepted.fetch,
+    statfs: statfsWithAvailable(required),
+  });
+  assertInstalledPaths(result, stateDir);
+  assert.equal(accepted.requests.length, 3);
+});
+
+test('admission does not charge intact releases or verified cache entries', async (t) => {
+  const stateDir = path.join(tempDirectory(t, 'admission-reuse'), 'state');
+  const release = makeRelease({ version: '0.1.0' });
+  const installed = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: makeFetch(release.archives).fetch,
+    statfs: PLENTIFUL_DISK,
+  });
+
+  const intactRequired = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: true,
+  });
+  const offlineIntact = failingFetch();
+  const reinstalled = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: offlineIntact.fetch,
+    statfs: statfsWithAvailable(intactRequired),
+  });
+  assert.equal(offlineIntact.calls(), 0);
+  assert.equal(reinstalled.set, installed.set);
+
+  fs.rmSync(installed.paths.root, { recursive: true, force: true });
+  const cachedRequired = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: false,
+    cacheValid: Object.fromEntries(
+      COMPONENTS.map((component) => [component, true])
+    ),
+  });
+  const offlineCached = failingFetch();
+  const restored = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: offlineCached.fetch,
+    statfs: statfsWithAvailable(cachedRequired),
+  });
+  assert.equal(offlineCached.calls(), 0);
+  assert.equal(restored.set, installed.set);
+  assertInstalledPaths(restored, stateDir);
+
+  const additional = 64 * 1024 * 1024;
+  const additionalRequired = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: true,
+    additionalBytes: additional,
+  });
+  await assert.rejects(
+    installRuntime({
+      stateDir,
+      manifests: release.manifests,
+      fetch: failingFetch().fetch,
+      statfs: statfsWithAvailable(additionalRequired - 1),
+      additionalBytes: additional,
+    }),
+    { code: 'insufficient_disk_space' }
+  );
+  const withAdditional = await installRuntime({
+    stateDir,
+    manifests: release.manifests,
+    fetch: failingFetch().fetch,
+    statfs: statfsWithAvailable(additionalRequired),
+    additionalBytes: additional,
+  });
+  assert.equal(withAdditional.set, installed.set);
 });
