@@ -6,6 +6,13 @@
 // (the same stack the MCP bridge and CLI use):
 // - durable persistence: the acknowledged job survives a peer store handle
 //   and a full server restart on the same state directory;
+// - exactly-once admission events: an idempotent replay never appends a
+//   duplicate job.submitted event and concurrent duplicate submissions
+//   serialize to one job;
+// - role and route scoping: an observer cannot cancel a job, a body that
+//   repeats a path parameter is rejected, and a deleted sandbox refuses
+//   admission as not_found;
+// - the --allow-test-engines serve flag parses as a boolean CLI flag.
 // - explicit engine scoping: a missing engine is refused, an unknown engine
 //   is refused, a test-only engine is selectable only on a dev/test registry
 //   and never on the packaged production path, and a submission naming an
@@ -20,6 +27,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
+const { spawn } = require('node:child_process');
 
 const { startServer } = require('../packages/alpi-server/src/daemon.cjs');
 const { issuePairing } = require('../packages/alpi-server/src/admin-client.cjs');
@@ -257,6 +265,8 @@ test('packaged job submission is durable before ack, engine-scoped, and survives
   const page = await observer.requestResource('getEvents', { jobId: job.jobId, after: '0' });
   assert.equal(page.events[0].type, 'job.submitted');
   assert.equal(page.events[0].jobId, job.jobId);
+  // The replay above reused the receipt without appending another event.
+  assert.equal(page.events.filter(event => event.type === 'job.submitted').length, 1);
 
   // The acknowledged job survives a full server restart.
   await server.close();
@@ -320,4 +330,122 @@ test('a cancelled job releases its disposable workspace while the receipt stays 
   const receipt = await observer.requestResource('getJob', { jobId: job.jobId });
   assert.equal(receipt.disposition, 'cancelled');
   assert.equal(receipt.workspaceId, sandbox.workspaceId);
+
+  // A deleted sandbox refuses admission as not_found, whatever engine the
+  // request names.
+  await assert.rejects(
+    runner.requestResource('submitJob', { sandboxId: sandbox.sandboxId }, {
+      requestId: randomUUID(), engine: 'fixture', payload: { prompt: 'hi' },
+    }),
+    { code: 'HTTP_STATUS', statusCode: 404, resourceCode: 'not_found' }
+  );
+  await assert.rejects(
+    runner.requestResource('submitJob', { sandboxId: sandbox.sandboxId }, {
+      requestId: randomUUID(), engine: 'other', payload: { prompt: 'hi' },
+    }),
+    { code: 'HTTP_STATUS', statusCode: 404, resourceCode: 'not_found' }
+  );
+});
+
+test('an observer cannot cancel, duplicate route parameters are rejected, and concurrent duplicates serialize', async (t) => {
+  const stateDir = await tempStateDir(t, 'js-guard');
+  const engine = fixtureEngineAdapter();
+  const server = await startServer({
+    stateDir, port: 0, handleSignals: false,
+    openResources: (options) => openHostResources({
+      ...options,
+      engines: devTestRegistry(),
+      sandboxHost: {
+        resolveProfile: fixtureProfileResolver(),
+        withEngine: (_record, use) => use(engine),
+      },
+    }),
+  });
+  t.after(async () => { await server.close(); });
+  const runner = await enroll(stateDir, server, 'runner');
+  const observer = await enroll(stateDir, server, 'observer');
+
+  const sandbox = await runner.requestResource('createSandbox', {}, {
+    requestId: randomUUID(), engine: 'fixture', profile: 'dev',
+  });
+  const job = await runner.requestResource('submitJob', { sandboxId: sandbox.sandboxId }, {
+    requestId: randomUUID(), engine: 'fixture', payload: { prompt: 'hello' },
+  });
+
+  // The cancelJob route requires the runner role.
+  await assert.rejects(
+    observer.requestResource('cancelJob', { jobId: job.jobId }, {}),
+    { code: 'HTTP_STATUS', statusCode: 403, resourceCode: 'forbidden' }
+  );
+  // A body that repeats a path parameter is rejected the same way submitJob
+  // rejects it, instead of silently losing to the path value.
+  await assert.rejects(
+    runner.requestResource('cancelJob', { jobId: job.jobId }, { jobId: job.jobId }),
+    { code: 'HTTP_STATUS', statusCode: 400, resourceCode: 'invalid_input' }
+  );
+
+  // Concurrent duplicate submissions serialize on the durable admission
+  // transaction: every caller observes the same job and the stream records
+  // exactly one job.submitted event.
+  const requestId = randomUUID();
+  const submissions = await Promise.all(Array.from({ length: 5 }, () =>
+    runner.requestResource('submitJob', { sandboxId: sandbox.sandboxId }, {
+      requestId, engine: 'fixture', payload: { prompt: 'hello' },
+    })));
+  assert.equal(new Set(submissions.map(entry => entry.jobId)).size, 1);
+  const page = await observer.requestResource('getEvents', {
+    jobId: submissions[0].jobId, after: '0',
+  });
+  assert.equal(page.events.filter(event => event.type === 'job.submitted').length, 1);
+});
+
+test('--allow-test-engines is parsed as a boolean serve flag', async (t) => {
+  const bin = path.join(__dirname, '..', 'packages', 'alpi-server', 'bin', 'alpi-server.cjs');
+  const run = (args) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bin, ...args], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', code => resolve({ code, stderr }));
+  });
+  const placeholder = path.join(await fs.realpath(os.tmpdir()), 'unused-cli-state');
+
+  // Rejected flag forms exit with the CLI usage code before any server work.
+  const withValue = await run(['serve', '--allow-test-engines=false', '--state-dir', placeholder]);
+  assert.equal(withValue.code, 2);
+  assert.ok(withValue.stderr.includes('--allow-test-engines is a flag without a value.'));
+  const numericValue = await run(['serve', '--allow-test-engines=1', '--state-dir', placeholder]);
+  assert.equal(numericValue.code, 2);
+  const repeated = await run(['serve', '--allow-test-engines', '--allow-test-engines', '--state-dir', placeholder]);
+  assert.equal(repeated.code, 2);
+  assert.ok(repeated.stderr.includes('Duplicate option --allow-test-engines.'));
+  const stray = await run(['serve', '--allow-test-engines', 'stray', '--state-dir', placeholder]);
+  assert.equal(stray.code, 2);
+  assert.ok(stray.stderr.includes('serve accepts no positional arguments.'));
+
+  // The accepted flag form starts the server; SIGTERM shuts it down cleanly.
+  const stateDir = await tempStateDir(t, 'js-cli');
+  const child = spawn(process.execPath,
+    [bin, 'serve', '--allow-test-engines', '--state-dir', stateDir, '--port', '0'],
+    { stdio: ['ignore', 'ignore', 'pipe'] });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGTERM'); });
+  const stderr = await new Promise((resolve, reject) => {
+    let text = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+    child.stderr.on('data', chunk => {
+      text += chunk;
+      if (text.includes('alpi-server listening on')) {
+        clearTimeout(timer);
+        resolve(text);
+      }
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      reject(new Error('server exited before listening: ' + text));
+    });
+  });
+  assert.ok(stderr.includes('alpi-server listening on'));
+  child.kill('SIGTERM');
+  const exitCode = await new Promise(resolve => child.on('close', resolve));
+  assert.equal(exitCode, 0);
 });

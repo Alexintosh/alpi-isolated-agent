@@ -18,6 +18,9 @@
  * - The job row is committed durably in the work store before the submission
  *   is acknowledged, and the returned receipt is the persisted receipt. A
  *   restart on the same state directory finds the acknowledged job.
+ * - The `job.submitted` event is appended once per job, on the first
+ *   admission. An idempotent replay returns the persisted receipt without
+ *   appending another event.
  * - A job is scoped to the engine of its sandbox workspace. A submission that
  *   names a different engine than the workspace is refused.
  * - Workspaces are provisioned and released through the sandbox service; this
@@ -110,6 +113,12 @@ function createJobService(options = {}) {
     // Project-scoped: a cross-project sandbox is indistinguishable from a
     // missing one, and a deleted workspace cannot accept new jobs.
     const workspace = store.getSandbox(principalInput, sandboxId);
+    // getSandbox includes deleted rows so callers can read a terminal
+    // receipt; admission must refuse them as missing, whatever engine the
+    // request names.
+    if (workspace.deletedAt !== null) {
+      fail('not_found', 'The sandbox does not exist.');
+    }
     if (workspace.engine !== engine.id) {
       fail(
         'engine_identity_conflict',
@@ -127,12 +136,15 @@ function createJobService(options = {}) {
     });
 
     // The submission event gives observers a defined event cursor through the
-    // same packaged route. A replay after a partial failure reuses the same
-    // job id and converges on the same event stream.
-    store.appendEvent(principalInput, {
-      type: 'job.submitted',
-      jobId: job.jobId,
-    });
+    // same packaged route. It is appended exactly once, on the first
+    // admission of the job: an idempotent replay reuses the same job id and
+    // returns the persisted receipt without appending a duplicate event.
+    if (job.duplicate !== true) {
+      store.appendEvent(principalInput, {
+        type: 'job.submitted',
+        jobId: job.jobId,
+      });
+    }
     return job;
   }
 

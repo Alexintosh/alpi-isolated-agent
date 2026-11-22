@@ -2046,7 +2046,9 @@ class WorkStore {
    * Returns a job receipt with a stable jobId and a persisted `sessionUuid`
    * used for the native session. Replaying the same requestId/payload returns
    * the same job in its current disposition; a changed payload raises
-   * `idempotency_conflict`.
+   * `idempotency_conflict`. The receipt carries `duplicate: true` when it
+   * comes from an idempotent replay and `duplicate: false` on first
+   * admission.
    */
   submitJob(principalInput, input) {
     this._ensureOpen();
@@ -2087,7 +2089,7 @@ class WorkStore {
           if (!row) {
             fail('store_error', 'Work store operation failed.');
           }
-          return jobReceipt(row);
+          return { ...jobReceipt(row), duplicate: true };
         }
 
         const workspace = this._workspace(
@@ -2130,7 +2132,7 @@ class WorkStore {
           { jobId }
         );
 
-        return jobReceipt(this._job(principal.project, jobId));
+        return { ...jobReceipt(this._job(principal.project, jobId)), duplicate: false };
       });
     } catch (error) {
       throw translateError(error);

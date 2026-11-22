@@ -38,6 +38,15 @@ function publicEvents(page, after) {
 const lifecycleRoutes = new Set(['listSandboxes', 'getSandbox', 'createSandbox',
   'startSandbox', 'stopSandbox', 'deleteSandbox', 'exec']);
 
+// Route parameters come from the path; a body that repeats one is a client
+// error. The merge would let the path value win silently, so conflicts are
+// rejected before it, identically for every parameterised route.
+function rejectDuplicateRouteParams(request) {
+  if (Object.keys(request.params).some(key => Object.hasOwn(request.body, key))) {
+    throw Object.assign(new Error('Duplicate route parameter.'), { code: 'invalid_input' });
+  }
+}
+
 // The packaged production registry installs only verified production engine
 // factories and never allows test-only adapters. Dev/test hosts may supply
 // their own registry or enable the test gate explicitly.
@@ -107,9 +116,7 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
   async function execute(request) {
     const { name, principal, params } = request;
     if (lifecycleRoutes.has(name)) {
-      if (Object.keys(params).some(key => Object.hasOwn(request.body, key))) {
-        throw Object.assign(new Error('Duplicate route parameter.'), { code: 'invalid_input' });
-      }
+      rejectDuplicateRouteParams(request);
       const input = { ...request.body, ...params };
       const method = name === 'exec' ? 'execInSandbox' : name;
       if (name === 'exec' && (input.maxOutputBytes === undefined ||
@@ -150,11 +157,10 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
     }
     switch (name) {
       case 'submitJob':
-        if (Object.keys(params).some(key => Object.hasOwn(request.body, key))) {
-          throw Object.assign(new Error('Duplicate route parameter.'), { code: 'invalid_input' });
-        }
+        rejectDuplicateRouteParams(request);
         return publicJob(jobService.submitJob(principal, { ...request.body, ...params }));
       case 'cancelJob':
+        rejectDuplicateRouteParams(request);
         return publicJob(jobService.cancelJob(principal, { ...request.body, ...params }));
       case 'getJob':
         return publicJob(store.getJob(principal, params.jobId));
