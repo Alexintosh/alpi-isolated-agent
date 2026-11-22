@@ -9,7 +9,8 @@ const HELP = `Usage:
   alpi-server runtime rollback --state-dir DIR
   alpi-server runtime list --state-dir DIR
   alpi-server profiles list --config FILE --project PROJECT
-  alpi-server serve --state-dir DIR [--listen HOST] [--port PORT] [--origin URL] [--profiles FILE]
+  alpi-server serve --state-dir DIR [--listen HOST] [--port PORT] [--origin URL]
+                    [--profiles FILE] [--allow-test-engines]
   alpi-server pair issue --state-dir DIR --project PROJECT --role ROLE
                          [--expires 5m] [--origin URL]
   alpi-server clients list --state-dir DIR
@@ -32,6 +33,11 @@ Options:
   --origin URL       Explicit reachable HTTPS origin advertised in the pairing
                      envelope. Must use https and contain no credentials, path,
                      query or fragment.
+  --allow-test-engines
+                     Permit test-only engine adapters for job submission on
+                     this dev/test server. Production servers must not set
+                     this flag; test engines are never a fallback for an
+                     unavailable production engine.
   --expires DURATION Invitation lifetime, for example 30s, 5m or 1h. Maximum 5m.
   --help, -h         Show this help.
 
@@ -47,7 +53,7 @@ class CliUsageError extends Error {
   }
 }
 
-function parseOptions(args, allowed) {
+function parseOptions(args, allowed, booleanOptions = new Set()) {
   const values = Object.create(null);
   const positionals = [];
 
@@ -67,6 +73,16 @@ function parseOptions(args, allowed) {
       }
       if (!allowed.has(name)) {
         throw new CliUsageError(`Unknown option --${name}.`);
+      }
+      if (booleanOptions.has(name)) {
+        if (value !== undefined && value !== 'true') {
+          throw new CliUsageError(`--${name} is a flag without a value.`);
+        }
+        if (Object.hasOwn(values, name)) {
+          throw new CliUsageError(`Duplicate option --${name}.`);
+        }
+        values[name] = 'true';
+        continue;
       }
       if (value === undefined) {
         if (index + 1 >= args.length) {
@@ -143,7 +159,9 @@ function printHelp() {
 async function runServe(args) {
   const { values, positionals } = parseOptions(
     args,
-    new Set(['state-dir', 'listen', 'port', 'origin', 'profiles'])
+    new Set(['state-dir', 'listen', 'port', 'origin', 'profiles',
+      'allow-test-engines']),
+    new Set(['allow-test-engines'])
   );
   if (positionals.length > 0) {
     throw new CliUsageError('serve accepts no positional arguments.');
@@ -153,6 +171,7 @@ async function runServe(args) {
   const listenHost = values.listen === undefined ? '127.0.0.1' : values.listen;
   const port = parsePort(values.port);
   const origin = values.origin;
+  const allowTestEngines = values['allow-test-engines'] === 'true';
 
   const { startServer } = require('../src/daemon.cjs');
   const { listRuntimes } = require('../src/runtime-installer.cjs');
@@ -160,7 +179,7 @@ async function runServe(args) {
   const catalog = await loadHostProfiles(values.profiles);
   const { openHostResources } = require('../src/host-resources.cjs');
   const server = await startServer({
-    openResources: openHostResources,
+    openResources: (options) => openHostResources({ ...options, allowTestEngines }),
     runtimeInventory: async principal => {
       const { runtimes } = await listRuntimes({ stateDir });
       const configured = catalog.forProject(principal.project);

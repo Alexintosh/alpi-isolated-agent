@@ -91,6 +91,7 @@ function validateAdapter(adapter) {
  * @returns {{
  *   install(spec: { id: string, factory: Function, testOnly?: boolean }): { id: string, testOnly: boolean },
  *   has(id: string): boolean,
+ *   requireSelectable(id: string): { id: string, testOnly: boolean },
  *   list(): Array<{ id: string, testOnly: boolean }>,
  *   probe(id: string, adapterOptions?: unknown): Promise<{ engineId: string, available: boolean, version: string|null, capabilities: string[], reason?: string }>,
  *   select(spec: { engineId: string, capabilities?: string[], options?: unknown }): Promise<{ engineId: string, version: string|null, capabilities: string[], adapter: object }>,
@@ -156,6 +157,17 @@ function createEngineRegistry(options = {}) {
     has(id) {
       requireOpen();
       return entries.has(normalizeEngineId(id));
+    },
+
+    /**
+     * Check that an explicitly named engine may be selected without creating
+     * an adapter. Unknown engines and test-only engines on a production
+     * registry are refused here, so admission paths can gate an engine choice
+     * before any engine or workspace side effect.
+     */
+    requireSelectable(id) {
+      const entry = entryFor(id);
+      return Object.freeze({ id: entry.id, testOnly: entry.testOnly });
     },
 
     list() {

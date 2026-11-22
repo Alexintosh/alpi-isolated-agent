@@ -4,6 +4,9 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { createSandboxService, SandboxServiceError } = require('./sandbox-service.cjs');
 const { openArtifactStore } = require('./artifact-store.cjs');
 const { openWorkStore } = require('./work-store.cjs');
+const { createJobService } = require('./job-service.cjs');
+const { createEngineRegistry } = require('./engines/registry.cjs');
+const { createBoxliteAdapter } = require('./engines/boxlite.cjs');
 
 const maxEventPageBytes = 48 * 1024;
 
@@ -35,6 +38,20 @@ function publicEvents(page, after) {
 const lifecycleRoutes = new Set(['listSandboxes', 'getSandbox', 'createSandbox',
   'startSandbox', 'stopSandbox', 'deleteSandbox', 'exec']);
 
+// The packaged production registry installs only verified production engine
+// factories and never allows test-only adapters. Dev/test hosts may supply
+// their own registry or enable the test gate explicitly.
+function defaultEngineRegistry(allowTestEngines) {
+  const registry = createEngineRegistry({ allowTestAdapters: allowTestEngines === true });
+  if (allowTestEngines !== true) {
+    registry.install({
+      id: 'boxlite',
+      factory: (adapterOptions) => createBoxliteAdapter(adapterOptions),
+    });
+  }
+  return registry;
+}
+
 function publicSandbox(sandbox) {
   const { sandboxId, workspaceId, project, engine, engineVersion, profile, imageDigest, resources,
     generation, desiredState, observedState, recoveryRequired, retention, expiresAt, createdAt, updatedAt } = sandbox;
@@ -42,13 +59,14 @@ function publicSandbox(sandbox) {
     generation, desiredState, observedState, recoveryRequired, retention, expiresAt, createdAt, updatedAt };
 }
 
-async function openHostResources({ stateDir, limits, services = {}, sandboxHost, sweepIntervalMs = 60000 }) {
+async function openHostResources({ stateDir, limits, services = {}, sandboxHost, engines, allowTestEngines, sweepIntervalMs = 60000 }) {
   const store = openWorkStore(stateDir, { limits });
   const admission = new AsyncLocalStorage();
   const active = new Set();
   let closing = false;
   let artifacts;
   let sandbox;
+  let jobService;
   try {
     artifacts = openArtifactStore(stateDir);
     artifacts.collectGarbage();
@@ -63,6 +81,10 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
         const authenticate = admission.getStore();
         if (authenticate) authenticate();
       },
+    });
+    jobService = createJobService({
+      store,
+      engineRegistry: engines || defaultEngineRegistry(allowTestEngines),
     });
     await sandbox.recoverStartup();
   } catch (error) {
@@ -127,6 +149,13 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
       return artifacts[name](input);
     }
     switch (name) {
+      case 'submitJob':
+        if (Object.keys(params).some(key => Object.hasOwn(request.body, key))) {
+          throw Object.assign(new Error('Duplicate route parameter.'), { code: 'invalid_input' });
+        }
+        return publicJob(jobService.submitJob(principal, { ...request.body, ...params }));
+      case 'cancelJob':
+        return publicJob(jobService.cancelJob(principal, { ...request.body, ...params }));
       case 'getJob':
         return publicJob(store.getJob(principal, params.jobId));
       case 'getEvents': {
