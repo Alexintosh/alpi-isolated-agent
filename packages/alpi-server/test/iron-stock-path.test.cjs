@@ -139,8 +139,9 @@ test('stock Iron tunnel denies an ordinary request through the production callba
     environmentId: 'stock-path-evidence',
     ironBinary: verified.file,
     ironSha256: iron.IRON_SHA256,
-    // TEST-NET-1: the connector is never reachable; nothing may egress beyond
-    // loopback, and the policy callback owns the only allowed request shape.
+    // TEST-NET-1: the connector is never reachable. This test does not enforce
+    // kernel egress confinement; the policy callback owns the only allowed
+    // request shape, and the recorded evidence run uses --network none.
     connector: { address: '192.0.2.10', port: 8080 },
     model: 'stock-path-evidence',
     relay: {
@@ -181,7 +182,7 @@ test('stock Iron tunnel denies an ordinary request through the production callba
   const body = text.slice(headerEnd + 4);
   assert.equal(body, DENIED_BODY);
 
-  // (4) A graceful stop closes the tunnel listener for good.
+  // (4) A graceful stop closes the tunnel listener (observed at this instant).
   const ironPid = lifecycle.pid;
   assert.ok(Number.isInteger(ironPid) && ironPid > 0);
   const stopped = await lifecycle.stop();
