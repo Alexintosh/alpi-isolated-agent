@@ -168,6 +168,8 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
         const after = Number(params.after);
         return publicEvents(store.pollJobEvents(principal, { jobId: params.jobId, afterSeq: after }), after);
       }
+      case 'lookupJob':
+        return publicJob(jobService.lookupJob(principal, request.body));
       default:
         if (Object.hasOwn(services, name)) return services[name](request, store);
         throw Object.assign(new Error('Requested service unavailable.'),

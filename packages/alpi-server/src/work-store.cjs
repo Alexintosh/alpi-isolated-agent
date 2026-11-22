@@ -2225,6 +2225,39 @@ class WorkStore {
   }
 
   /**
+   * Resolve a job by the caller's own idempotency request key.
+   *
+   * This is the reconnect lookup for a client whose transport dropped before
+   * the submission receipt arrived: the read is scoped to the authenticated
+   * principal's own (project, clientId, requestId) key — the same key the
+   * admission idempotency receipt uses — so a fresh process reattaching with
+   * the persisted credential resolves exactly its own in-flight or recent
+   * job whatever its role, and can never reach another client's job. The
+   * read allocates nothing: idempotent resubmission stays the only way a
+   * missing job is created, and a resolved job is the same persisted receipt
+   * (same jobId, workspaceId and sessionUuid) the admission committed.
+   */
+  getJobByRequestId(principalInput, requestId) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    const id = normalizeText(requestId, MAX_REQUEST_ID_LENGTH);
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT * FROM jobs
+            WHERE project = ? AND client_id = ? AND request_id = ?`
+        )
+        .get(principal.project, principal.clientId, id);
+      if (!row) {
+        notFound();
+      }
+      return jobReceipt(row);
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
    * List jobs in the principal's project, oldest first.
    */
   listJobs(principalInput) {

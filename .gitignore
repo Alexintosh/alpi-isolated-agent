@@ -37,6 +37,7 @@ dist/
 !/tests/helpers/
 /tests/helpers/*
 !/tests/helpers/alpi-server-workflow.cjs
+!/tests/helpers/alpi-reconnect-client.cjs
 /guest/*
 !/guest/v1/
 !/guest/package-lock.json

@@ -30,6 +30,14 @@
  *   unknown or deleted sandbox as missing regardless of the engine named.
  * - Workspaces are provisioned and released through the sandbox service; this
  *   module never widens retention and never deletes a workspace itself.
+ * - Reconnection never duplicates admission. A fresh client process
+ *   reattaching with the persisted credential either replays the original
+ *   submission (the store's duplicate-admission branch returns the persisted
+ *   receipt) or resolves the job explicitly with lookupJob, a read scoped to
+ *   the caller's own (project, clientId, requestId) key. The lookup is
+ *   observer-safe: whatever the caller's role, only its own row is reachable
+ *   and nothing is allocated, so exactly one job row, one job.submitted
+ *   event, one workspace and one idempotency receipt ever exist.
  * - Cancellation only advances the durable disposition graph. Because this
  *   milestone dispatches nothing after acknowledgement, a cooperative cancel
  *   completes immediately without claiming any native termination.
@@ -148,7 +156,13 @@ function createJobService(options = {}) {
     return store.markJob(principalInput, { jobId, disposition: 'cancelled' });
   }
 
-  return Object.freeze({ submitJob, cancelJob });
+  function lookupJob(principalInput, input) {
+    const body = normalizeInputObject(input);
+    const requestId = normalizeRequestId(body.requestId);
+    return store.getJobByRequestId(principalInput, requestId);
+  }
+
+  return Object.freeze({ submitJob, cancelJob, lookupJob });
 }
 
 module.exports = {

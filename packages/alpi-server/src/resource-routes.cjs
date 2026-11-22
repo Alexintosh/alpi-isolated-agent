@@ -13,6 +13,7 @@ const operations = [
   ['submitJob', 'POST', 'sandboxes/:sandboxId/jobs', 'runner'],
   ['getJob', 'GET', 'jobs/:jobId', 'observer'],
   ['getEvents', 'GET', 'jobs/:jobId/events/:after', 'observer'],
+  ['lookupJob', 'POST', 'jobs/lookup', 'observer'],
   ['sendMessage', 'POST', 'jobs/:jobId/messages', 'runner'],
   ['cancelJob', 'POST', 'jobs/:jobId/cancel', 'runner'],
   ['beginUpload', 'POST', 'artifacts', 'runner'],
