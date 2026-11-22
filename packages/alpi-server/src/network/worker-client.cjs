@@ -580,9 +580,12 @@ function createWorkerClient(options = {}) {
       timer.unref?.();
       const streams = transport.streams
         ? {
+            // The encoded result budget is aggregate across stdout and
+            // stderr, matching the adapter's shared output collector budget
+            // (a combined stdout+stderr totalBytes bound), not per stream.
             limitBytes: transport.streams.limitBytes,
             seq: 0,
-            totals: { stdout: 0, stderr: 0 },
+            totalBytes: 0,
             buffers: { stdout: [], stderr: [] },
             chunkCount: 0,
             exceeded: false,
@@ -643,22 +646,25 @@ function createWorkerClient(options = {}) {
       rejectStreamBounded(current);
       return;
     }
-    const total = streams.totals[part] + decoded.length;
+    const total = streams.totalBytes + decoded.length;
     if (total > streams.limitBytes) {
       // Stop buffering but keep consuming frames so the final chunked result
       // keeps the protocol consistent; the connection stays usable.
       streams.exceeded = true;
       return;
     }
-    streams.totals[part] = total;
+    streams.totalBytes = total;
     streams.buffers[part].push(decoded);
   }
 
   function finalizeChunkedResult(current, result) {
     const streams = current.streams;
     if (!streams || !result || typeof result !== 'object' || Array.isArray(result)) {
+      // The request is still pending here; markUnavailable rejects it (and
+      // every other in-flight request) as an uncertain transport failure
+      // instead of leaving it pending past its deadline.
       markUnavailable(new Error('The worker chunked result was invalid.'));
-      return;
+      return false;
     }
     clearTimeout(current.timer);
     pendingRequests.delete(current.id);
@@ -669,13 +675,14 @@ function createWorkerClient(options = {}) {
           'The guest execution output exceeded the encoded result budget.'
         )
       );
-      return;
+      return true;
     }
     current.resolve({
       ...result,
       stdout: Buffer.concat(streams.buffers.stdout).toString('utf8'),
       stderr: Buffer.concat(streams.buffers.stderr).toString('utf8'),
     });
+    return true;
   }
 
   async function verifyWorkerIdentity(check, handshake) {
@@ -872,15 +879,24 @@ function createWorkerClient(options = {}) {
           handleStreamFrame(current, message);
           continue;
         }
-        clearTimeout(current.timer);
-        pendingRequests.delete(message.id);
         if (message.ok === true) {
           if (message.chunked === true) {
-            finalizeChunkedResult(current, message.result);
+            // Validate the terminator before removing the request: an
+            // invalid chunked result is a protocol failure and must settle
+            // the operation instead of disabling its deadline.
+            if (finalizeChunkedResult(current, message.result) === false) {
+              // markUnavailable destroyed the socket; abandon this attempt.
+              abandonAttempt();
+              return;
+            }
           } else {
+            clearTimeout(current.timer);
+            pendingRequests.delete(message.id);
             current.resolve(message.result);
           }
         } else {
+          clearTimeout(current.timer);
+          pendingRequests.delete(message.id);
           current.reject(
             new WorkerClientError(
               message.error && message.error.code ? message.error.code : 'worker_error',
@@ -1139,7 +1155,9 @@ function createWorkerClient(options = {}) {
         // The exec transport deadline must cover the validated execution and
         // cleanup budget of the command itself; every other control request
         // keeps the default request bound. The stream state carries the
-        // encoded result budget used by the chunked large-result transport.
+        // encoded result budget used by the chunked large-result transport;
+        // that budget is aggregate across stdout and stderr, matching the
+        // adapter's shared output collector budget.
         const requestedTimeout = boundedSpec.timeoutMs;
         const executionTimeoutMs =
           Number.isSafeInteger(requestedTimeout) &&

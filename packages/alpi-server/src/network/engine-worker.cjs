@@ -1004,9 +1004,13 @@ function createEngineWorker(options = {}) {
 
   // Large exec results must not be serialized into one JSON line: the owner
   // frame bound would destroy the control connection for ordinary output.
-  // This chunked path is used only for exec results that exceed one chunk;
+  // This chunked path is used only for exec results that exceed one chunk or
+  // whose fully encoded single frame would exceed the owner frame bound;
   // ordinary small results keep the single-frame response. Writes honor
-  // socket backpressure and never reissue a chunk once sent.
+  // socket backpressure and never reissue a chunk once sent. The transport
+  // bound here is per stream (MAX_EXEC_OUTPUT_BYTES on the wire); the
+  // per-command output budget itself is aggregate across stdout and stderr
+  // and is enforced by the adapter's shared output collector, not here.
   function writeFrame(socket, frame) {
     return new Promise((resolve) => {
       if (!socket || socket.destroyed) {
@@ -1048,10 +1052,18 @@ function createEngineWorker(options = {}) {
     }
     const stdout = typeof payload.stdout === 'string' ? payload.stdout : '';
     const stderr = typeof payload.stderr === 'string' ? payload.stderr : '';
-    return (
+    if (
       Buffer.byteLength(stdout, 'utf8') > EXEC_CHUNK_BYTES ||
       Buffer.byteLength(stderr, 'utf8') > EXEC_CHUNK_BYTES
-    );
+    ) {
+      return true;
+    }
+    // Raw byte length alone is not enough: JSON escape expansion can push a
+    // result whose raw output is within the chunk budget past the owner frame
+    // bound, which would destroy the control connection. Measure the complete
+    // encoded success frame before taking the single-frame path.
+    const encodedFrame = `${JSON.stringify({ id: 0, ok: true, result: payload })}\n`;
+    return Buffer.byteLength(encodedFrame, 'utf8') > MAX_FRAME_BYTES;
   }
 
   async function sendChunkedExecResult(socket, id, payload) {
@@ -1112,7 +1124,7 @@ function createEngineWorker(options = {}) {
     return { ok: false, error: { code, message } };
   }
 
-  async function handleOperation(message, signal) {
+  async function handleOperation(message, signal, receivedEpoch) {
     requireOpen();
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       fail('invalid_request', 'A bounded worker request is required.');
@@ -1298,7 +1310,13 @@ function createEngineWorker(options = {}) {
         ) {
           fail('forward_denied', 'No fresh owned-shim proof is available.');
         }
-        const epoch = fenceEpoch;
+        // Admission is bound to the epoch captured when this frame was
+        // received, not when the queued operation dispatches: a fence or
+        // close arriving while this open waits in the lifecycle queue
+        // invalidates the queued admission. Opens received after the fence
+        // capture the new epoch, so later explicitly authorized fresh
+        // openings are not affected.
+        const epoch = Number.isSafeInteger(receivedEpoch) ? receivedEpoch : fenceEpoch;
         const admitted = () => epoch === fenceEpoch && !closed && !generationExpired && !signal.aborted;
         let verified;
         try {
@@ -1408,7 +1426,7 @@ function createEngineWorker(options = {}) {
     }
   }
 
-  async function handleMessage(message, socket, signal) {
+  async function handleMessage(message, socket, signal, receivedEpoch) {
     if (owner !== socket || socket.destroyed || signal.aborted) fail('worker_unavailable', 'Control owner disconnected.');
     if (message && message.op === 'hello') {
       if (helloDone) {
@@ -1447,7 +1465,7 @@ function createEngineWorker(options = {}) {
     if (!helloDone) {
       fail('handshake_required', 'The control handshake must complete first.');
     }
-    return handleOperation(message, signal);
+    return handleOperation(message, signal, receivedEpoch);
   }
 
   function onConnection(socket) {
@@ -1505,10 +1523,14 @@ function createEngineWorker(options = {}) {
           return;
         }
         if (++queued > 64) { socket.destroy(); return; }
+        // Bind admission identity at receipt: an operation queued behind a
+        // long-running request must observe the fence epoch as of the moment
+        // its frame arrived, not when it finally dispatches.
+        const receivedEpoch = fenceEpoch;
         const respond = async () => {
           let payload;
           try {
-            payload = await handleMessage(message, socket, controller.signal);
+            payload = await handleMessage(message, socket, controller.signal, receivedEpoch);
           } catch (error) {
             payload = errorPayload(error);
           }

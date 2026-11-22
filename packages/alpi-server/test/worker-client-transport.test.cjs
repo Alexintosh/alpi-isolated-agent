@@ -357,6 +357,103 @@ async function createOwnedRef(client) {
 }
 
 // ---------------------------------------------------------------------------
+// Malformed-peer fixture: a local fake control peer that can inject arbitrary
+// response frames. Used only for protocol-failure regressions; the real
+// worker never produces these frames.
+// ---------------------------------------------------------------------------
+
+const FAKE_HANDSHAKE_RESULT = {
+  protocolVersion: 1,
+  workerVersion: 1,
+  networkMode: 'boundary',
+  allocationId: UUID_A,
+  launchGeneration: 1,
+  pid: process.pid,
+  uid: currentUid(),
+  netnsInode: 4026532001,
+  interfaces: ['lo'],
+  tunnelPort: 41000,
+};
+
+async function startFakeWorker(t, respond) {
+  const root = makeTempDirectory(t);
+  const socketPath = path.join(root, 'fake-worker.sock');
+  const server = net.createServer((socket) => {
+    socket.setEncoding('utf8');
+    let buffer = '';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+        if (!line) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          socket.destroy();
+          return;
+        }
+        if (message.op === 'hello') {
+          socket.write(`${JSON.stringify({ id: null, ok: true, result: FAKE_HANDSHAKE_RESULT })}\n`);
+          continue;
+        }
+        respond(message, socket);
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  fs.chmodSync(socketPath, 0o600);
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+  });
+  return { server, socketPath };
+}
+
+async function setupFakeClient(t, socketPath) {
+  const { client, state } = makeSystemctl(UUID_A);
+  const clientApi = createWorkerClient({
+    allocationId: UUID_A,
+    launchGeneration: 1,
+    controlSocketPath: socketPath,
+    token: TOKEN,
+    serviceUid: currentUid(),
+    systemctl: client,
+    proc: makeProcEvidence(),
+    net: makeNetEvidence(),
+    heartbeatIntervalMs: 60_000,
+    startTimeoutMs: 3000,
+    stopTimeoutMs: 3000,
+    connectRetryMs: 50,
+  });
+  t.after(() => {
+    try {
+      clientApi.close();
+    } catch {}
+  });
+  await clientApi.start();
+  return { client: clientApi, systemctlState: state };
+}
+
+async function settleWithin(promise, timeoutMs) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ settled: false }), timeoutMs);
+  });
+  const outcome = await Promise.race([
+    promise.then(
+      (value) => ({ settled: true, value }),
+      (error) => ({ settled: true, error })
+    ),
+    timeout,
+  ]);
+  clearTimeout(timer);
+  return outcome;
+}
+
+// ---------------------------------------------------------------------------
 // B5: connection lifecycle and handshake recovery
 // ---------------------------------------------------------------------------
 
@@ -512,6 +609,29 @@ test('small exec results stay ordinary single-frame responses', async (t) => {
   assert.equal(client.connected, true);
 });
 
+test('short escaped exec output at the raw chunk threshold still recovers exactly and keeps the connection', async (t) => {
+  const adapter = makeAdapter();
+  // Both streams sit exactly at the 32 KiB raw threshold, but JSON escaping
+  // of NUL bytes expands the encoded success frame far past the owner frame
+  // bound. The framing decision must be made on encoded size.
+  const stdout = '\u0000'.repeat(32 * 1024);
+  const stderr = '\u0000'.repeat(32 * 1024);
+  adapter.exec = async () => ({ exitCode: 0, stdout, stderr, truncated: false, timedOut: false, cancelled: false });
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const ref = await createOwnedRef(client);
+
+  const result = await client.engine.exec(ref, { argv: ['nul'], timeoutMs: 30_000 });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, stdout);
+  assert.equal(result.stderr, stderr);
+  assert.equal(client.connected, true, 'the owner connection survived the escaped result');
+  assert.equal((await client.engine.inspect(ref)).nativeId, 'native-1');
+});
+
 test('escaped oversized exec results round-trip through ordered chunks without dropping the connection', async (t) => {
   const adapter = makeAdapter();
   // Quotes force JSON escaping that would blow the single-line frame bound,
@@ -538,7 +658,10 @@ test('escaped oversized exec results round-trip through ordered chunks without d
 test('the maximum accepted exec output round-trips through chunks', async (t) => {
   const adapter = makeAdapter();
   const stdout = 'a'.repeat(8 * 1024 * 1024);
-  const stderr = 'b'.repeat(8 * 1024 * 1024);
+  // The exec output budget is aggregate across stdout and stderr (matching
+  // the BoxLite collector's shared totalBytes budget), so the maximum
+  // single-stream round-trip uses the entire budget on stdout.
+  const stderr = '';
   adapter.exec = async () => ({ exitCode: 0, stdout, stderr, truncated: false, timedOut: false, cancelled: false });
   const setup = await setupWorker(t, { adapter });
   const { client } = await setupClient(t, setup, {
@@ -556,9 +679,11 @@ test('the maximum accepted exec output round-trips through chunks', async (t) =>
   assert.equal(client.connected, true);
 });
 
-test('a slow reader receives the complete chunked result once it drains', async (t) => {
+test('a blocked writer does not advance until the paused reader drains', async (t) => {
   const adapter = makeAdapter();
-  const stdout = 'x'.repeat(1_500_000) + '\u{1F680}'.repeat(1_000);
+  // 8 MiB cannot fit in socket buffers, so a paused reader forces the
+  // worker's chunked writer to block on real backpressure.
+  const stdout = 'x'.repeat(8 * 1024 * 1024);
   adapter.exec = async () => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, cancelled: false });
   const setup = await setupWorker(t, { adapter });
   const { client } = await setupClient(t, setup, {
@@ -567,19 +692,176 @@ test('a slow reader receives the complete chunked result once it drains', async 
   await client.start();
   const ref = await createOwnedRef(client);
 
+  // Pause the reader before dispatch so the writer actually blocks instead
+  // of completing the transfer while the test is setting up a pause.
+  client.socket.pause();
+  let settled = false;
   const execPromise = client.engine.exec(ref, {
     argv: ['big'],
     timeoutMs: 30_000,
-    maxOutputBytes: 2 * 1024 * 1024,
-  });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  client.socket.pause();
-  await new Promise((resolve) => setTimeout(resolve, 200));
+    maxOutputBytes: 8 * 1024 * 1024,
+  }).then(
+    (value) => {
+      settled = true;
+      return value;
+    },
+    (error) => {
+      settled = true;
+      throw error;
+    }
+  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(settled, false, 'the exec completed while the reader was paused; no real backpressure was established');
+
   client.socket.resume();
   const result = await execPromise;
   assert.equal(result.stdout, stdout);
   assert.equal(client.connected, true);
+});
+
+test('a disconnect while the chunked writer is blocked settles the exec as unverified', async (t) => {
+  const adapter = makeAdapter();
+  const stdout = 'x'.repeat(8 * 1024 * 1024);
+  adapter.exec = async () => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, cancelled: false });
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const ref = await createOwnedRef(client);
+
+  client.socket.pause();
+  const execPromise = client.engine.exec(ref, {
+    argv: ['big'],
+    timeoutMs: 30_000,
+    maxOutputBytes: 8 * 1024 * 1024,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(client.connected, true, 'the exec is still waiting behind the blocked writer');
+
+  client.socket.destroy();
+  await expectCode(execPromise, 'engine_termination_unverified');
+});
+
+test('the exec output budget is shared across stdout and stderr', async (t) => {
+  const adapter = makeAdapter();
+  const stdout = 'a'.repeat(6 * 1024 * 1024);
+  const stderr = 'b'.repeat(3 * 1024 * 1024);
+  adapter.exec = async (ref, spec) =>
+    spec.argv[0] === 'mixed'
+      ? { exitCode: 0, stdout, stderr, truncated: false, timedOut: false, cancelled: false }
+      : { exitCode: 0, stdout: 'ok', stderr: '', truncated: false, timedOut: false, cancelled: false };
+  const setup = await setupWorker(t, { adapter });
+  const { client } = await setupClient(t, setup, {
+    clientOptions: { heartbeatIntervalMs: 60_000 },
+  });
+  await client.start();
+  const ref = await createOwnedRef(client);
+
+  // 6 MiB + 3 MiB exceeds the shared 8 MiB budget even though each stream
+  // stays within it individually.
+  await expectCode(
+    client.engine.exec(ref, {
+      argv: ['mixed'],
+      timeoutMs: 30_000,
+      maxOutputBytes: 8 * 1024 * 1024,
+    }),
+    'output_limit_exceeded'
+  );
+  assert.equal(client.connected, true);
+  const small = await client.engine.exec(ref, { argv: ['echo', 'hello'], timeoutMs: 30_000 });
+  assert.equal(small.stdout, 'ok');
+});
+
+// ---------------------------------------------------------------------------
+// Protocol failures on injected malformed chunked responses: every invalid
+// terminator must settle the pending operation instead of hanging it.
+// ---------------------------------------------------------------------------
+
+test('an invalid chunked terminator settles the exec as an uncertain failure', async (t) => {
+  const { socketPath } = await startFakeWorker(t, (message, socket) => {
+    if (message.op !== 'exec') return;
+    socket.write(`${JSON.stringify({
+      id: message.id,
+      part: 'stdout',
+      seq: 0,
+      data: Buffer.from('partial').toString('base64'),
+    })}\n`);
+    socket.write(`${JSON.stringify({ id: message.id, ok: true, result: null, chunked: true })}\n`);
+  });
+  const { client } = await setupFakeClient(t, socketPath);
+  const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1`, nativeId: 'native-1' };
+
+  const outcome = await settleWithin(
+    client.engine.exec(ref, { argv: ['broken'], timeoutMs: 30_000 }),
+    1000
+  );
+  assert.equal(outcome.settled, true, 'the exec promise must not hang on an invalid terminator');
+  assert.equal(outcome.error.code, 'engine_termination_unverified');
+  assert.equal(client.connected, false);
+});
+
+test('a chunked terminator on a request without stream state settles as a protocol failure', async (t) => {
+  const { socketPath } = await startFakeWorker(t, (message, socket) => {
+    if (message.op !== 'inspect') return;
+    socket.write(`${JSON.stringify({
+      id: message.id,
+      ok: true,
+      result: { nativeId: 'native-1' },
+      chunked: true,
+    })}\n`);
+  });
+  const { client } = await setupFakeClient(t, socketPath);
+  const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1`, nativeId: 'native-1' };
+
+  const outcome = await settleWithin(client.engine.inspect(ref), 1000);
+  assert.equal(outcome.settled, true, 'the inspect promise must not hang on a spurious chunked terminator');
+  assert.equal(outcome.error.code, 'worker_unavailable');
+  assert.equal(client.connected, false);
+});
+
+test('a chunk sequence violation settles the exec and drops the connection', async (t) => {
+  const { socketPath } = await startFakeWorker(t, (message, socket) => {
+    if (message.op !== 'exec') return;
+    socket.write(`${JSON.stringify({
+      id: message.id,
+      part: 'stdout',
+      seq: 7,
+      data: Buffer.from('out-of-order').toString('base64'),
+    })}\n`);
+  });
+  const { client } = await setupFakeClient(t, socketPath);
+  const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1`, nativeId: 'native-1' };
+
+  const outcome = await settleWithin(
+    client.engine.exec(ref, { argv: ['disordered'], timeoutMs: 30_000 }),
+    1000
+  );
+  assert.equal(outcome.settled, true);
+  assert.equal(outcome.error.code, 'engine_termination_unverified');
+  assert.equal(client.connected, false);
+});
+
+test('a malformed chunk marker settles the exec and drops the connection', async (t) => {
+  const { socketPath } = await startFakeWorker(t, (message, socket) => {
+    if (message.op !== 'exec') return;
+    socket.write(`${JSON.stringify({
+      id: message.id,
+      part: 'stdout',
+      seq: 0,
+      data: '%%%not-canonical-base64',
+    })}\n`);
+  });
+  const { client } = await setupFakeClient(t, socketPath);
+  const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1`, nativeId: 'native-1' };
+
+  const outcome = await settleWithin(
+    client.engine.exec(ref, { argv: ['garbled'], timeoutMs: 30_000 }),
+    1000
+  );
+  assert.equal(outcome.settled, true);
+  assert.equal(outcome.error.code, 'engine_termination_unverified');
+  assert.equal(client.connected, false);
 });
 
 test('output beyond the encoded budget yields an explicit bounded-limit result and keeps the connection', async (t) => {

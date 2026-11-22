@@ -1537,6 +1537,128 @@ test('an explicit fence arriving during a long exec is applied promptly', async 
   await fencePromise;
 });
 
+test('a queued open received before a fence cannot reopen forwarding after the fence is acknowledged', async (t) => {
+  const adapter = makeAdapter();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  adapter.exec = async () => {
+    entered.resolve();
+    await release.promise;
+    return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false, timedOut: false, cancelled: false };
+  };
+  const setup = await setupWorker(t, { adapter });
+
+  // A single raw owner connection with one frame reader, mirroring the
+  // chunked-transport test: each nextFrame() await shifts one response frame.
+  const socket = net.connect({ path: setup.config.controlSocketPath });
+  socket.setEncoding('utf8');
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  t.after(() => socket.destroy());
+  const frameQueue = [];
+  let frameWaiting = null;
+  let frameBuffer = '';
+  socket.on('data', (chunk) => {
+    frameBuffer += chunk;
+    let newline = frameBuffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = frameBuffer.slice(0, newline);
+      frameBuffer = frameBuffer.slice(newline + 1);
+      newline = frameBuffer.indexOf('\n');
+      if (!line) continue;
+      const parsed = JSON.parse(line);
+      if (frameWaiting) {
+        const pending = frameWaiting;
+        frameWaiting = null;
+        clearTimeout(pending.timer);
+        pending.resolve(parsed);
+      } else {
+        frameQueue.push(parsed);
+      }
+    }
+  });
+  const nextFrame = () =>
+    new Promise((resolve, reject) => {
+      if (frameQueue.length > 0) {
+        resolve(frameQueue.shift());
+        return;
+      }
+      const timer = setTimeout(() => {
+        frameWaiting = null;
+        reject(new Error('timed out waiting for a worker frame'));
+      }, 3000);
+      frameWaiting = { resolve, timer };
+    });
+  const rawRequest = (id, message) => {
+    socket.write(`${JSON.stringify({ id, ...message })}\n`);
+  };
+
+  rawRequest(null, {
+    op: 'hello',
+    protocolVersion: 1,
+    allocationId: UUID_A,
+    launchGeneration: 1,
+    token: TOKEN,
+  });
+  assert.equal((await nextFrame()).ok, true);
+
+  const ref = { allocationId: UUID_A, launchGeneration: 1, name: `alpi-${UUID_A}-g1` };
+  rawRequest(1, { op: 'create', ref, generation: 1 });
+  const created = await nextFrame();
+  assert.equal(created.ok, true);
+  const ownedRef = { ...ref, nativeId: created.result.nativeId };
+  rawRequest(2, { op: 'start', ref: ownedRef, generation: 1 });
+  assert.equal((await nextFrame()).ok, true);
+
+  const ironSocketPath = await startIronEchoServer(t, setup.config.ironIngressRoot);
+  const openMessage = { op: 'openBridge', ref: ownedRef, generation: 1, ironSocketPath };
+  rawRequest(3, openMessage);
+  assert.equal((await nextFrame()).ok, true);
+  assert.equal(setup.worker.snapshot().bridge.open, true);
+  rawRequest(4, { op: 'closeBridge', generation: 1 });
+  assert.equal((await nextFrame()).ok, true);
+  assert.equal(setup.worker.snapshot().bridge.open, false);
+
+  // The exec holds the lifecycle queue; the next open is therefore queued
+  // behind it and received before the fence below.
+  rawRequest(5, {
+    op: 'exec',
+    ref: ownedRef,
+    spec: { argv: ['long-running', 'command'], timeoutMs: 30_000 },
+    generation: 1,
+  });
+  await entered.promise;
+  rawRequest(6, openMessage);
+  rawRequest(7, { op: 'fenceBridge', generation: 1 });
+  const fenceFrame = await nextFrame();
+  assert.equal(fenceFrame.id, 7);
+  assert.equal(fenceFrame.ok, true, 'the fence was acknowledged while the open was queued');
+  assert.equal(setup.worker.snapshot().bridge.open, false);
+  assert.equal(setup.worker.snapshot().bridge.reason, 'fenced');
+
+  release.resolve();
+  const execFrame = await nextFrame();
+  assert.equal(execFrame.id, 5);
+  assert.equal(execFrame.ok, true);
+  const queuedOpenFrame = await nextFrame();
+  assert.equal(queuedOpenFrame.id, 6);
+  assert.equal(queuedOpenFrame.ok, false, 'the queued open must be rejected');
+  assert.equal(queuedOpenFrame.error.code, 'forward_denied');
+  assert.equal(setup.worker.snapshot().bridge.open, false, 'no listener may appear after the fence');
+  assert.equal(setup.worker.snapshot().bridge.reason, 'fenced');
+
+  // A later, explicitly authorized fresh open is not permanently expired.
+  rawRequest(8, openMessage);
+  const freshFrame = await nextFrame();
+  assert.equal(freshFrame.id, 8);
+  assert.equal(freshFrame.ok, true, 'a fresh post-fence open still works');
+  assert.equal(setup.worker.snapshot().bridge.open, true);
+  rawRequest(9, { op: 'closeBridge', generation: 1 });
+  assert.equal((await nextFrame()).ok, true);
+});
+
 test('late watchdog verifier results are discarded after an epoch advance', async (t) => {
   const adapter = makeAdapter();
   const held = Promise.withResolvers();
