@@ -794,6 +794,119 @@ test('an exec that omits workingDir reaches the real worker without a null direc
   assert.equal(f.store.listPendingExecIntents().length, 0);
 });
 
+test('service argv admission matches the worker contract before any intent is persisted', async (t) => {
+  const proc = makeWorkerProcEvidence();
+  const workerNet = makeWorkerNetEvidence();
+  const adapter = makeWorkerAdapter();
+  const workerSetup = await startCompositionWorker(t, {
+    adapter,
+    proc,
+    net: workerNet,
+  });
+  const { client } = await connectCompositionClient(t, workerSetup, proc, workerNet);
+  await client.start();
+
+  const f = setup(t, {
+    label: 'worker-argv-composition',
+    resolveProfile: makeResolver({
+      networkMode: 'boundary',
+      networkBoundaryVerified: true,
+    }),
+    serviceOptions: { withEngine: (_record, use) => use(client.engine) },
+  });
+
+  // Bind the reserved sandbox id to the worker's fixed owned allocation.
+  const randomUUID = crypto.randomUUID;
+  let pinned = true;
+  crypto.randomUUID = () => {
+    if (pinned) {
+      pinned = false;
+      return UUID_4;
+    }
+    return randomUUID();
+  };
+  let created;
+  try {
+    created = await createSandbox(f.service);
+  } finally {
+    crypto.randomUUID = randomUUID;
+  }
+  assert.equal(created.sandbox.sandboxId, UUID_4);
+  await startSandbox(f.service, ALPHA_RUNNER, UUID_4);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, created.sandbox.workspaceId);
+  const input = {
+    sandboxId: UUID_4,
+    workspaceId: created.sandbox.workspaceId,
+    leaseEpoch: lease.epoch,
+  };
+
+  const assertCleanSeam = () => {
+    assert.equal(f.store.listWriterFences().length, 0);
+    assert.equal(f.store.listPendingExecIntents().length, 0);
+  };
+
+  // The real worker admits at most 64 argv entries: 64 must succeed end to
+  // end through the service, client and worker seam.
+  const fullArgv = Array.from({ length: 64 }, (_, index) => `arg-${index}`);
+  const full = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...input,
+    argv: fullArgv,
+  });
+  assert.equal(full.exitCode, 0);
+  assert.equal(adapter.execCalls.length, 1);
+  assert.deepEqual(adapter.execCalls[0].argv, fullArgv);
+  assertCleanSeam();
+
+  // A 65th entry is invalid input at the service seam: it must be refused
+  // before any exec intent is persisted, with no dispatch and no fence.
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, {
+      ...input,
+      argv: [...fullArgv, 'one-entry-too-many'],
+    }),
+    assertServiceCode('invalid_input')
+  );
+  assert.equal(adapter.execCalls.length, 1);
+  assertCleanSeam();
+
+  // A multibyte argument at exactly the worker's 4096 UTF-8-byte boundary is
+  // inside the shared contract and still reaches the adapter, proving the
+  // rejection above was pre-intent rather than a lingering fence.
+  const boundary = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...input,
+    argv: ['é'.repeat(2048)],
+  });
+  assert.equal(boundary.exitCode, 0);
+  assert.equal(adapter.execCalls.length, 2);
+  assert.equal(
+    Buffer.byteLength(adapter.execCalls[1].argv[0], 'utf8'),
+    4096
+  );
+  assertCleanSeam();
+
+  // One code point beyond the boundary is 4098 UTF-8 bytes. A JavaScript
+  // string-length check (2049 characters) would admit it, but the worker
+  // rejects it pre-adapter, so the service must refuse it before the intent.
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, {
+      ...input,
+      argv: ['é'.repeat(2049)],
+    }),
+    assertServiceCode('invalid_input')
+  );
+  assert.equal(adapter.execCalls.length, 2);
+  assertCleanSeam();
+
+  // The workspace stays usable after both pre-intent rejections.
+  const after = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...input,
+    argv: ['true'],
+  });
+  assert.equal(after.exitCode, 0);
+  assert.equal(adapter.execCalls.length, 3);
+  assertCleanSeam();
+});
+
 test('create allocates metadata without starting a VM and is idempotent', async (t) => {
   const { service, engine, store } = setup(t, { label: 'create' });
 

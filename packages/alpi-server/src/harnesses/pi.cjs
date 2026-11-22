@@ -1385,6 +1385,24 @@ function createPiHarness(options) {
           }
         }
         sessions.delete(sessionId);
+        if (force) {
+          // An explicit detach is the caller's ownership decision, not
+          // termination proof: no stop was attempted, so the child may still
+          // be running and cleanup cannot be reported as verified. Only the
+          // non-force path below observes a supervisor-verified stop.
+          return {
+            harnessId: PI_HARNESS_ID,
+            nativeSessionId: sessionId,
+            stopped: false,
+            forced: false,
+            exitCode: null,
+            signal: null,
+            cleanupUnverified: true,
+            alreadyStopped: false,
+            detached: true,
+            guestData: true,
+          };
+        }
         return {
           harnessId: PI_HARNESS_ID,
           nativeSessionId: sessionId,

@@ -69,6 +69,13 @@ const MAX_REASON_LENGTH = 256;
 const MAX_PATH_LENGTH = 2048;
 const MAX_ARG_BYTES = 4096;
 const MAX_ARGV_BYTES = 65536;
+// The engine worker enforces the identical limits per launch in
+// engine-worker.cjs (normalizeArgv): at most 64 argv entries and at most
+// MAX_ARG_BYTES UTF-8 bytes per entry. The service must apply the same
+// contract before beginExecIntent so an argument the worker would reject is
+// refused pre-intent instead of becoming an uncertain writer fence after
+// dispatch.
+const MAX_ARGV_ENTRIES = 64;
 const MAX_WORKING_DIR_LENGTH = 4096;
 const MAX_LIST_ITEMS = 1000;
 const MAX_EXEC_TIMEOUT_MS = 300_000;
@@ -662,15 +669,21 @@ function normalizeDeleteInput(input) {
 }
 
 function normalizeArgv(value) {
-  if (!Array.isArray(value) || value.length === 0) {
-    invalidInput('argv must be a non-empty array.');
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_ARGV_ENTRIES
+  ) {
+    invalidInput('argv must be a non-empty array of at most 64 entries.');
   }
   let total = 0;
   for (const argument of value) {
     if (typeof argument !== 'string' || argument.length === 0) {
       invalidInput('Every argv entry must be a non-empty string.');
     }
-    if (argument.length > MAX_ARG_BYTES) {
+    // The worker bounds each argument in UTF-8 bytes, not JavaScript string
+    // length, so a multibyte argument over the byte limit must fail here.
+    if (Buffer.byteLength(argument, 'utf8') > MAX_ARG_BYTES) {
       invalidInput('An argv entry is too long.');
     }
     if (argument.includes('\u0000')) {

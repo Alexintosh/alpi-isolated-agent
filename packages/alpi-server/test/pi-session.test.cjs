@@ -1957,6 +1957,92 @@ test('host adapter keeps the attachment when stop is unverified', async () => {
   // Only an explicit detach decision drops the unverified attachment.
   const detached = await adapter.close({ nativeSessionId: UUID_A, force: true });
   assert.equal(detached.detached, true);
+  // Detachment is an ownership decision, not termination proof: even with
+  // the supervisor gone, the response must never claim a verified stop.
+  assert.equal(detached.harnessId, 'pi');
+  assert.equal(detached.nativeSessionId, UUID_A);
+  assert.equal(detached.stopped, false);
+  assert.equal(detached.forced, false);
+  assert.equal(detached.exitCode, null);
+  assert.equal(detached.signal, null);
+  assert.equal(detached.cleanupUnverified, true);
+  assert.equal(detached.alreadyStopped, false);
+  assert.equal(detached.guestData, true);
+  await assert.rejects(
+    adapter.getState({ nativeSessionId: UUID_A }),
+    (error) => error instanceof PiHarnessError && error.code === 'session_not_attached'
+  );
+  adapter.closeSync();
+});
+
+test('host adapter force detach on a live supervisor never claims verified termination', async () => {
+  let stopObserved = false;
+  const exec = async ({ argv }) => {
+    const command = argv[2];
+    let payload;
+    if (command === 'supervise') {
+      payload = { ok: true, sessionId: UUID_A };
+    } else if (command === 'status') {
+      payload = {
+        ok: true,
+        protocolVersion: 1,
+        sessionId: UUID_A,
+        cwd: '/home/node/workspace',
+        socketPath: '/run/alpi/pi-' + UUID_A + '.sock',
+        statePath: '/run/alpi/pi-' + UUID_A + '.state.json',
+        provider: 'alpi',
+        model: 'fixture',
+        generation: 1,
+        paused: false,
+        pauseOwner: null,
+        status: 'ready',
+      };
+    } else if (command === 'state') {
+      payload = {
+        ok: true,
+        state: { sessionId: UUID_A, isStreaming: false, messageCount: 0 },
+        generation: 1,
+        paused: false,
+        status: 'ready',
+      };
+    } else if (command === 'stop') {
+      // A verified stop is available on this live supervisor, but an explicit
+      // detach must not perform (or claim) a termination it did not observe.
+      stopObserved = true;
+      payload = { ok: true, stopped: true, forced: false, exitCode: 0 };
+    } else {
+      payload = { ok: false, code: 'unknown_command', message: 'unexpected ' + command };
+    }
+    return { exitCode: 0, stdout: JSON.stringify(payload) + String.fromCharCode(10), stderr: '' };
+  };
+  exec.guestOnly = true;
+  const adapter = createPiHarness({
+    exec,
+    supervisorScript: '/opt/alpi/pi/guest-session.cjs',
+    nodeExecutable: '/usr/local/bin/node',
+    workspaceDir: '/home/node/workspace',
+    sessionDir: '/home/node/workspace/sessions',
+    agentDir: '/home/node/.pi/agent',
+    socketDir: '/run/alpi',
+    guestHome: '/home/node',
+    piExecutable: '/opt/alpi/pi/node_modules/.bin/pi',
+    provider: 'alpi',
+    model: 'fixture',
+  });
+  await adapter.createSession({ sessionId: UUID_A, model: 'fixture' });
+
+  const detached = await adapter.close({ nativeSessionId: UUID_A, force: true });
+  assert.equal(detached.harnessId, 'pi');
+  assert.equal(detached.nativeSessionId, UUID_A);
+  assert.equal(detached.stopped, false);
+  assert.equal(detached.forced, false);
+  assert.equal(detached.exitCode, null);
+  assert.equal(detached.signal, null);
+  assert.equal(detached.cleanupUnverified, true);
+  assert.equal(detached.alreadyStopped, false);
+  assert.equal(detached.detached, true);
+  assert.equal(detached.guestData, true);
+  assert.equal(stopObserved, false);
   await assert.rejects(
     adapter.getState({ nativeSessionId: UUID_A }),
     (error) => error instanceof PiHarnessError && error.code === 'session_not_attached'
