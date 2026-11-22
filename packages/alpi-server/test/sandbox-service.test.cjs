@@ -2124,3 +2124,354 @@ test('a crashed execution intent becomes a durable writer fence on restart', asy
     assertStoreCode('writer_fenced')
   );
 });
+
+test('a create replay completes from the reservation stored network policy', async (t) => {
+  const f = setup(t, {
+    label: 'network-replay',
+    resolveProfile: makeResolver({
+      networkMode: 'boundary',
+      networkBoundaryVerified: true,
+    }),
+  });
+
+  // Seed the exact post-reservation/pre-journal state with a disabled
+  // network mode pinned on the reservation.
+  f.store.reserveSandbox(ALPHA_RUNNER, {
+    requestId: 'request-1',
+    engine: 'boxlite',
+    engineVersion: '0.14.1',
+    profile: 'pi-dev',
+    imageDigest: IMAGE,
+    resources: { ...LIMITS },
+    retention: 'ephemeral',
+    networkMode: 'disabled',
+  });
+
+  // The retry resolves a changed network mode, but the reservation's
+  // persisted policy is authoritative for the missing journal.
+  const created = await createSandbox(f.service);
+  assert.equal(created.created, true);
+  assert.equal(f.engine.calls.create.length, 1);
+  assert.equal(f.engine.calls.create[0].profile.network.mode, 'disabled');
+  const receipt = f.store.getSandbox(ALPHA_RUNNER, created.sandbox.sandboxId);
+  assert.equal(receipt.reservationNetworkMode, 'disabled');
+});
+
+test('a pending exec intent fences lease handoff and new lease validation', async (t) => {
+  const f = setup(t, { label: 'intent-handoff' });
+
+  const created = await createSandbox(f.service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+
+  const entered = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  f.engine.execHook = () => {
+    entered.resolve();
+    return finish.promise;
+  };
+  const execution = f.service.execInSandbox(ALPHA_RUNNER, {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  });
+  await entered.promise;
+
+  // The dispatched command owns a durable pending intent that records its
+  // lease identity.
+  assert.equal(f.store.listPendingExecIntents().length, 1);
+  const intent = f.store.listPendingExecIntents()[0];
+  assert.equal(intent.ownerClientId, ALPHA_RUNNER.clientId);
+  assert.equal(intent.leaseEpoch, lease.epoch);
+
+  // The initiating dispatch's own lease identity stays valid while the
+  // command runs.
+  f.store.validateLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+
+  // Handoff is refused while the intent is unresolved, before completion...
+  f.store.releaseLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+  assert.throws(
+    () => acquireLease(f.store, ALPHA_RUNNER_2, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+  assert.throws(
+    () => acquireLease(f.store, ALPHA_RUNNER, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+
+  // ...and after the lease expires.
+  f.clock.advance(61_000);
+  assert.throws(
+    () => acquireLease(f.store, ALPHA_RUNNER_2, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+
+  // Unrelated writers cannot validate authority either.
+  assert.throws(
+    () => f.store.validateLease(ALPHA_RUNNER_2, { workspaceId, epoch: 2 }),
+    assertStoreCode('writer_fenced')
+  );
+
+  finish.resolve({
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+    truncated: false,
+    timedOut: false,
+    cancelled: false,
+  });
+  await execution;
+  assert.equal(f.store.listPendingExecIntents().length, 0);
+  const next = acquireLease(f.store, ALPHA_RUNNER_2, workspaceId);
+  assert.ok(next.epoch > lease.epoch);
+});
+
+test('a failed uncertainty write keeps the pending intent fencing handoff', async (t) => {
+  const f = setup(t, { label: 'intent-pending-fault' });
+
+  const created = await createSandbox(f.service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  };
+
+  const originalMark = f.store.markExecIntent.bind(f.store);
+  f.store.markExecIntent = () => {
+    throw new WorkStoreError('store_busy', 'synthetic transient');
+  };
+  f.engine.execHook = async () => {
+    throw { code: 'engine_termination_unverified' };
+  };
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('exec_uncertain')
+  );
+  f.store.markExecIntent = originalMark;
+  assert.equal(f.store.listPendingExecIntents().length, 1);
+  assert.equal(f.store.listWriterFences().length, 0);
+
+  // The initiating identity keeps validating its own lease, but handoff is
+  // fenced even though no writer_fences row exists yet.
+  f.store.validateLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+  f.store.releaseLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+  assert.throws(
+    () => acquireLease(f.store, ALPHA_RUNNER_2, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+  assert.throws(
+    () => acquireLease(f.store, ALPHA_RUNNER, workspaceId),
+    assertStoreCode('writer_fenced')
+  );
+
+  // Restart recovery promotes the retained intent to a durable fence.
+  const recovery = await f.service.recoverStartup();
+  assert.equal(recovery.uncertain.length, 1);
+  assert.equal(recovery.uncertain[0].code, 'exec_unverified');
+  assert.equal(f.store.listWriterFences().length, 1);
+});
+
+test('recovery keeps a pending intent when the store read fails transiently', async (t) => {
+  const f = setup(t, { label: 'intent-read-fault' });
+
+  const created = await createSandbox(f.service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  };
+
+  const originalMark = f.store.markExecIntent.bind(f.store);
+  f.store.markExecIntent = () => {
+    throw new WorkStoreError('store_busy', 'synthetic transient');
+  };
+  f.engine.execHook = async () => {
+    throw { code: 'engine_termination_unverified' };
+  };
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('exec_uncertain')
+  );
+  f.store.markExecIntent = originalMark;
+
+  const originalGet = f.store.getSandbox.bind(f.store);
+  let reads = 0;
+  f.store.getSandbox = (...args) => {
+    reads += 1;
+    if (reads === 2) {
+      throw new WorkStoreError('store_busy', 'synthetic transient');
+    }
+    return originalGet(...args);
+  };
+  const report = await f.service.recoverStartup();
+  f.store.getSandbox = originalGet;
+
+  // A failed read is not evidence of deletion: the intent is retained and
+  // the operational failure is reported.
+  assert.equal(report.uncertain.length, 1);
+  assert.equal(report.uncertain[0].code, 'store_busy');
+  assert.equal(f.store.listPendingExecIntents().length, 1);
+  assert.equal(f.store.listWriterFences().length, 0);
+
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('writer_fenced')
+  );
+  assert.equal(f.engine.calls.stop.length, 0);
+});
+
+test('recovery keeps an active writer fence when the store read fails transiently', async (t) => {
+  const f = setup(t, { label: 'fence-read-fault' });
+
+  const created = await createSandbox(f.service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  };
+
+  f.engine.execHook = async () => {
+    throw { code: 'engine_termination_unverified' };
+  };
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('exec_uncertain')
+  );
+  assert.equal(f.store.listWriterFences().length, 1);
+
+  const originalGet = f.store.getSandbox.bind(f.store);
+  let reads = 0;
+  f.store.getSandbox = (...args) => {
+    reads += 1;
+    if (reads === 2) {
+      throw new WorkStoreError('store_busy', 'synthetic transient');
+    }
+    return originalGet(...args);
+  };
+  const report = await f.service.recoverStartup();
+  f.store.getSandbox = originalGet;
+
+  assert.equal(report.uncertain.length, 1);
+  assert.equal(report.uncertain[0].code, 'store_busy');
+  assert.equal(f.store.listWriterFences().length, 1);
+  assert.equal(f.store.listPendingExecIntents().length, 0);
+
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('writer_fenced')
+  );
+  assert.equal(f.engine.calls.stop.length, 0);
+});
+
+test('a verified stop settles a pending intent left by a failed success outcome', async (t) => {
+  const f = setup(t, { label: 'stop-settles-success' });
+
+  const created = await createSandbox(f.service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  };
+
+  const originalMark = f.store.markExecIntent.bind(f.store);
+  f.store.markExecIntent = () => {
+    throw new WorkStoreError('store_busy', 'synthetic transient');
+  };
+  const result = await f.service.execInSandbox(ALPHA_RUNNER, execInput);
+  assert.equal(result.stdout, 'ok');
+  f.store.markExecIntent = originalMark;
+  assert.equal(f.store.listPendingExecIntents().length, 1);
+
+  // Make the first verified-stop cleanup fail once; protection is kept.
+  const originalClear = f.store.clearWriterFence.bind(f.store);
+  const failOnce = () => {
+    throw new WorkStoreError('store_busy', 'synthetic transient');
+  };
+  f.store.clearWriterFence = failOnce;
+  f.store.settleWriterOwnership = failOnce;
+  await stopSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  assert.equal(f.store.listPendingExecIntents().length, 1);
+
+  // Retrying the verified-stop cleanup settles the intent.
+  f.store.clearWriterFence = originalClear;
+  delete f.store.settleWriterOwnership;
+  await stopSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  assert.equal(f.store.listPendingExecIntents().length, 0);
+  assert.equal(f.store.listWriterFences().length, 0);
+
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  f.store.releaseLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+  const resumed = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const next = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...execInput,
+    leaseEpoch: resumed.epoch,
+  });
+  assert.equal(next.stdout, 'ok');
+});
+
+test('a verified stop settles a pending intent left by a failed uncertain outcome', async (t) => {
+  const f = setup(t, { label: 'stop-settles-uncertain' });
+
+  const created = await createSandbox(f.service);
+  const sandboxId = created.sandbox.sandboxId;
+  const workspaceId = created.sandbox.workspaceId;
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const execInput = {
+    sandboxId,
+    workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  };
+
+  const originalMark = f.store.markExecIntent.bind(f.store);
+  f.store.markExecIntent = () => {
+    throw new WorkStoreError('store_busy', 'synthetic transient');
+  };
+  f.engine.execHook = async () => {
+    throw { code: 'engine_termination_unverified' };
+  };
+  await assert.rejects(
+    f.service.execInSandbox(ALPHA_RUNNER, execInput),
+    assertServiceCode('exec_uncertain')
+  );
+  f.store.markExecIntent = originalMark;
+  assert.equal(f.store.listPendingExecIntents().length, 1);
+
+  await stopSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  assert.equal(f.store.listPendingExecIntents().length, 0);
+  assert.equal(f.store.listWriterFences().length, 0);
+
+  await startSandbox(f.service, ALPHA_RUNNER, sandboxId);
+  f.engine.execHook = null;
+  f.store.releaseLease(ALPHA_RUNNER, { workspaceId, epoch: lease.epoch });
+  const resumed = acquireLease(f.store, ALPHA_RUNNER, workspaceId);
+  const next = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...execInput,
+    leaseEpoch: resumed.epoch,
+  });
+  assert.equal(next.stdout, 'ok');
+});

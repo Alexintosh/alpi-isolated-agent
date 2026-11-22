@@ -1371,6 +1371,167 @@ test('execution intents fence writers until done and uncertain outcomes fence ha
   assert.ok(next.epoch > lease.epoch);
 });
 
+test('a pending exec intent fences lease handoff until it resolves', (t) => {
+  const directory = tempDirectory(t, 'intent-handoff');
+  const clock = createClock(1_000_000);
+  const store = openWorkStore(directory, { now: clock.now });
+  t.after(() => store.close());
+  const secondRunner = {
+    clientId: 'client-alpha-runner-2',
+    project: 'alpha',
+    role: 'runner',
+  };
+
+  const receipt = reserve(store, ALPHA_OPERATOR);
+  const lease = store.acquireLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+  });
+
+  // The intent persists its lease identity alongside the dispatch.
+  const intent = store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+    leaseEpoch: lease.epoch,
+  });
+  assert.equal(intent.state, 'pending');
+  assert.equal(intent.leaseEpoch, lease.epoch);
+
+  // The initiating dispatch's own lease identity stays valid.
+  store.validateLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+    epoch: lease.epoch,
+  });
+
+  // Handoff is fenced while the intent is unresolved, including after a
+  // release and after the lease expires.
+  store.releaseLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+    epoch: lease.epoch,
+  });
+  assert.throws(
+    () =>
+      store.acquireLease(ALPHA_RUNNER, {
+        workspaceId: receipt.workspaceId,
+      }),
+    assertCode('writer_fenced')
+  );
+  assert.throws(
+    () =>
+      store.acquireLease(secondRunner, {
+        workspaceId: receipt.workspaceId,
+      }),
+    assertCode('writer_fenced')
+  );
+  clock.advance(61_000);
+  assert.throws(
+    () =>
+      store.acquireLease(secondRunner, {
+        workspaceId: receipt.workspaceId,
+      }),
+    assertCode('writer_fenced')
+  );
+
+  // An unrelated client cannot validate authority either.
+  assert.throws(
+    () =>
+      store.validateLease(secondRunner, {
+        workspaceId: receipt.workspaceId,
+        epoch: lease.epoch + 1,
+      }),
+    assertCode('writer_fenced')
+  );
+
+  // Completing the intent restores handoff at a fresh epoch.
+  store.markExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    state: 'done',
+  });
+  const next = store.acquireLease(secondRunner, {
+    workspaceId: receipt.workspaceId,
+  });
+  assert.ok(next.epoch > lease.epoch);
+
+  // A pending intent without a persisted lease identity fences everyone;
+  // startup recovery settles such legacy rows.
+  store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+  });
+  assert.throws(
+    () =>
+      store.validateLease(ALPHA_RUNNER, {
+        workspaceId: receipt.workspaceId,
+        epoch: next.epoch,
+      }),
+    assertCode('writer_fenced')
+  );
+});
+
+test('verified termination settles writer ownership atomically', (t) => {
+  const directory = tempDirectory(t, 'settle-ownership');
+  const store = openWorkStore(directory);
+  t.after(() => store.close());
+
+  const receipt = reserve(store, ALPHA_OPERATOR);
+  const lease = store.acquireLease(ALPHA_RUNNER, {
+    workspaceId: receipt.workspaceId,
+  });
+
+  // A pending intent and an active fence are both settled together.
+  store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+    leaseEpoch: lease.epoch,
+  });
+  store.markExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    state: 'uncertain',
+    reason: 'engine_termination_unverified',
+  });
+  assert.equal(store.listWriterFences().length, 1);
+
+  const settled = store.settleWriterOwnership(ALPHA_OPERATOR, {
+    sandboxId: receipt.sandboxId,
+    generation: receipt.generation,
+  });
+  assert.equal(settled.settledIntents, 1);
+  assert.equal(settled.fenceCleared, true);
+  assert.equal(store.listWriterFences().length, 0);
+  assert.equal(store.listPendingExecIntents().length, 0);
+  const row = store.db
+    .prepare(
+      `SELECT state, error_code FROM exec_intents
+        WHERE project = ? AND sandbox_id = ?`
+    )
+    .get('alpha', receipt.sandboxId);
+  assert.equal(row.state, 'aborted');
+  assert.equal(row.error_code, 'verified_stop');
+
+  // A stale generation never settles a fresh intent.
+  store.beginExecIntent(ALPHA_RUNNER, {
+    sandboxId: receipt.sandboxId,
+    workspaceId: receipt.workspaceId,
+    leaseEpoch: lease.epoch,
+  });
+  assert.throws(
+    () =>
+      store.settleWriterOwnership(ALPHA_OPERATOR, {
+        sandboxId: receipt.sandboxId,
+        generation: receipt.generation + 5,
+      }),
+    assertCode('generation_conflict')
+  );
+  assert.equal(store.listPendingExecIntents().length, 1);
+
+  const current = store.getSandbox(ALPHA_OPERATOR, receipt.sandboxId);
+  const settledAgain = store.settleWriterOwnership(ALPHA_OPERATOR, {
+    sandboxId: receipt.sandboxId,
+    generation: current.generation,
+  });
+  assert.equal(settledAgain.settledIntents, 1);
+  assert.equal(settledAgain.fenceCleared, false);
+});
+
 test('an interrupted reservation is retired without stranding quota', (t) => {
   const directory = tempDirectory(t, 'retire-reservation');
   const store = openWorkStore(directory, {

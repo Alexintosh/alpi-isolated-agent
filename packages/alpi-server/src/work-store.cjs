@@ -423,6 +423,7 @@ function execIntentReceipt(row) {
     workspaceId: row.workspace_id,
     ownerClientId: row.client_id,
     state: row.state,
+    leaseEpoch: row.lease_epoch,
     executionId: row.execution_id,
     errorCode: row.error_code,
     createdAt: row.created_at,
@@ -642,6 +643,7 @@ function initializeSchema(db) {
         workspace_id TEXT NOT NULL,
         client_id TEXT NOT NULL,
         state TEXT NOT NULL,
+        lease_epoch INTEGER,
         execution_id TEXT,
         error_code TEXT,
         created_at INTEGER NOT NULL,
@@ -653,6 +655,12 @@ function initializeSchema(db) {
       CREATE INDEX IF NOT EXISTS exec_intents_by_state
         ON exec_intents (state, project, sandbox_id);
     `);
+    if (
+      !db.prepare('PRAGMA table_info(exec_intents)').all()
+        .some((column) => column.name === 'lease_epoch')
+    ) {
+      db.exec('ALTER TABLE exec_intents ADD COLUMN lease_epoch INTEGER');
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS writer_fences (
         project TEXT NOT NULL,
@@ -892,6 +900,23 @@ class WorkStore {
           WHERE workspace_id = ? AND project = ?`
       )
       .get(workspaceId, project);
+  }
+
+  /**
+   * The unresolved execution intent that currently owns a workspace, if
+   * any. Unresolved intents are durable writer ownership, not just a
+   * service-side bookkeeping row.
+   */
+  _pendingIntentForWorkspace(project, workspaceId) {
+    return this.db
+      .prepare(
+        [
+          'SELECT * FROM exec_intents',
+          'WHERE project = ? AND workspace_id = ? AND state = ?',
+          'ORDER BY created_at ASC LIMIT 1',
+        ].join(' ')
+      )
+      .get(project, workspaceId, 'pending');
   }
 
   _checkIdempotency(project, clientId, operation, key, payloadHash) {
@@ -1259,6 +1284,10 @@ class WorkStore {
    * Persist an execution/ownership intent before the engine dispatch.
    * Fails while the workspace carries an uncertain-writer fence or an
    * unresolved earlier intent.
+   *
+   * The dispatch lease epoch is persisted with the intent so unresolved
+   * ownership can fence lease handoff and unrelated lease validation while
+   * still permitting the initiating dispatch itself.
    */
   beginExecIntent(principalInput, input) {
     this._ensureOpen();
@@ -1270,6 +1299,10 @@ class WorkStore {
       body.workspaceId,
       MAX_REQUEST_ID_LENGTH
     );
+  const leaseEpoch =
+    body.leaseEpoch === undefined || body.leaseEpoch === null
+      ? null
+      : normalizePositiveInteger(body.leaseEpoch);
 
     try {
       return transact(this.db, () => {
@@ -1303,23 +1336,32 @@ class WorkStore {
             .prepare(
               `UPDATE exec_intents
                   SET state = 'pending', execution_id = NULL,
-                      error_code = NULL, client_id = ?, updated_at = ?
+                      error_code = NULL, client_id = ?, lease_epoch = ?,
+                      updated_at = ?
                 WHERE project = ? AND sandbox_id = ?`
             )
-            .run(principal.clientId, nowMs, principal.project, sandboxId);
+            .run(
+              principal.clientId,
+              leaseEpoch,
+              nowMs,
+              principal.project,
+              sandboxId
+            );
         } else {
           this.db
             .prepare(
               `INSERT INTO exec_intents
                 (project, sandbox_id, workspace_id, client_id, state,
-                 execution_id, error_code, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`
+                 lease_epoch, execution_id, error_code, created_at,
+                 updated_at)
+               VALUES (?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?)`
             )
             .run(
               principal.project,
               sandboxId,
               workspaceId,
               principal.clientId,
+              leaseEpoch,
               nowMs,
               nowMs
             );
@@ -1454,6 +1496,82 @@ class WorkStore {
           sandboxId,
           workspaceId: fence.workspace_id,
           cleared: true,
+        };
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Settle every writer-ownership record for a sandbox after its verified
+   * termination: pending and uncertain execution intents are closed as
+   * aborted and the workspace fence is removed in one transaction. The
+   * caller passes the generation it verified; a stale generation settles
+   * nothing. Unclearable ownership is left in place and retried later.
+   */
+  settleWriterOwnership(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireWriter(principal);
+    const body = normalizeInputObject(input);
+    const sandboxId = normalizeText(body.sandboxId, MAX_REQUEST_ID_LENGTH);
+    const generation =
+      body.generation === undefined || body.generation === null
+        ? null
+        : normalizePositiveInteger(body.generation);
+
+    try {
+      return transact(this.db, () => {
+        const sandbox = this._sandbox(principal.project, sandboxId);
+        if (!sandbox) {
+          return { sandboxId, settledIntents: 0, fenceCleared: false };
+        }
+        if (generation !== null && sandbox.generation !== generation) {
+          fail('generation_conflict', 'Sandbox generation is stale.');
+        }
+        const nowMs = this._now();
+        const settled = this.db
+          .prepare(
+            [
+              'UPDATE exec_intents',
+              'SET state = ?, execution_id = NULL, error_code = ?, updated_at = ?',
+              'WHERE project = ? AND sandbox_id = ? AND workspace_id = ?',
+              'AND state IN (?, ?)',
+            ].join(' ')
+          )
+          .run(
+            'aborted',
+            'verified_stop',
+            nowMs,
+            principal.project,
+            sandboxId,
+            sandbox.workspace_id,
+            'pending',
+            'uncertain',
+          );
+        const fence = this.db
+          .prepare(
+            [
+              'SELECT * FROM writer_fences',
+              'WHERE project = ? AND workspace_id = ? AND sandbox_id = ?',
+            ].join(' ')
+          )
+          .get(principal.project, sandbox.workspace_id, sandboxId);
+        let fenceCleared = false;
+        if (fence) {
+          this.db
+            .prepare(
+              'DELETE FROM writer_fences WHERE project = ? AND workspace_id = ?'
+            )
+            .run(principal.project, fence.workspace_id);
+          fenceCleared = true;
+        }
+        return {
+          sandboxId,
+          workspaceId: sandbox.workspace_id,
+          settledIntents: settled.changes,
+          fenceCleared,
         };
       });
     } catch (error) {
@@ -2380,6 +2498,12 @@ class WorkStore {
             'Workspace is fenced by an uncertain execution.'
           );
         }
+        if (this._pendingIntentForWorkspace(principal.project, workspaceId)) {
+          fail(
+            'writer_fenced',
+            'Workspace is fenced by an unresolved execution intent.'
+          );
+        }
         const nowMs = this._now();
         const expiresAt = nowMs + ttlSeconds * 1000;
         if (!Number.isSafeInteger(expiresAt)) {
@@ -2459,6 +2583,24 @@ class WorkStore {
         fail(
           'writer_fenced',
           'Workspace is fenced by an uncertain execution.'
+        );
+      }
+      const pendingIntent = this._pendingIntentForWorkspace(
+        principal.project,
+        workspaceId
+      );
+      if (
+        pendingIntent &&
+        (pendingIntent.client_id !== principal.clientId ||
+          pendingIntent.lease_epoch === null ||
+          pendingIntent.lease_epoch !== epoch)
+      ) {
+        // An unresolved execution intent owns the workspace. Only the
+        // dispatch that created it may revalidate its own lease; every
+        // other writer, including a new lease epoch, is fenced.
+        fail(
+          'writer_fenced',
+          'Workspace is fenced by an unresolved execution intent.'
         );
       }
       const row = this._lease(principal.project, workspaceId);

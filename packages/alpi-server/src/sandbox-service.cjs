@@ -1203,6 +1203,7 @@ function createSandboxService(options = {}) {
     'beginExecIntent',
     'markExecIntent',
     'clearWriterFence',
+    'settleWriterOwnership',
     'listPendingExecIntents',
     'listWriterFences',
   ]) {
@@ -1326,15 +1327,20 @@ function createSandboxService(options = {}) {
   }
 
   /**
-   * Best-effort fence clear after a verified stop. A fence that cannot be
-   * cleared here is reconciled by restart recovery or the next verified
-   * stop; it is never cleared by an adapter rejection alone.
+   * Settle all durable writer ownership after a verified sandbox
+   * termination: pending and uncertain execution intents are closed and
+   * the workspace fence is removed in one store transaction, with identity
+   * and generation checks. A failure here retains protection; the next
+   * verified stop or restart recovery retries the settlement.
    */
-  function clearWriterFenceQuietly(principal, receipt) {
+  function settleWriterOwnershipQuietly(principal, receipt) {
     try {
-      store.clearWriterFence(principal, { sandboxId: receipt.sandboxId });
+      store.settleWriterOwnership(principal, {
+        sandboxId: receipt.sandboxId,
+        generation: receipt.generation,
+      });
     } catch {
-      // Keep the stop result; the fence is reconciled later.
+      // Keep the stop result; ownership is settled by a later retry.
     }
   }
 
@@ -2257,8 +2263,12 @@ function createSandboxService(options = {}) {
 
       // A missing journal row means a fresh reservation, or a replay of an
       // interrupted create whose fingerprint reserveSandbox has just
-      // verified against the original caller payload. Completing the intent
-      // here is therefore safe and never re-resolves a changed profile.
+      // verified against the original caller payload. The journal is then
+      // reconstructed entirely from the persisted reservation: its trusted
+      // pins, resources and network policy. A profile resolver that now
+      // returns a different policy must never be journaled or dispatched
+      // for the already-reserved allocation, and startup recovery uses the
+      // same stored pins, so replay and recovery agree.
       let row = journal.get(principal.project, reservation.sandboxId);
       if (!row) {
         row = journal.beginCreate({
@@ -2269,12 +2279,12 @@ function createSandboxService(options = {}) {
           createHash,
           allocationId: reservation.sandboxId,
           launchGeneration: 1,
-          engine: profile.engine,
-          engineVersion: profile.engineVersion,
-          profile: profile.profile,
-          imageDigest: profile.imageDigest,
-          networkMode: profile.networkMode,
-          resources: profile.limits,
+          engine: reservation.engine,
+          engineVersion: reservation.engineVersion,
+          profile: reservation.profile,
+          imageDigest: reservation.imageDigest,
+          networkMode: reservation.reservationNetworkMode,
+          resources: reservation.resources,
           retention: reservation.retention,
           expiresAt: reservation.expiresAt,
         });
@@ -2538,7 +2548,7 @@ function createSandboxService(options = {}) {
       receipt.desiredState === 'stopped' &&
       receipt.observedState === 'stopped'
     ) {
-      clearWriterFenceQuietly(principal, receipt);
+      settleWriterOwnershipQuietly(principal, receipt);
       return Object.freeze({
         sandbox: buildSandbox(receipt, row),
         stopped: true,
@@ -2561,7 +2571,7 @@ function createSandboxService(options = {}) {
       receipt.desiredState === 'stopped' &&
       receipt.observedState === 'stopped'
     ) {
-      clearWriterFenceQuietly(principal, receipt);
+      settleWriterOwnershipQuietly(principal, receipt);
       return Object.freeze({
         sandbox: buildSandbox(receipt, row),
         stopped: true,
@@ -2619,7 +2629,7 @@ function createSandboxService(options = {}) {
         operation: 'stop',
         state: 'done',
       });
-      clearWriterFenceQuietly(principal, latest);
+      settleWriterOwnershipQuietly(principal, latest);
       return Object.freeze({
         sandbox: buildSandbox(
           latest,
@@ -2656,7 +2666,7 @@ function createSandboxService(options = {}) {
             operation: 'stop',
             state: 'done',
           });
-          clearWriterFenceQuietly(principal, latest);
+          settleWriterOwnershipQuietly(principal, latest);
           return Object.freeze({
             sandbox: buildSandbox(
               latest,
@@ -2806,7 +2816,7 @@ function createSandboxService(options = {}) {
       project: row.project,
       sandboxId: row.sandboxId,
     });
-    clearWriterFenceQuietly(principal, latest);
+    settleWriterOwnershipQuietly(principal, latest);
     return Object.freeze({
       sandbox: buildSandbox(
         latest,
@@ -2887,6 +2897,7 @@ function createSandboxService(options = {}) {
       store.beginExecIntent(principal, {
         sandboxId: body.sandboxId,
         workspaceId: body.workspaceId,
+        leaseEpoch: body.leaseEpoch,
       });
     } catch (error) {
       throw mapError(error, 'exec');
@@ -2998,6 +3009,29 @@ function createSandboxService(options = {}) {
         pending.map((sandbox) => sandbox.sandboxId)
       ),
     });
+  }
+
+  /**
+   * Safe deletion invariant for recovery: a sandbox row is treated as
+   * absent only when the store explicitly reports not_found. Any other
+   * read failure is an operational error that is reported and never
+   * converted into confirmed absence, so uncertain writer ownership is
+   * retained until the store can be read again.
+   */
+  async function readSandboxForRecovery(principal, sandboxId) {
+    try {
+      const receipt = store.getSandbox(principal, sandboxId);
+      return { receipt, failed: null };
+    } catch (error) {
+      if (
+        error &&
+        error.name === 'WorkStoreError' &&
+        error.code === 'not_found'
+      ) {
+        return { receipt: null, failed: null };
+      }
+      return { receipt: null, failed: mapError(error, "recovery") };
+    }
   }
 
   async function recoverStartup() {
@@ -3318,12 +3352,16 @@ function createSandboxService(options = {}) {
       };
       try {
         await runExclusive(`sandbox:${intent.sandboxId}`, async () => {
-          let receipt = null;
-          try {
-            receipt = store.getSandbox(principal, intent.sandboxId);
-          } catch {
-            receipt = null;
+          const read = await readSandboxForRecovery(principal, intent.sandboxId);
+          if (read.failed !== null) {
+            report.uncertain.push({
+              sandboxId: intent.sandboxId,
+              project: intent.project,
+              code: read.failed.code,
+            });
+            return;
           }
+          const receipt = read.receipt;
           if (
             receipt === null ||
             receipt.deletedAt !== null ||
@@ -3382,20 +3420,34 @@ function createSandboxService(options = {}) {
       };
       try {
         await runExclusive(`sandbox:${fence.sandboxId}`, async () => {
-          let receipt = null;
-          try {
-            receipt = store.getSandbox(principal, fence.sandboxId);
-          } catch {
-            receipt = null;
+          const read = await readSandboxForRecovery(principal, fence.sandboxId);
+          if (read.failed !== null) {
+            report.uncertain.push({
+              sandboxId: fence.sandboxId,
+              project: fence.project,
+              code: read.failed.code,
+            });
+            return;
           }
+          const receipt = read.receipt;
           const verifiedStop =
             receipt !== null &&
             (receipt.observedState === 'stopped' ||
               receipt.observedState === 'removed');
           if (receipt === null || receipt.deletedAt !== null || verifiedStop) {
-            store.clearWriterFence(principal, {
-              sandboxId: fence.sandboxId,
-            });
+            // Verified termination settles every writer-ownership record,
+            // including any intent left pending next to the fence. A missing
+            // sandbox row leaves only an orphaned fence to clear.
+            if (receipt === null) {
+              store.clearWriterFence(principal, {
+                sandboxId: fence.sandboxId,
+              });
+            } else {
+              store.settleWriterOwnership(principal, {
+                sandboxId: fence.sandboxId,
+                generation: receipt.generation,
+              });
+            }
             report.reconciled.push({
               sandboxId: fence.sandboxId,
               project: fence.project,
