@@ -156,6 +156,14 @@ function safeReason(value, fallback = 'launch-failed') {
     : fallback;
 }
 
+function isThenable(value) {
+  return (
+    !!value &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    typeof value.then === 'function'
+  );
+}
+
 // Caller cancellation and per-launch invalidation are both honoured. The
 // per-launch controller lets stop/fault/restart abort an acquisition
 // synchronously without depending on the caller's signal.
@@ -321,6 +329,15 @@ function validateLaunchOptions(options) {
   ) {
     fail('invalid_relay', 'A relay with a synchronous fence() is required.');
   }
+  // Declared async functions cannot honour the synchronous fence contract.
+  // This supplements, but never replaces, the invocation-time thenable check
+  // in #fenceSync(): a plain function returning a thenable is also rejected.
+  if (options.relay.fence.constructor?.name === 'AsyncFunction') {
+    fail(
+      'invalid_relay',
+      'A relay with a synchronous fence() is required; fence() must not be async.'
+    );
+  }
   if (
     options.callbackFactory !== undefined &&
     typeof options.callbackFactory !== 'function'
@@ -431,6 +448,17 @@ function parseLoopbackAddress(address) {
     fail('invalid_callback_address', 'The callback must bind host loopback only.');
   }
   return { host, port, address: `127.0.0.1:${port}` };
+}
+
+// A closeable acquisition must never be dropped after the factory returned
+// it, even when later validation throws. Anything with a close contract is
+// tracked before validation.
+function isCloseableCallbackHandle(handle) {
+  return (
+    !!handle &&
+    typeof handle === 'object' &&
+    typeof handle.close === 'function'
+  );
 }
 
 function buildIronConfig({ proxyPort, callbackAddress, caFile, keyFile }) {
@@ -733,7 +761,7 @@ function startCallbackProcess({
   );
 }
 
-async function startCallback(options, grant, directory, signal, onFault) {
+async function startCallback(options, grant, directory, signal, onFault, onAcquired) {
   if (options.callbackFactory) {
     const handle = await options.callbackFactory({
       environmentId: options.environmentId,
@@ -742,6 +770,11 @@ async function startCallback(options, grant, directory, signal, onFault) {
       signal,
       onFault,
     });
+    // Cleanup ownership of the acquisition transfers to the lifecycle's
+    // tracked resource set immediately, before address/health validation can
+    // throw. A handle rejected for its address is then closed through the
+    // tracked cleanup path, or retained when close fails — never lost.
+    if (isCloseableCallbackHandle(handle)) onAcquired?.(handle);
     if (
       !handle ||
       typeof handle !== 'object' ||
@@ -987,6 +1020,10 @@ class IronLifecycle {
     this.startedAt = null;
     this.retryRequired = false;
     this.fenceCount = 0;
+    // Sequence of fence invocations. A thenable fence result records its own
+    // sequence so a late rejection can only mark a failure while it is still
+    // the most recent fence attempt.
+    this.fenceSequence = 0;
     // Live handles are only removed after a close contract confirms release.
     // A failed close leaves the handle (and its pid/directory evidence) owned.
     this.resources = new Set();
@@ -1211,9 +1248,34 @@ class IronLifecycle {
   }
 
   #fenceSync(reason) {
+    this.fenceSequence += 1;
+    const sequence = this.fenceSequence;
     this.fenceCount += 1;
     try {
-      this.options.relay.fence();
+      const result = this.options.relay.fence();
+      // The fence contract is synchronous: only a fence that has completed
+      // before returning can be trusted to have cut established streams. A
+      // thenable result is unconfirmed and is always treated as a fence
+      // failure, never as a confirmed success.
+      if (isThenable(result)) {
+        // Absorb the eventual outcome so a rejection can never become an
+        // unhandled rejection. The rejection only re-records the failure
+        // while this invocation is still the most recent fence attempt; a
+        // later confirmed fence supersedes it. A thenable that resolves does
+        // not confirm anything either: the lifecycle must re-fence
+        // synchronously before any stop or replacement may complete.
+        Promise.resolve(result).then(
+          () => {},
+          () => {
+            if (this.fenceSequence === sequence && !this.fenceFailure) {
+              this.fenceFailure = 'fence-failed';
+            }
+          }
+        );
+        this.fenceFailure = 'fence-failed';
+        this.reason = safeReason(reason, this.reason);
+        return false;
+      }
       this.fenceFailure = null;
       return true;
     } catch {
@@ -1469,7 +1531,10 @@ class IronLifecycle {
               : 'callback-fault',
             callbackReason,
             launch.generation
-          )
+          ),
+        // Ownership of a closeable injected handle transfers inside
+        // startCallback(), before validation can throw.
+        (handle) => this.#track(handle)
       );
       // Register the handle under its creating generation before any further
       // await. If the launch is already invalid, cleanup still owns it.
@@ -1575,6 +1640,11 @@ class IronLifecycle {
         fail('iron_unhealthy', 'The Iron process is not healthy.');
       }
       const owned = await helpers.ownsListener(iron.pid, proxyPort);
+      // Final synchronous continuation before publication: the last await was
+      // the attribution lookup, so launch validity, the attribution result and
+      // current callback/Iron/ingress health are re-evaluated together here. A
+      // health-only transition during that await can never publish ready.
+      // On any failure the catch path fences and closes every acquired handle.
       this.#assertLaunchValid(launch);
       if (!owned) {
         fail(
@@ -1582,8 +1652,18 @@ class IronLifecycle {
           'The proxy listener does not belong to the owned Iron process.'
         );
       }
-      signal?.throwIfAborted();
-
+      if (callback.healthy() !== true) {
+        fail('callback_unhealthy', 'The callback is not healthy.');
+      }
+      if (iron.healthy() !== true) {
+        fail('iron_unhealthy', 'The Iron process is not healthy.');
+      }
+      if (
+        typeof ingress.healthy === 'function' &&
+        ingress.healthy() === false
+      ) {
+        fail('ingress_invalid', 'The Iron ingress is not healthy.');
+      }
       this.ingressHandle = ingress;
       this.phase = 'ready';
       this.reason = launch.reason;

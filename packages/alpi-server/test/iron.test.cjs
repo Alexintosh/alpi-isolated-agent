@@ -681,6 +681,88 @@ test('a fence failure is recorded and cannot yield a completed stop', async (t) 
   assert.ok(fenceAttempts >= 2);
 });
 
+test('a pending thenable fence is unconfirmed: stop cannot complete and replacement is refused', async (t) => {
+  const harness = makeHarness(t);
+  const gate = deferred();
+  let fenceEffects = 0;
+  assert.throws(
+    () =>
+      iron.validateLaunchOptions({
+        ...harness.options,
+        relay: { ...harness.relay, fence: async () => {} },
+      }),
+    /must not be async/
+  );
+  // A plain (non-async-declared) function returning a thenable: exactly the
+  // accepted surface the invocation-time contract must reject.
+  harness.relay.fence = () => {
+    const pendingEffect = (async () => {
+      await gate.promise;
+      fenceEffects += 1;
+    })();
+    return pendingEffect;
+  };
+  const lifecycle = iron.createIronLifecycle(harness.options);
+  await lifecycle.start();
+
+  // A pending fence cannot permit a replacement launch.
+  await assert.rejects(lifecycle.restart(), { code: 'cleanup_required' });
+  assert.equal(harness.processes.length, 1);
+  assert.equal(lifecycle.fenceFailure, 'fence-failed');
+
+  const status = await lifecycle.stop();
+  assert.equal(status.phase, 'offline');
+  assert.equal(status.reason, 'fence-failed');
+  assert.equal(status.retryRequired, true);
+  assert.equal(lifecycle.healthy(), false);
+  // The stop resolved without a completed stop: the pending thenable was
+  // never treated as a confirmed fence.
+  assert.equal(fenceEffects, 0);
+  assert.equal(lifecycle.stopFenceConfirmed, false);
+  assert.equal(lifecycle.fenceFailure, 'fence-failed');
+
+  // Even once the async effect lands, it stays unconfirmed under the
+  // synchronous fence contract: only a synchronous fence may complete a stop.
+  gate.resolve();
+  await gate.promise;
+  assert.ok(fenceEffects >= 1);
+  const stillPending = await lifecycle.stop();
+  assert.equal(stillPending.phase, 'offline');
+  assert.equal(stillPending.reason, 'fence-failed');
+
+  harness.relay.fence = () => {};
+  const recovered = await lifecycle.stop();
+  assert.equal(recovered.phase, 'stopped');
+  assert.equal(recovered.retryRequired, false);
+});
+
+test('a rejecting promise fence is absorbed, refuses replacement, and cannot complete stop', async (t) => {
+  const harness = makeHarness(t);
+  harness.relay.fence = () =>
+    // Deliberately uncaught here: the lifecycle must absorb the eventual
+    // rejection, otherwise this test run fails with an unhandled rejection.
+    Promise.reject(new Error('injected asynchronous fence rejection'));
+  const lifecycle = iron.createIronLifecycle(harness.options);
+  await lifecycle.start();
+
+  await assert.rejects(lifecycle.restart(), { code: 'cleanup_required' });
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(lifecycle.fenceFailure, 'fence-failed');
+  assert.equal(harness.processes.length, 1);
+  assert.equal(harness.callbacks.length, 1);
+
+  const status = await lifecycle.stop();
+  assert.equal(status.phase, 'offline');
+  assert.equal(status.reason, 'fence-failed');
+  assert.equal(status.retryRequired, true);
+
+  harness.relay.fence = () => {};
+  const recovered = await lifecycle.stop();
+  assert.equal(recovered.phase, 'stopped');
+  assert.equal(recovered.retryRequired, false);
+});
+
 test('a relay close failure is real and retryable', async (t) => {
   const harness = makeHarness(t);
   let closeAttempts = 0;
@@ -772,6 +854,160 @@ test('listener attribution is rechecked after ingress acquisition before ready',
   assert.equal(lifecycle.status().retryRequired, true);
   assert.equal(lifecycle.ingress(), null);
   assert.equal(pending.handle.closed, true);
+});
+
+test('health is rechecked after the final attribution await before publishing', async (t) => {
+  const harness = makeHarness(t);
+  let attributionCalls = 0;
+  const gate = deferred();
+  const helpers = {
+    ...harness.options.helpers,
+    ownsListener() {
+      attributionCalls += 1;
+      // The readiness-loop attribution succeeds; the final pre-publication
+      // lookup is held pending across a health transition.
+      return attributionCalls === 1 ? true : gate.promise;
+    },
+  };
+  const lifecycle = iron.createIronLifecycle({ ...harness.options, helpers });
+  const startOutcome = lifecycle.start().then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => attributionCalls === 2);
+  // Health-only transition without onFault, mirroring the R2 diagnostic.
+  harness.callbacks[0].alive = false;
+  gate.resolve(true);
+
+  const startError = await startOutcome;
+  assert.ok(startError, 'a health transition during attribution must fail the start');
+  assert.match(startError.message, /callback is not healthy/);
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().reason, 'callback_unhealthy');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(lifecycle.healthy(), false);
+  // The acquired handles are closed by the failure path.
+  assert.equal(harness.network.ingressClosed, true);
+  assert.equal(harness.processes[0].healthy(), false);
+  assert.equal(harness.callbacks[0].healthy(), false);
+});
+
+test('ingress health is rechecked in the same continuation that publishes readiness', async (t) => {
+  const harness = makeHarness(t);
+  const pending = deferredIngress(harness.network, harness.events);
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    network: pending.network,
+  });
+  const startOutcome = lifecycle.start().then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => pending.isOpened());
+  pending.handle.healthy = () => false;
+  pending.gate.resolve(pending.handle);
+
+  const startError = await startOutcome;
+  assert.ok(startError);
+  assert.match(startError.message, /ingress is not healthy/);
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().reason, 'ingress_invalid');
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(pending.handle.closed, true);
+});
+
+test('an invalid callback address closes the acquired handle through tracked cleanup', async (t) => {
+  const harness = makeHarness(t);
+  const baseFactory = harness.options.callbackFactory;
+  let trackedCloseCalls = 0;
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    callbackFactory: async (options) => {
+      const handle = await baseFactory(options);
+      const realClose = handle.close;
+      handle.close = async () => {
+        trackedCloseCalls += 1;
+        await realClose();
+      };
+      handle.address = '10.0.0.1:50051';
+      return handle;
+    },
+  });
+
+  await assert.rejects(lifecycle.start(), { code: 'invalid_callback_address' });
+  // The handle the factory already acquired is closed by the lifecycle's
+  // tracked cleanup path, not left running and forgotten.
+  assert.equal(trackedCloseCalls, 1);
+  assert.equal(harness.events.includes('callback-close'), true);
+  assert.equal(harness.callbacks[0].healthy(), false);
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().reason, 'invalid_callback_address');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(lifecycle.status().resources, 0);
+  assert.deepEqual(
+    fs.readdirSync(path.join(harness.stateDir, 'iron', 'env-test')),
+    []
+  );
+
+  const status = await lifecycle.stop();
+  assert.equal(status.phase, 'stopped');
+  assert.equal(status.resources, 0);
+  assert.equal(status.retryRequired, false);
+});
+
+test('an invalid callback address with a failing close retains ownership and blocks replacement', async (t) => {
+  const harness = makeHarness(t);
+  const baseFactory = harness.options.callbackFactory;
+  let realClose;
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    callbackFactory: async (options) => {
+      const handle = await baseFactory(options);
+      realClose = handle.close;
+      handle.close = async () => {
+        throw new Error('injected callback close failure');
+      };
+      handle.address = '10.0.0.1:50051';
+      return handle;
+    },
+  });
+
+  await assert.rejects(lifecycle.start(), { code: 'invalid_callback_address' });
+  const launchDir = path.join(
+    harness.stateDir,
+    'iron',
+    'env-test',
+    lifecycle.status().launchId
+  );
+  // Ownership is retained: the unclosed handle and its launch evidence stay.
+  assert.equal(lifecycle.status().resources, 1);
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().reason, 'resource-close-failed');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(harness.callbacks[0].healthy(), true);
+  assert.ok(fs.existsSync(launchDir));
+  await assert.rejects(lifecycle.restart(), { code: 'cleanup_required' });
+  // The launch never reached the Iron process, and no replacement starts.
+  assert.equal(harness.processes.length, 0);
+
+  // Stop cannot complete while the close contract fails.
+  const failed = await lifecycle.stop();
+  assert.equal(failed.phase, 'offline');
+  assert.equal(failed.reason, 'resource-close-failed');
+  assert.equal(failed.retryRequired, true);
+  assert.equal(failed.resources, 1);
+
+  // Restoring the close lets the tracked cleanup path release the handle.
+  harness.callbacks[0].close = realClose;
+  const retry = await lifecycle.stop();
+  assert.equal(retry.phase, 'stopped');
+  assert.equal(retry.resources, 0);
+  assert.equal(retry.retryRequired, false);
+  assert.equal(harness.callbacks[0].healthy(), false);
+  assert.equal(fs.existsSync(launchDir), false);
 });
 
 test('callback config and policy allow only the exact fixed POST', () => {
