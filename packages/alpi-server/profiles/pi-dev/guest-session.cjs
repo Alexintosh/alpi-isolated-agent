@@ -194,20 +194,23 @@ function ensureDirectory(directory, { privateMode = false } = {}) {
 }
 
 /**
- * Persist a directory entry so that a rename or unlink is durable. Unsupported
- * directory fsync is the only error that may be ignored; anything else means
- * the caller cannot claim the change was committed.
+ * Persist a directory entry so that a rename or unlink is durable. Critical
+ * persistence (requireDurable) may ignore no error at all: unsupported
+ * directory fsync means directory durability cannot be established on this
+ * storage, and the caller must fail closed instead of claiming a committed
+ * transition. Diagnostic writes keep the historical leniency.
  */
-function fsyncDirectory(directory) {
+function fsyncDirectory(directory, { requireDurable = false } = {}) {
   let fd;
   try {
     fd = fs.openSync(directory, 'r');
     fs.fsyncSync(fd);
   } catch (error) {
-    if (error && ['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF'].includes(error.code)) {
-      return;
+    const unsupported = error &&
+      ['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF'].includes(error.code);
+    if (requireDurable || !unsupported) {
+      fail('state_write_failed', 'Guest supervisor directory could not be synced.');
     }
-    fail('state_write_failed', 'Guest supervisor directory could not be synced.');
   } finally {
     if (fd !== undefined) {
       try {
@@ -219,24 +222,41 @@ function fsyncDirectory(directory) {
   }
 }
 
-function writeAtomic(filePath, data) {
+function writeAtomic(filePath, data, { requireDurableDirectory = false } = {}) {
   const directory = path.dirname(filePath);
   const temporary = path.join(
     directory,
     `.${path.basename(filePath)}.${crypto.randomBytes(8).toString('hex')}.tmp`
   );
   let fd;
+  let restoreBytes = null;
+  let restoreAbsent = false;
+  let renamed = false;
   try {
     fd = fs.openSync(temporary, 'wx', 0o600);
     fs.writeFileSync(fd, data, 'utf8');
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
+    // Capture the previous contents so a post-rename durability failure can
+    // restore the last committed state (best effort; the failure is still
+    // reported and latched either way).
+    try {
+      restoreBytes = fs.readFileSync(filePath);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        restoreAbsent = true;
+      }
+    }
     fs.renameSync(temporary, filePath);
+    renamed = true;
     // File contents and the directory entry must both be durable before the
     // caller treats the write as committed.
-    fsyncDirectory(directory);
+    fsyncDirectory(directory, { requireDurable: requireDurableDirectory });
   } catch {
+    if (renamed && (restoreAbsent || restoreBytes !== null)) {
+      restoreRenamedState(filePath, restoreAbsent ? null : restoreBytes);
+    }
     fail('state_write_failed', 'Guest supervisor state could not be written.');
   } finally {
     if (fd !== undefined) {
@@ -257,6 +277,35 @@ function writeAtomic(filePath, data) {
 }
 
 /**
+ * Best-effort reversal of a rename whose directory entry could not be made
+ * durable: put back the previous file contents, or remove the file when none
+ * existed. Never throws; the original state_write_failed report is the
+ * authoritative outcome.
+ */
+function restoreRenamedState(filePath, bytes) {
+  try {
+    if (bytes === null) {
+      fs.unlinkSync(filePath);
+      return;
+    }
+    const temporary = path.join(
+      path.dirname(filePath),
+      '.' + path.basename(filePath) + '.' + crypto.randomBytes(8).toString('hex') + '.restore'
+    );
+    const fd = fs.openSync(temporary, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, bytes);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(temporary, filePath);
+  } catch {
+    // The latched storage fault already fences every further transition.
+  }
+}
+
+/**
  * Remove a file and persist the directory entry. Only ENOENT is tolerable
  * because the desired end state (file absent) already holds.
  */
@@ -269,7 +318,9 @@ function unlinkDurable(filePath) {
     }
     return;
   }
-  fsyncDirectory(path.dirname(filePath));
+  // Clearing a durable ownership marker grants ownership; the removal of the
+  // directory entry must be durable too.
+  fsyncDirectory(path.dirname(filePath), { requireDurable: true });
 }
 
 /**
@@ -714,6 +765,10 @@ function createSupervisor(config) {
   const ownershipPath = `${statePath}.owner`;
   let reclaimPath = null;
   let lockStartedAt = null;
+  let guardStartedAt = null;
+  // Set while stop finalization runs. No deferred write from the departing
+  // supervisor may touch session state after the lock is released.
+  let finalizing = false;
 
   function nextRequestId(prefix) {
     idCounter += 1;
@@ -776,6 +831,9 @@ function createSupervisor(config) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
+    if (finalizing) {
+      return false;
+    }
     if (storageFault) {
       return false;
     }
@@ -797,6 +855,9 @@ function createSupervisor(config) {
    * durably committed, and refuses further writes after any critical failure.
    */
   function writeStateCritical(operation) {
+    if (finalizing) {
+      fail('state_write_failed', 'Guest supervisor state is already finalized.');
+    }
     if (storageFault) {
       fail('storage_unavailable', 'Guest supervisor storage is unavailable.', {
         fault: storageFault,
@@ -809,7 +870,7 @@ function createSupervisor(config) {
     }
     const data = JSON.stringify(serializeState(), null, 2);
     try {
-      writeAtomic(statePath, data);
+      writeAtomic(statePath, data, { requireDurableDirectory: true });
     } catch (error) {
       if (!storageFault) {
         recordStorageFault(operation, error);
@@ -834,13 +895,18 @@ function createSupervisor(config) {
   }
 
   function writeOwnershipMarkerCritical(operation) {
+    if (finalizing) {
+      fail('state_write_failed', 'Guest supervisor state is already finalized.');
+    }
     if (storageFault) {
       fail('storage_unavailable', 'Guest supervisor storage is unavailable.', {
         fault: storageFault,
       });
     }
     try {
-      writeAtomic(ownershipPath, JSON.stringify(ownershipMarkerPayload(), null, 2));
+      writeAtomic(ownershipPath, JSON.stringify(ownershipMarkerPayload(), null, 2), {
+        requireDurableDirectory: true,
+      });
     } catch (error) {
       if (!storageFault) {
         recordStorageFault(operation, error);
@@ -860,8 +926,13 @@ function createSupervisor(config) {
    * guard stays and restart fails closed until the probe verifies absence.
    */
   function writeOwnershipMarkerRaw(operation) {
+    if (finalizing) {
+      return false;
+    }
     try {
-      writeAtomic(ownershipPath, JSON.stringify(ownershipMarkerPayload(), null, 2));
+      writeAtomic(ownershipPath, JSON.stringify(ownershipMarkerPayload(), null, 2), {
+        requireDurableDirectory: true,
+      });
       return true;
     } catch (error) {
       if (!storageFault) {
@@ -961,6 +1032,9 @@ function createSupervisor(config) {
   }
 
   function scheduleSave() {
+    if (finalizing) {
+      return;
+    }
     saveDirty = true;
     if (saveTimer) {
       return;
@@ -1285,19 +1359,34 @@ function createSupervisor(config) {
       }
       throw error;
     }
-    child.on('error', () => {
-      lastError = { code: 'pi_unavailable', message: 'Pi process failed to start.' };
+    child.on('error', (error) => {
+      lastError = {
+        code: 'pi_unavailable',
+        message: 'Pi process error.',
+        detail: truncateText(error && error.message ? error.message : '', 512),
+      };
+      if (child.pid) {
+        // The child was spawned, so this error (for example a failed
+        // ChildProcess.kill) says nothing about whether Pi is still running.
+        // Ownership stays running/unknown: only an observed close or an
+        // independent presence check may ever record absence.
+        notifyWaiters();
+        return;
+      }
+      // An error before any pid existed is a verified no-process spawn
+      // failure; that is the only error this handler may treat as absence.
       if (!piExited) {
         piExited = true;
+        piPid = null;
         childState = {
-          state: 'exited',
-          pid: childState.pid,
-          startTime: childState.startTime,
+          state: 'none',
+          pid: null,
+          startTime: null,
           at: nowIso(),
           exitCode: null,
           signal: null,
         };
-        writeOwnershipMarkerRaw('pi-start-error');
+        writeOwnershipMarkerRaw('pi-spawn-failed');
         failPending(new SupervisorError('pi_unavailable', 'Pi process failed to start.'));
         if (!stopping) {
           status = 'exited';
@@ -2071,10 +2160,10 @@ function createSupervisor(config) {
     }
   }
 
-  function readLockRecord() {
+  function readLockRecord(filePath) {
     let raw;
     try {
-      raw = fs.readFileSync(lockPath, 'utf8');
+      raw = fs.readFileSync(filePath, 'utf8');
     } catch (error) {
       if (error && error.code === 'ENOENT') {
         return null;
@@ -2092,131 +2181,220 @@ function createSupervisor(config) {
     return { invalid: true };
   }
 
-  function supervisorAlive(record) {
-    if (!record || record.invalid === true) {
-      return false;
-    }
-    if (!Number.isSafeInteger(record.pid) || record.pid <= 0) {
-      return false;
-    }
+  /**
+   * A lock or guard record is usable only when it is complete. Indeterminate
+   * records never prove liveness or absence.
+   */
+  function lockRecordIdentifies(record) {
+    return Boolean(
+      record && !record.invalid && record.version === 1 &&
+      Number.isSafeInteger(record.pid) && record.pid > 0 &&
+      typeof record.startedAt === 'string'
+    );
+  }
+
+  /**
+   * Liveness of a pid. ESRCH is the only answer that proves absence; EPERM
+   * means the process exists but is not inspectable, so the verdict is
+   * unknown and every caller must fail closed.
+   */
+  function processLiveness(pid) {
     try {
-      process.kill(record.pid, 0);
-      return true;
+      process.kill(pid, 0);
+      return 'alive';
     } catch (error) {
-      // ESRCH is the only answer that proves the supervisor is gone. EPERM
-      // means the process exists but is not inspectable, so fail closed.
-      return !(error && error.code === 'ESRCH');
+      return error && error.code === 'ESRCH' ? 'absent' : 'unknown';
     }
   }
 
-  function tryCreateLock() {
+  function supervisorLiveness(record) {
+    if (!lockRecordIdentifies(record)) {
+      return 'unknown';
+    }
+    return processLiveness(record.pid);
+  }
+
+  /**
+   * Publish a complete record at targetPath via link(): the file is fully
+   * written and fsynced under a unique temporary name before it appears, so
+   * no reader can observe a created-but-unwritten lock. Fails with EEXIST
+   * when targetPath already exists; the caller decides what that means.
+   * Returns the inode of the published file.
+   */
+  function publishExclusiveFile(targetPath, payload) {
+    const directory = path.dirname(targetPath);
+    const temporary = path.join(
+      directory,
+      '.' + path.basename(targetPath) + '.' + process.pid + '.' +
+        crypto.randomBytes(6).toString('hex') + '.tmp'
+    );
     let fd;
     try {
-      fd = fs.openSync(lockPath, 'wx', 0o600);
-    } catch (error) {
-      throw error;
-    }
-    try {
-      fs.writeFileSync(fd, JSON.stringify({
-        version: 1,
-        pid: process.pid,
-        sessionId,
-        startedAt: lockStartedAt,
-      }), 'utf8');
+      fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, payload, 'utf8');
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;
-      fsyncDirectory(path.dirname(lockPath));
-      return;
-    } catch (error) {
+      fs.linkSync(temporary, targetPath);
+      return fs.statSync(targetPath).ino;
+    } finally {
       if (fd !== undefined) {
         try {
           fs.closeSync(fd);
         } catch {
-          // The original failure is reported below.
+          // The original failure is reported by the caller.
         }
       }
       try {
-        fs.unlinkSync(lockPath);
+        fs.unlinkSync(temporary);
       } catch {
-        // Keep the original failure.
+        // A leftover temporary file is inert.
       }
-      throw error;
     }
   }
 
   /**
-   * Acquire the supervisor lock. Stale locks are reclaimed only while holding
-   * a separate reclaim lock, so two supervisors cannot both decide that the
-   * same lock is stale and replace it. The liveness probe never signals a
-   * live pid, and a lock owned by a live supervisor is never taken.
+   * Create targetPath with a complete record and verify that the file at
+   * targetPath is still exactly the one we published (content and inode).
+   * Returns false when targetPath already existed or the verification fails.
+   */
+  function createLockFile(targetPath, record) {
+    const payload = JSON.stringify(record);
+    let inode;
+    try {
+      inode = publishExclusiveFile(targetPath, payload);
+    } catch (error) {
+      if (error && error.code === 'EEXIST') {
+        return false;
+      }
+      throw error;
+    }
+    const current = readLockRecord(targetPath);
+    if (!lockRecordIdentifies(current) ||
+      current.pid !== record.pid || current.startedAt !== record.startedAt) {
+      return false;
+    }
+    let stat;
+    try {
+      stat = fs.statSync(targetPath);
+    } catch {
+      return false;
+    }
+    return stat.ino === inode;
+  }
+
+  /**
+   * Serialize every reclamation decision behind a guard file published with
+   * the same link-based protocol as the lock itself, so a guard record is
+   * never observed partially written. A guard whose owner is provably dead
+   * (ESRCH) is taken over by renaming it away — an atomic operation only one
+   * contender can win — and the winner re-publishes the public guard under
+   * its own identity before touching anything else.
+   */
+  function acquireRecoveryGuard() {
+    const guardRecord = {
+      version: 1,
+      pid: process.pid,
+      startedAt: guardStartedAt,
+    };
+    for (;;) {
+      if (createLockFile(reclaimPath, guardRecord)) {
+        return;
+      }
+      const existing = readLockRecord(reclaimPath);
+      const liveness = supervisorLiveness(existing);
+      if (liveness === 'alive') {
+        fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
+      }
+      if (liveness === 'unknown') {
+        fail('lock_failed', 'Guest supervisor recovery guard is not verifiable.');
+      }
+      const stolenPath = reclaimPath + '.' + process.pid + '.' +
+        crypto.randomBytes(6).toString('hex') + '.stolen';
+      try {
+        fs.renameSync(reclaimPath, stolenPath);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') {
+          continue;
+        }
+        fail('lock_failed', 'Guest supervisor recovery guard could not be recovered.');
+      }
+      if (createLockFile(reclaimPath, guardRecord)) {
+        try {
+          fs.unlinkSync(stolenPath);
+        } catch {
+          // The stolen copy is inert.
+        }
+        return;
+      }
+      const current = readLockRecord(reclaimPath);
+      try {
+        fs.unlinkSync(stolenPath);
+      } catch {
+        // The stolen copy is inert.
+      }
+      if (supervisorLiveness(current) === 'alive') {
+        fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
+      }
+      // The replacement guard is gone or dead again; retry the takeover.
+    }
+  }
+
+  /**
+   * Remove the recovery guard only when it still names this supervisor.
+   */
+  function releaseRecoveryGuard() {
+    const current = readLockRecord(reclaimPath);
+    if (lockRecordIdentifies(current) &&
+      current.pid === process.pid && current.startedAt === guardStartedAt) {
+      try {
+        fs.unlinkSync(reclaimPath);
+      } catch {
+        // Best effort; the guard is liveness-based.
+      }
+    }
+  }
+
+  /**
+   * Acquire the supervisor lock. The lock record is published atomically with
+   * link(), so a lock file never exists without its complete record and a
+   * concurrent starter can never mistake an in-progress creator for a dead
+   * owner. Reclamation of a provably dead lock runs under the recovery guard,
+   * and every indeterminate record fails closed instead of authorizing a
+   * takeover.
    */
   function acquireLock() {
     lockPath = `${statePath}.lock`;
-    reclaimPath = `${statePath}.lock` + " + '.reclaim'";
+    reclaimPath = lockPath + '.reclaim';
     lockStartedAt = nowIso();
-    try {
-      tryCreateLock();
+    guardStartedAt = nowIso();
+    const lockRecord = {
+      version: 1,
+      pid: process.pid,
+      sessionId,
+      startedAt: lockStartedAt,
+    };
+    if (createLockFile(lockPath, lockRecord)) {
       return;
-    } catch (error) {
-      if (!error || error.code !== 'EEXIST') {
-        fail('lock_failed', 'Guest supervisor lock could not be acquired.');
-      }
     }
-    const existing = readLockRecord();
-    if (supervisorAlive(existing)) {
-      fail('already_running', 'A guest supervisor already owns this session.');
-    }
-    let reclaimFd;
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        reclaimFd = fs.openSync(reclaimPath, 'wx', 0o600);
-        fs.writeFileSync(reclaimFd, JSON.stringify({ pid: process.pid, at: nowIso() }), 'utf8');
-        fs.fsyncSync(reclaimFd);
-        fs.closeSync(reclaimFd);
-        reclaimFd = undefined;
-        break;
-      } catch (error) {
-        if (reclaimFd !== undefined) {
-          try {
-            fs.closeSync(reclaimFd);
-          } catch {
-            // The failure below is what matters.
-          }
-          reclaimFd = undefined;
-        }
-        if (error && error.code === 'EEXIST') {
-          let stale = null;
-          try {
-            stale = JSON.parse(fs.readFileSync(reclaimPath, 'utf8'));
-          } catch {
-            stale = null;
-          }
-          if (attempt === 0 && stale && !supervisorAlive(stale)) {
-            // A dead supervisor can leave the reclaim lock behind only if it
-            // was killed inside this tiny window. Clean it up once.
-            try {
-              fs.unlinkSync(reclaimPath);
-            } catch {
-              // The retry reports the next failure.
-            }
-            continue;
-          }
-          fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
-        }
-        fail('lock_failed', 'Guest supervisor ownership recovery could not be serialized.');
-      }
-    }
+    acquireRecoveryGuard();
     try {
-      const current = readLockRecord();
-      if (supervisorAlive(current)) {
+      const existing = readLockRecord(lockPath);
+      const liveness = supervisorLiveness(existing);
+      if (liveness === 'alive') {
         fail('already_running', 'A guest supervisor already owns this session.');
       }
-      if (existing && !existing.invalid && current && !current.invalid &&
-        (current.pid !== existing.pid || current.startedAt !== existing.startedAt)) {
-        fail('lock_busy', 'Guest supervisor lock changed during ownership recovery.');
+      if (liveness === 'unknown') {
+        fail('lock_failed', 'Guest supervisor lock record is not verifiable.');
       }
-      if (current) {
+      if (existing) {
+        // The record was proven dead. Under the guard no protocol participant
+        // can replace it; re-read to confirm the identity before unlinking.
+        const recheck = readLockRecord(lockPath);
+        if (!lockRecordIdentifies(recheck) ||
+          recheck.pid !== existing.pid || recheck.startedAt !== existing.startedAt) {
+          fail('lock_busy', 'Guest supervisor lock changed during ownership recovery.');
+        }
         try {
           fs.unlinkSync(lockPath);
         } catch (unlinkError) {
@@ -2224,24 +2402,12 @@ function createSupervisor(config) {
             fail('lock_failed', 'A stale guest supervisor lock could not be cleared.');
           }
         }
-        fsyncDirectory(path.dirname(lockPath));
       }
-      try {
-        tryCreateLock();
-      } catch (createError) {
-        if (createError && createError.code === 'EEXIST') {
-          fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
-        }
-        fail('lock_failed', 'Guest supervisor lock could not be acquired.');
+      if (!createLockFile(lockPath, lockRecord)) {
+        fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
       }
     } finally {
-      try {
-        fs.unlinkSync(reclaimPath);
-      } catch (error) {
-        if (!error || error.code !== 'ENOENT') {
-          // The reclaim lock is diagnostic once we hold the real lock.
-        }
-      }
+      releaseRecoveryGuard();
     }
   }
 
@@ -2249,12 +2415,13 @@ function createSupervisor(config) {
     if (!lockPath) {
       return;
     }
-    const current = readLockRecord();
-    if (current && !current.invalid &&
+    const current = readLockRecord(lockPath);
+    if (lockRecordIdentifies(current) &&
       (current.pid !== process.pid || current.startedAt !== lockStartedAt)) {
       // Never remove a lock that a replacement supervisor now owns.
       lockPath = null;
       reclaimPath = null;
+      guardStartedAt = null;
       return;
     }
     try {
@@ -2270,15 +2437,10 @@ function createSupervisor(config) {
     } catch {
       // Best effort; the entry is gone or was already absent.
     }
-    if (reclaimPath) {
-      try {
-        fs.unlinkSync(reclaimPath);
-      } catch {
-        // Best effort.
-      }
-    }
+    releaseRecoveryGuard();
     lockPath = null;
     reclaimPath = null;
+    guardStartedAt = null;
   }
 
   function loadOrCreateState(ownershipVerified) {
@@ -2655,6 +2817,15 @@ function createSupervisor(config) {
   }
 
   async function finalizeStop() {
+    // The departing supervisor commits its final state while it still holds
+    // the exclusive lock and releases the lock only after that commit is
+    // durable. From that point on, no deferred write (critical, raw marker
+    // or diagnostic) from this instance may touch session state.
+    saveDirty = false;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
     if (server) {
       await new Promise((resolve) => {
         try {
@@ -2672,8 +2843,19 @@ function createSupervisor(config) {
         // Best effort.
       }
     }
+    try {
+      writeStateCritical('stop-finalize');
+    } catch {
+      // The storage fault is latched; the durable guard on disk still
+      // protects the session for the next supervisor.
+    }
+    finalizing = true;
+    saveDirty = false;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
     releaseLock();
-    writeStateCritical('stop-finalize');
   }
 
   function installSignalHandlers() {

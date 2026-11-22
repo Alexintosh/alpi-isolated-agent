@@ -1,3 +1,52 @@
+
+async function createSupervisorSpec(t, options = {}) {
+  const root = tempDirectory(options.label || 'guest');
+  const workspace = path.join(root, 'workspace');
+  const sessions = path.join(workspace, 'sessions');
+  const agent = path.join(root, 'agent');
+  const home = path.join(root, 'home');
+  const run = path.join(root, 'run');
+  for (const directory of [workspace, sessions, agent, home, run]) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+  }
+  writeScenario(workspace, options.scenario || {});
+  const fakePi = writeFakePi(root);
+  const sessionId = options.sessionId || UUID_A;
+  const socketPath = path.join(run, 'pi-' + sessionId + '.sock');
+  const statePath = path.join(run, 'pi-' + sessionId + '.state.json');
+  const logPath = path.join(run, 'supervisor.log');
+  const spec = {
+    root, workspace, sessions, agent, home, run,
+    socketPath, statePath, logPath, fakePi, sessionId,
+    children: [],
+  };
+  t.after(async () => {
+    for (const child of spec.children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (error.code !== 'ENOTEMPTY') {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+  });
+  spec.attachChild = (child) => {
+    spec.children.push(child);
+    child.stderr.on('data', (chunk) => {
+      spec.lastStderr = String(chunk);
+    });
+  };
+  return spec;
+}
 'use strict';
 
 /**
@@ -15,6 +64,7 @@
 
 const assert = require('node:assert/strict');
 const { execFile, spawn } = require('node:child_process');
+const net = require('node:net');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -122,6 +172,9 @@ function respond(command, success, data, error) {
   if (error !== undefined) record.error = error;
   emit(record);
 }
+if (process.argv.includes("--mode")) {\n  try {
+    fs.appendFileSync(path.join(process.cwd(), "fake-pi-pids.log"), process.pid + "\\n");
+  } catch {}\n}
 function bumpPromptCount() {
   fs.appendFileSync(path.join(process.cwd(), 'fake-pi-prompts.log'), '1\\n');
 }
@@ -248,7 +301,164 @@ function promptCount(workspace) {
 }
 
 function writeScenario(workspace, scenario) {
-  fs.writeFileSync(path.join(workspace, 'fake-pi-scenario.json'), JSON.stringify(scenario));
+  fs.writeFileSync(path.join(workspace, "fake-pi-scenario.json"), JSON.stringify(scenario));
+}
+
+// Scheduling patch: loaded into the real supervisor process via NODE_OPTIONS
+// --require, injecting gates and faults configured per child through
+// PI_TEST_GATES.
+const WRAPPER_SOURCE = [
+  "'use strict';",
+  "const childProcess = require('node:child_process');",
+  "const fs = require('node:fs');",
+  "const path = require('node:path');",
+  "const gates = JSON.parse(process.env.PI_TEST_GATES || '{}');",
+  "function sleepSync(ms) {",
+  "  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);",
+  "}",
+  "function gateWait(name, file) {",
+  "  if (!file) return;",
+  "  try { fs.writeFileSync(file + '.reached', String(process.pid)); } catch {}",
+  "  while (fs.existsSync(file)) sleepSync(10);",
+  "  try { fs.unlinkSync(file + '.reached'); } catch {}",
+  "}",
+  "const openSync = fs.openSync;",
+  "fs.openSync = function (p, flags, mode) {",
+  "  const fd = openSync.call(fs, p, flags, mode);",
+  "  if (gates.lockGate && p === gates.lockGate.lockPath) gateWait('lockCreate', gates.lockGate.file);",
+  "  return fd;",
+  "};",
+  "const linkSync = fs.linkSync;",
+  "fs.linkSync = function (from, to) {",
+  "  if (gates.lockGate && to === gates.lockGate.lockPath) gateWait('lockPublish', gates.lockGate.file);",
+  "  return linkSync.call(fs, from, to);",
+  "};",
+  "const renameSync = fs.renameSync;",
+  "fs.renameSync = function (from, to) {",
+  "  if (gates.rename && to === gates.rename.target) gateWait('rename', gates.rename.file);",
+  "  return renameSync.call(fs, from, to);",
+  "};",
+  "const fsyncSync = fs.fsyncSync;",
+  "fs.fsyncSync = function (fd) {",
+  "  let isDir = false;",
+  "  try { isDir = fs.fstatSync(fd).isDirectory(); } catch {}",
+  "  if (gates.lockReleaseFsync && isDir &&",
+  "      !fs.existsSync(gates.lockReleaseFsync.lockPath)) {",
+  "    gateWait('lockReleaseFsync', gates.lockReleaseFsync.file);",
+  "  }",
+  "  if (gates.dirFsyncFault && fs.existsSync(gates.dirFsyncFault.trigger) && isDir) {",
+  "    const error = new Error('injected directory fsync failure');",
+  "    error.code = gates.dirFsyncFault.code;",
+  "    error.errno = gates.dirFsyncFault.errno;",
+  "    throw error;",
+  "  }",
+  "  return fsyncSync.call(fs, fd);",
+  "};",
+  "if (gates.killFault) {",
+  "  const originalKill = childProcess.ChildProcess.prototype.kill;",
+  "  childProcess.ChildProcess.prototype.kill = function (signal) {",
+  "    if (fs.existsSync(gates.killFault.trigger) && this._handle &&",
+  "        !this._handle.__injectedKillFault) {",
+  "      this._handle.__injectedKillFault = true;",
+  "      this._handle.kill = () => gates.killFault.errno;",
+  "    }",
+  "    return originalKill.call(this, signal);",
+  "  };",
+  "}",
+].join('\n');
+
+function supervisorTestEnv(gates, wrapperPath) {
+  return {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    PI_TEST_GATES: JSON.stringify(gates || {}),
+    NODE_OPTIONS: '--require ' + JSON.stringify(wrapperPath),
+  };
+}
+
+function spawnWrappedSupervisor(supervisor, gates, options = {}) {
+  const wrapperPath = path.join(supervisor.root, 'supervisor-patch.cjs');
+  fs.writeFileSync(wrapperPath, WRAPPER_SOURCE);
+  return spawn(NODE, [SUPERVISOR, ...supervisorLaunchArgs(supervisor, options)], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: supervisorTestEnv(gates, wrapperPath),
+  });
+}
+
+async function pollUntil(fn, timeoutMs = 10_000, intervalMs = 50) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+async function waitForFile(filePath, timeoutMs = 10_000) {
+  return pollUntil(() => fs.existsSync(filePath), timeoutMs);
+}
+
+async function supervisorExitCode(child, timeoutMs = 15_000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return child.exitCode;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return child.exitCode;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function fakePiPids(workspace) {
+  try {
+    return fs.readFileSync(path.join(workspace, 'fake-pi-pids.log'), 'utf8')
+      .split("\\n").filter((line) => line.trim().length > 0).map(Number);
+  } catch {
+    return [];
+  }
+}
+
+function stopDirect(socketPath, deadlineMs, timeoutMs) {
+  return new Promise((resolve) => {
+    const socket = net.connect(socketPath);
+    let buffer = '';
+    let settled = false;
+    const finish = (json) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(json);
+    };
+    const timer = setTimeout(() => finish({ ok: false, code: 'test_timeout' }), timeoutMs);
+    socket.on('connect', () => {
+      socket.write(JSON.stringify({
+        version: 1, id: 'stop-direct-1', command: 'stop', deadlineMs,
+      }) + String.fromCharCode(10));
+    });
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      const newline = buffer.indexOf(String.fromCharCode(10));
+      if (newline === -1) return;
+      try {
+        finish(JSON.parse(buffer.slice(0, newline)));
+      } catch {
+        finish({ ok: false, code: 'invalid_response' });
+      }
+    });
+    socket.on('error', () => finish({ ok: false, code: 'supervisor_unavailable' }));
+  });
 }
 
 async function waitForStatus(socketPath, timeoutMs = 6_000) {
@@ -1390,4 +1600,366 @@ test('failed stop cleanup keeps the ownership guard until absence is verified', 
     message: 'after recovery',
   });
   assert.equal(recovered.json.accepted, true);
+});
+
+test('concurrent starter cannot claim a lock that is being initialized', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'lockrace' });
+  const gateA = path.join(spec.root, 'gate-lock-init');
+  const gateB = path.join(spec.root, 'gate-b-startup');
+
+  // Starter A is paused at lock initialization; the gate fires after the lock
+  // pathname exists (pre-fix openSync schedule) or right before it is
+  // published via link (post-fix schedule).
+  fs.writeFileSync(gateA, 'on');
+  const a = spawnWrappedSupervisor(spec, {
+    lockGate: { file: gateA, lockPath: spec.statePath + '.lock' },
+  });
+  spec.attachChild(a);
+  assert.equal(
+    await waitForFile(gateA + '.reached', 10_000),
+    true,
+    'starter A did not reach the lock-initialization gate'
+  );
+
+  // Starter B runs until its first durable startup-state write.
+  fs.writeFileSync(gateB, 'on');
+  const b = spawnWrappedSupervisor(spec, { rename: { file: gateB, target: spec.statePath } });
+  spec.attachChild(b);
+  assert.equal(
+    await waitForFile(gateB + '.reached', 20_000),
+    true,
+    'starter B did not reach its startup gate'
+  );
+
+  // Resume A while B holds (or has cleanly acquired) the lock.
+  fs.unlinkSync(gateA);
+  const aExit = await supervisorExitCode(a, 15_000);
+  assert.equal(
+    aExit,
+    2,
+    'starter A must fail while another supervisor owns the session; it stayed live'
+  );
+
+  fs.unlinkSync(gateB);
+  const status = await waitForStatus(spec.socketPath, 15_000);
+  assert.ok(status, 'starter B did not become ready');
+  assert.equal(processAlive(b.pid), true);
+
+  // Exactly one supervisor and one Pi child exist for the session.
+  const lockRecord = readJsonFile(spec.statePath + '.lock');
+  assert.ok(lockRecord);
+  assert.equal(lockRecord.pid, b.pid);
+  const marker = readJsonFile(spec.statePath + '.owner');
+  assert.ok(marker);
+  assert.equal(marker.child.state, 'running');
+  assert.equal(processAlive(marker.child.pid), true);
+  // The fake Pi registers its pid when its JS actually starts running.
+  assert.equal(await pollUntil(() => fakePiPids(spec.workspace).length === 1, 5_000), true);
+});
+
+test('a failed kill keeps the ownership guard instead of faking exit proof', async (t) => {
+  const spec = await createSupervisorSpec(t, {
+    label: 'killfault',
+    scenario: { keepAlive: true },
+    stopDeadlineMs: 300,
+  });
+  const trigger = path.join(spec.root, 'kill-fault-trigger');
+  const a = spawnWrappedSupervisor(spec, { killFault: { trigger, errno: -1 } }, {
+    stopDeadlineMs: 300,
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+  const piPid = status.piPid;
+  assert.ok(Number.isSafeInteger(piPid) && piPid > 0);
+  t.after(async () => {
+    if (processAlive(piPid)) {
+      try {
+        process.kill(piPid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  // Inject UV_EPERM at the native kill-handle boundary and stop.
+  fs.writeFileSync(trigger, 'on');
+  // The CLI stop timeout is deadline + 5s, which is shorter than the
+  // double grace window when both kills fail, so talk to the socket directly.
+  const stopped = await stopDirect(spec.socketPath, 300, 20_000);
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.stopped, false);
+  assert.equal(stopped.cleanupUnverified, true);
+  await waitForExit(a, 10_000);
+
+  // The live child must never be recorded as exited.
+  const marker = readJsonFile(spec.statePath + '.owner');
+  assert.ok(marker);
+  assert.equal(marker.child.state, 'running');
+  assert.equal(marker.child.pid, piPid);
+  const state = readJsonFile(spec.statePath);
+  assert.ok(state);
+  assert.equal(state.child.state, 'running');
+  assert.equal(processAlive(piPid), true);
+
+  // A replacement must refuse while the original child may still be alive.
+  const refused = await runCli(supervisorLaunchArgs(spec), 20_000);
+  assert.equal(refused.code, 2);
+  assert.equal(refused.json.ok, false);
+  assert.equal(refused.json.code, 'cleanup_pending');
+
+  // Only an independently verified absence unlocks recovery.
+  process.kill(piPid, 'SIGKILL');
+  assert.equal(await waitForPidGone(piPid), true);
+  const replacement = spawnSupervisorProcess(spec);
+  spec.attachChild(replacement);
+  const statusAfter = await waitForStatus(spec.socketPath, 15_000);
+  assert.ok(statusAfter, 'replacement supervisor did not become ready');
+  assert.equal(statusAfter.generation, 2);
+});
+
+test('stop finalization commits state before releasing the lock', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'finalize', scenario: { settleDelayMs: 10 } });
+  const gateFinal = path.join(spec.root, 'gate-final-fsync');
+  fs.writeFileSync(gateFinal, 'on');
+  const a = spawnWrappedSupervisor(spec, {
+    lockReleaseFsync: { file: gateFinal, lockPath: spec.statePath + '.lock' },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+  const submitted = await submitCli(spec, {
+    requestId: 'before-stop',
+    generation: 1,
+    message: 'before stop',
+  });
+  assert.equal(submitted.json.accepted, true);
+  assert.ok(await waitSettledCli(spec));
+
+  const stopped = await runCli(['stop', '--socket', spec.socketPath], 15_000);
+  assert.equal(stopped.json.ok, true);
+  assert.equal(
+    await waitForFile(gateFinal + '.reached', 10_000),
+    true,
+    'the departing finalizer never paused at its release boundary'
+  );
+
+  // While the finalizer is paused (before releasing the lock in the fixed
+  // order, after releasing it in the vulnerable order) a replacement starts.
+  const b = spawnSupervisorProcess(spec);
+  spec.attachChild(b);
+  const bStatus = await waitForStatus(spec.socketPath, 20_000);
+  assert.ok(bStatus, 'replacement supervisor did not become ready');
+  assert.equal(bStatus.generation, 2);
+  const accepted = await submitCli(spec, {
+    requestId: 'accepted-before-stale-save',
+    generation: 2,
+    message: 'replacement work',
+  });
+  assert.equal(accepted.json.accepted, true);
+  const midState = readJsonFile(spec.statePath);
+  assert.equal(midState.generation, 2);
+
+  // Let the departing supervisor finish; it must have no state write left.
+  fs.unlinkSync(gateFinal);
+  await waitForExit(a, 10_000);
+
+  const finalState = readJsonFile(spec.statePath);
+  assert.equal(finalState.generation, 2);
+  assert.ok(finalState.pendingPrompt);
+  assert.equal(finalState.pendingPrompt.requestId, 'accepted-before-stale-save');
+  assert.equal(finalState.child.pid, bStatus.piPid);
+});
+
+test('unsupported directory fsync fences submit dispatch', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'fsync-submit' });
+  const trigger = path.join(spec.root, 'dirfsync-trigger');
+  const a = spawnWrappedSupervisor(spec, {
+    dirFsyncFault: { code: 'ENOTSUP', errno: -95, trigger },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+
+  fs.writeFileSync(trigger, 'on');
+  const first = await submitCli(spec, {
+    requestId: 'fault-1',
+    generation: 1,
+    message: 'must not dispatch',
+  });
+  assert.equal(first.json.ok, false);
+  assert.equal(first.json.code, 'state_write_failed');
+  assert.equal(promptCount(spec.workspace), 0);
+
+  const fault = await runCli(['status', '--socket', spec.socketPath]);
+  assert.equal(fault.json.ok, true);
+  assert.equal(fault.json.storageFault.operation, 'submit-intent');
+
+  // The durable state shows the last committed content, not the ambiguous intent.
+  const onDisk = readJsonFile(spec.statePath);
+  assert.equal(onDisk.status, 'ready');
+  assert.equal(onDisk.pendingPrompt, null);
+
+  const second = await submitCli(spec, {
+    requestId: 'fault-2',
+    generation: 1,
+    message: 'still fenced',
+  });
+  assert.equal(second.json.ok, false);
+  assert.equal(second.json.code, 'storage_unavailable');
+
+  // The fault stays latched even after storage recovers.
+  fs.unlinkSync(trigger);
+  const third = await submitCli(spec, {
+    requestId: 'fault-3',
+    generation: 1,
+    message: 'latched',
+  });
+  assert.equal(third.json.ok, false);
+  assert.equal(third.json.code, 'storage_unavailable');
+  assert.equal(promptCount(spec.workspace), 0);
+});
+
+test('unsupported directory fsync rolls back generation grants', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'fsync-pause' });
+  const trigger = path.join(spec.root, 'dirfsync-trigger');
+  const a = spawnWrappedSupervisor(spec, {
+    dirFsyncFault: { code: 'EBADF', errno: -9, trigger },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+
+  fs.writeFileSync(trigger, 'on');
+  const paused = await runCli([
+    'pause', '--socket', spec.socketPath, '--generation', '1', '--owner', 'op-1',
+  ]);
+  assert.equal(paused.json.ok, false);
+  assert.equal(paused.json.code, 'state_write_failed');
+
+  const after = await runCli(['status', '--socket', spec.socketPath]);
+  assert.equal(after.json.generation, 1);
+  assert.equal(after.json.paused, false);
+  assert.equal(after.json.pauseOwner, null);
+
+  const onDisk = readJsonFile(spec.statePath);
+  assert.equal(onDisk.generation, 1);
+  assert.equal(onDisk.paused, false);
+
+  fs.unlinkSync(trigger);
+  const again = await runCli([
+    'pause', '--socket', spec.socketPath, '--generation', '1', '--owner', 'op-1',
+  ]);
+  assert.equal(again.json.ok, false);
+  assert.equal(again.json.code, 'storage_unavailable');
+});
+
+test('a real spawn failure records absence without fencing recovery', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'spawnfail' });
+  const args = supervisorLaunchArgs(spec);
+  const piFlag = args.indexOf('--pi');
+  args[piFlag + 1] = '/nonexistent/pi-fixture';
+  const failed = await runCli(args, 20_000);
+  assert.equal(failed.code, 2);
+  assert.equal(failed.json.ok, false);
+  assert.equal(failed.json.code, 'pi_unavailable');
+
+  const marker = readJsonFile(spec.statePath + '.owner');
+  assert.ok(marker, 'spawn failure must still record an ownership record');
+  assert.equal(marker.child.state, 'none');
+
+  // No child ever existed, so recovery is not fenced.
+  const replacement = spawnSupervisorProcess(spec);
+  spec.attachChild(replacement);
+  const status = await waitForStatus(spec.socketPath, 15_000);
+  assert.ok(status, 'replacement should start after a verified spawn failure');
+  assert.equal(status.generation, 2);
+});
+
+test('host adapter keeps the attachment when stop is unverified', async () => {
+  let stopObserved = false;
+  const exec = async ({ argv }) => {
+    const command = argv[2];
+    if (stopObserved) {
+      // After the unverified stop the supervisor is unreachable for every
+      // further command.
+      return { exitCode: 0, stdout: JSON.stringify({ ok: false,
+        code: 'supervisor_unavailable',
+        message: 'Guest supervisor socket is unavailable.'
+      }) + String.fromCharCode(10), stderr: '' };
+    }
+    let payload;
+    if (command === 'supervise') {
+      payload = { ok: true, sessionId: UUID_A };
+    } else if (command === 'status') {
+      payload = {
+        ok: true,
+        protocolVersion: 1,
+        sessionId: UUID_A,
+        cwd: '/home/node/workspace',
+        socketPath: '/run/alpi/pi-' + UUID_A + '.sock',
+        statePath: '/run/alpi/pi-' + UUID_A + '.state.json',
+        provider: 'alpi',
+        model: 'fixture',
+        generation: 1,
+        paused: false,
+        pauseOwner: null,
+        status: 'ready',
+      };
+    } else if (command === 'state') {
+      payload = {
+        ok: true,
+        state: { sessionId: UUID_A, isStreaming: false, messageCount: 0 },
+        generation: 1,
+        paused: false,
+        status: 'ready',
+      };
+    } else if (command === 'stop') {
+      stopObserved = true;
+      payload = {
+        ok: false,
+        code: 'supervisor_unavailable',
+        message: 'Guest supervisor socket is unavailable.',
+      };
+    } else {
+      payload = { ok: false, code: 'unknown_command', message: 'unexpected ' + command };
+    }
+    return { exitCode: 0, stdout: JSON.stringify(payload) + String.fromCharCode(10), stderr: '' };
+  };
+  exec.guestOnly = true;
+  const adapter = createPiHarness({
+    exec,
+    supervisorScript: '/opt/alpi/pi/guest-session.cjs',
+    nodeExecutable: '/usr/local/bin/node',
+    workspaceDir: '/home/node/workspace',
+    sessionDir: '/home/node/workspace/sessions',
+    agentDir: '/home/node/.pi/agent',
+    socketDir: '/run/alpi',
+    guestHome: '/home/node',
+    piExecutable: '/opt/alpi/pi/node_modules/.bin/pi',
+    provider: 'alpi',
+    model: 'fixture',
+  });
+  await adapter.createSession({ sessionId: UUID_A, model: 'fixture' });
+
+  const closed = await adapter.close({ nativeSessionId: UUID_A });
+  assert.equal(closed.stopped, false);
+  assert.equal(closed.supervisorGone, true);
+  assert.equal(closed.cleanupUnverified, true);
+
+  // The cleanup-pending attachment survives so the session record stays
+  // addressable; getState fails with the supervisor, not with detachment.
+  await assert.rejects(
+    adapter.getState({ nativeSessionId: UUID_A }),
+    (error) => error instanceof PiHarnessError && error.code === 'supervisor_unavailable'
+  );
+
+  // Only an explicit detach decision drops the unverified attachment.
+  const detached = await adapter.close({ nativeSessionId: UUID_A, force: true });
+  assert.equal(detached.detached, true);
+  await assert.rejects(
+    adapter.getState({ nativeSessionId: UUID_A }),
+    (error) => error instanceof PiHarnessError && error.code === 'session_not_attached'
+  );
+  adapter.closeSync();
 });

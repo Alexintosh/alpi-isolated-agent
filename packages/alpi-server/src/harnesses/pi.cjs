@@ -1358,49 +1358,61 @@ function createPiHarness(options) {
         fail('invalid_input', 'close requires an object.');
       }
       const sessionId = assertUuid(spec.nativeSessionId);
+      // An explicit detach decision is the only way to drop an attachment
+      // whose Pi cleanup could not be verified.
+      const force = spec.force === true;
       const session = sessions.get(sessionId);
       const paths = session || sessionPaths(sessionId);
+      let payload = null;
       try {
-        const payload = await callSupervisor(
-          'stop',
-          {
-            socketPath: paths.socketPath,
-            'deadline-ms': stopDeadlineMs,
-          },
-          stopDeadlineMs + 5_000
-        );
-        // The attachment is kept until cleanup is verified so a retry can
-        // address the same session record instead of a reconstructed path.
-        if (payload.stopped !== true) {
-          fail('cleanup_unverified', 'Guest supervisor could not verify Pi termination.', {
-            forced: payload.forced === true,
-            exitCode: payload.exitCode === undefined ? null : payload.exitCode,
-            cleanupUnverified: payload.cleanupUnverified === true,
-          });
+        if (!force) {
+          payload = await callSupervisor(
+            'stop',
+            {
+              socketPath: paths.socketPath,
+              'deadline-ms': stopDeadlineMs,
+            },
+            stopDeadlineMs + 5_000
+          );
+          // The attachment is kept until cleanup is verified so a retry can
+          // address the same session record instead of a reconstructed path.
+          if (payload.stopped !== true) {
+            fail('cleanup_unverified', 'Guest supervisor could not verify Pi termination.', {
+              forced: payload.forced === true,
+              exitCode: payload.exitCode === undefined ? null : payload.exitCode,
+              cleanupUnverified: payload.cleanupUnverified === true,
+            });
+          }
         }
         sessions.delete(sessionId);
         return {
           harnessId: PI_HARNESS_ID,
           nativeSessionId: sessionId,
           stopped: true,
-          forced: payload.forced === true,
-          exitCode: payload.exitCode === undefined ? null : payload.exitCode,
-          signal: payload.signal === undefined ? null : payload.signal,
+          forced: payload ? payload.forced === true : false,
+          exitCode: payload && payload.exitCode !== undefined ? payload.exitCode : null,
+          signal: payload && payload.signal !== undefined ? payload.signal : null,
           cleanupUnverified: false,
-          alreadyStopped: payload.alreadyStopped === true,
+          alreadyStopped: payload ? payload.alreadyStopped === true : false,
+          ...(force ? { detached: true } : {}),
           guestData: true,
         };
       } catch (error) {
         if (error instanceof PiHarnessError && error.code === 'supervisor_unavailable') {
-          sessions.delete(sessionId);
-          // The supervisor is gone, but Pi termination cannot be observed from
-          // here. Report that uncertainty instead of claiming success.
+          // The supervisor is gone, but Pi termination cannot be observed
+          // from here. Retain the cleanup-pending attachment (unless the
+          // caller explicitly detaches) so a retry or getState reaches the
+          // same session record instead of a reconstructed path.
+          if (force) {
+            sessions.delete(sessionId);
+          }
           return {
             harnessId: PI_HARNESS_ID,
             nativeSessionId: sessionId,
             stopped: false,
             supervisorGone: true,
             cleanupUnverified: true,
+            ...(force ? { detached: true } : {}),
             guestData: true,
           };
         }
