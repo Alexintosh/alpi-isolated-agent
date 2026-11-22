@@ -5,11 +5,15 @@
  *
  * The work store and sandbox journal are real SQLite databases. The engine is
  * a deterministic fake injected only through `withEngine`; the service has no
- * production engine fallback. No VM, network or host path is touched.
+ * production engine fallback. No VM, KVM or host service is touched; the
+ * worker-composition tests below use only a real loopback Unix-domain socket
+ * with injected kernel, proc and systemd evidence.
  */
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const { test } = require('node:test');
 
@@ -23,6 +27,11 @@ const {
   SandboxJournalError,
   openSandboxJournal,
 } = require('../src/sandbox-journal.cjs');
+const { createEngineWorker } = require('../src/network/engine-worker.cjs');
+const {
+  createSystemctlClient,
+  createWorkerClient,
+} = require('../src/network/worker-client.cjs');
 
 const WORKSPACE = process.cwd();
 const UUID_1 = '11111111-1111-4111-8111-111111111111';
@@ -374,6 +383,416 @@ function acquireLease(store, principal, workspaceId, ttlSeconds = 60) {
 function readJournal(directory, clock) {
   return openSandboxJournal(directory, { now: clock.now });
 }
+
+// ---------------------------------------------------------------------------
+// FI-2 composition fixture: the real in-process engine worker behind a real
+// Unix-domain socket, reached through the real worker client. Kernel, proc
+// and systemd evidence is injected; no VM, KVM or host service is touched.
+// ---------------------------------------------------------------------------
+
+const UUID_4 = '44444444-4444-4444-8444-444444444444';
+const WORKER_IMAGE = `ghcr.io/alpi/pi-dev@sha256:${'a'.repeat(64)}`;
+const WORKER_IMAGE_DIGEST = `sha256:${'a'.repeat(64)}`;
+const WORKER_TOKEN = 'd'.repeat(64);
+const WORKER_PROFILE = Object.freeze({
+  network: 'boundary',
+  cpus: 2,
+  memoryMib: 2048,
+  diskSizeGb: 10,
+});
+
+function currentUid() {
+  return typeof process.geteuid === 'function'
+    ? process.geteuid()
+    : process.getuid();
+}
+
+async function freePort() {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
+// The worker control socket must fit the UDS path bound, so the composition
+// fixture roots its state in a short temporary directory instead of the
+// repository-relative directories used by the pure service tests.
+function workerTempDirectory(t) {
+  const directory = fs.mkdtempSync(path.join('/tmp', 'sandbox-worker-comp-'));
+  fs.chmodSync(directory, 0o700);
+  t.after(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  return directory;
+}
+
+function makeWorkerNetEvidence() {
+  const netDevHeader =
+    'Inter-|   Receive                                                |  Transmit\n' +
+    ' face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n';
+  const loopbackDev = '  lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n';
+  const loopbackRoute4 =
+    'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n' +
+    'lo\t0000007F\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n';
+  const loopbackRoute6 =
+    '00000000000000000000000000000001 80 00000000000000000000000000000000 00 ' +
+    '00000000000000000000000000000000 00000400 00000000 0000000000000001 lo\n';
+  return {
+    async readlink(target) {
+      if (target.endsWith('/ns/net')) return 'net:[4026532001]';
+      throw new Error(`unexpected readlink ${target}`);
+    },
+    async readFile(target) {
+      if (target.endsWith('/net/dev')) return netDevHeader + loopbackDev;
+      if (target.endsWith('/net/route')) return loopbackRoute4;
+      if (target.endsWith('/net/ipv6_route')) return loopbackRoute6;
+      throw new Error(`unexpected readFile ${target}`);
+    },
+  };
+}
+
+function makeWorkerProcEvidence() {
+  const workerPid = process.pid;
+  const shimPid = workerPid + 1;
+  const cgroup = `/system.slice/alpi-worker@${UUID_4}.service`;
+  const uid = currentUid();
+  const shimExe = '/usr/libexec/boxlite-shim';
+  const startTime = 9001;
+  const procStat = (() => {
+    const fields = new Array(20).fill('0');
+    fields[0] = 'S';
+    fields[19] = String(startTime);
+    return `${shimPid} (boxlite-shim) ${fields.join(' ')}`;
+  })();
+  return {
+    async readlink(target) {
+      if (target === `/proc/${shimPid}/exe`) return shimExe;
+      if (
+        target === `/proc/${shimPid}/ns/net` ||
+        target === `/proc/${workerPid}/ns/net`
+      ) {
+        return 'net:[4026532001]';
+      }
+      if (target === '/proc/self/ns/net') return 'net:[4026531999]';
+      throw new Error(`unexpected readlink ${target}`);
+    },
+    async readFile(target) {
+      if (target === `/sys/fs/cgroup${cgroup}/cgroup.events`) {
+        return 'populated 0\n';
+      }
+      if (target === `/proc/${shimPid}/stat`) return procStat;
+      if (
+        target === `/proc/${shimPid}/status` ||
+        target === `/proc/${workerPid}/status`
+      ) {
+        return `Name:\tboxlite-shim\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n`;
+      }
+      if (
+        target === `/proc/${shimPid}/cgroup` ||
+        target === `/proc/${workerPid}/cgroup`
+      ) {
+        return `0::${cgroup}\n`;
+      }
+      if (target === '/proc/self/cgroup') return `0::${cgroup}\n`;
+      throw new Error(`unexpected readFile ${target}`);
+    },
+  };
+}
+
+// Worker-side engine adapter. start/stop return the normalized running-state
+// shape the sandbox service consumes; exec records the exact spec the worker
+// normalized so the test can assert the omitted optional field stays absent.
+function makeWorkerAdapter() {
+  let running = false;
+  let destroyed = false;
+  const workerName = `alpi-${UUID_4}-g1`;
+  const nativeInfo = () => ({
+    id: 'native-1',
+    name: workerName,
+    state: {
+      status: running ? 'running' : 'stopped',
+      running,
+      pid: process.pid + 1,
+    },
+    image: WORKER_IMAGE,
+    cpus: 2,
+    memoryMib: 2048,
+  });
+  const serviceInfo = (ref) => ({
+    allocationId: ref.allocationId,
+    launchGeneration: ref.launchGeneration,
+    name: ref.name,
+    nativeId: ref.nativeId,
+    state: running ? 'running' : 'stopped',
+    running,
+  });
+  const adapter = {
+    id: 'boxlite',
+    execCalls: [],
+    async createBox(spec) {
+      return {
+        allocationId: spec.allocationId,
+        launchGeneration: spec.launchGeneration,
+        name: workerName,
+        nativeId: 'native-1',
+        created: true,
+      };
+    },
+    async inspect(ref) {
+      return serviceInfo(ref);
+    },
+    async start(ref) {
+      running = true;
+      return serviceInfo(ref);
+    },
+    async stop(ref) {
+      running = false;
+      return serviceInfo(ref);
+    },
+    async destroy() {
+      destroyed = true;
+      running = false;
+      return { destroyed: true, alreadyGone: false };
+    },
+    async listOwned() {
+      if (destroyed) return [];
+      return [
+        {
+          allocationId: UUID_4,
+          launchGeneration: 1,
+          name: workerName,
+          nativeId: 'native-1',
+          state: running ? 'running' : 'stopped',
+          running,
+        },
+      ];
+    },
+    async exec(ref, spec) {
+      adapter.execCalls.push({ argv: spec.argv, workingDir: spec.workingDir });
+      return {
+        exitCode: 0,
+        stdout: 'ok',
+        stderr: '',
+        truncated: false,
+        timedOut: false,
+        cancelled: false,
+      };
+    },
+    async probe() {
+      return {
+        available: true,
+        version: '0.14.1',
+        capabilities: [...CAPABILITIES],
+      };
+    },
+    async close() {},
+    getInfo: () => nativeInfo(),
+  };
+  return adapter;
+}
+
+function makeWorkerConfig(root, overrides = {}) {
+  const allocationRoot = path.join(root, 'workers', UUID_4);
+  const homeDir = path.join(allocationRoot, 'home');
+  fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(homeDir, 0o700);
+  const ironIngressRoot = path.join(root, 'iron');
+  fs.mkdirSync(ironIngressRoot, { recursive: true, mode: 0o700 });
+  fs.chmodSync(ironIngressRoot, 0o700);
+  return {
+    version: 1,
+    protocolVersion: 1,
+    stateRoot: root,
+    allocationId: UUID_4,
+    launchGeneration: 1,
+    image: WORKER_IMAGE,
+    imageDigest: WORKER_IMAGE_DIGEST,
+    sdkModulePath: path.join(root, 'sdk.cjs'),
+    profile: WORKER_PROFILE,
+    homeDir,
+    controlSocketPath: path.join(allocationRoot, 'control.sock'),
+    token: WORKER_TOKEN,
+    tunnelPort: overrides.tunnelPort,
+    ironIngressRoot,
+    createdAt: new Date().toISOString(),
+    serviceUnit: `alpi-worker@${UUID_4}.service`,
+  };
+}
+
+function makeWorkerSystemctl() {
+  const state = { active: false, startCalls: 0, stopCalls: 0 };
+  const client = createSystemctlClient({
+    launcher: async (argv) => {
+      if (argv[0] === 'start') {
+        state.startCalls += 1;
+        state.active = true;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (argv[0] === 'stop') {
+        state.stopCalls += 1;
+        state.active = false;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (argv[0] === 'show') {
+        return {
+          code: 0,
+          stdout:
+            'LoadState=loaded\n' +
+            `ActiveState=${state.active ? 'active' : 'inactive'}\n` +
+            `SubState=${state.active ? 'running' : 'dead'}\n` +
+            `MainPID=${state.active ? process.pid : 0}\n` +
+            `ControlGroup=/system.slice/alpi-worker@${UUID_4}.service\n`,
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected systemctl argv ${argv.join(' ')}`);
+    },
+  });
+  return { client, state };
+}
+
+async function startCompositionWorker(t, options) {
+  const root = workerTempDirectory(t);
+  fs.writeFileSync(
+    path.join(root, 'sdk.cjs'),
+    'module.exports = {};\n',
+    { mode: 0o600 }
+  );
+  const tunnelPort = await freePort();
+  const config = makeWorkerConfig(root, { tunnelPort });
+  const configPath = path.join(root, 'workers', UUID_4, 'worker.json');
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  fs.chmodSync(configPath, 0o600);
+  const worker = createEngineWorker({
+    config,
+    adapter: options.adapter,
+    getInfo: options.adapter.getInfo,
+    proc: options.proc,
+    net: options.net,
+    uid: currentUid(),
+    proofMaxAgeMs: 5000,
+    ownerHeartbeatTimeoutMs: 5000,
+    watchdogMs: 100,
+  });
+  await worker.start();
+  t.after(async () => {
+    await worker.close().catch(() => {});
+  });
+  return { config };
+}
+
+async function connectCompositionClient(t, workerSetup, proc, workerNet) {
+  const { client: systemctl, state } = makeWorkerSystemctl();
+  const client = createWorkerClient({
+    allocationId: workerSetup.config.allocationId,
+    launchGeneration: workerSetup.config.launchGeneration,
+    controlSocketPath: workerSetup.config.controlSocketPath,
+    token: workerSetup.config.token,
+    serviceUid: currentUid(),
+    tunnelPort: workerSetup.config.tunnelPort,
+    systemctl,
+    proc,
+    net: workerNet,
+    heartbeatIntervalMs: 500,
+    proofMaxAgeMs: 5000,
+    startTimeoutMs: 3000,
+    stopTimeoutMs: 3000,
+    connectRetryMs: 50,
+  });
+  t.after(async () => {
+    try {
+      client.close();
+    } catch {
+      // Already closed.
+    }
+    try {
+      await client.stop();
+    } catch {
+      // Unit already stopped.
+    }
+  });
+  return { client, systemctlState: state };
+}
+
+test('an exec that omits workingDir reaches the real worker without a null directory and never fences', async (t) => {
+  const proc = makeWorkerProcEvidence();
+  const workerNet = makeWorkerNetEvidence();
+  const adapter = makeWorkerAdapter();
+  const workerSetup = await startCompositionWorker(t, {
+    adapter,
+    proc,
+    net: workerNet,
+  });
+  const { client } = await connectCompositionClient(t, workerSetup, proc, workerNet);
+  await client.start();
+
+  const f = setup(t, {
+    label: 'worker-exec-composition',
+    resolveProfile: makeResolver({
+      networkMode: 'boundary',
+      networkBoundaryVerified: true,
+    }),
+    serviceOptions: { withEngine: (_record, use) => use(client.engine) },
+  });
+
+  // Bind the reserved sandbox id to the worker's fixed owned allocation.
+  const randomUUID = crypto.randomUUID;
+  let pinned = true;
+  crypto.randomUUID = () => {
+    if (pinned) {
+      pinned = false;
+      return UUID_4;
+    }
+    return randomUUID();
+  };
+  let created;
+  try {
+    created = await createSandbox(f.service);
+  } finally {
+    crypto.randomUUID = randomUUID;
+  }
+  assert.equal(created.sandbox.sandboxId, UUID_4);
+  await startSandbox(f.service, ALPHA_RUNNER, UUID_4);
+  const lease = acquireLease(f.store, ALPHA_RUNNER, created.sandbox.workspaceId);
+  const input = {
+    sandboxId: UUID_4,
+    workspaceId: created.sandbox.workspaceId,
+    leaseEpoch: lease.epoch,
+    argv: ['true'],
+  };
+
+  // An omitted workingDir must reach the worker as absent, succeed with zero
+  // writer fences, and never leave an uncertain intent behind.
+  const omitted = await f.service.execInSandbox(ALPHA_RUNNER, input);
+  assert.equal(omitted.exitCode, 0);
+  assert.equal(adapter.execCalls.length, 1);
+  assert.equal(adapter.execCalls[0].workingDir, undefined);
+  assert.equal(f.store.listWriterFences().length, 0);
+  assert.equal(f.store.listPendingExecIntents().length, 0);
+
+  // An explicit directory keeps working end to end through the same seam.
+  const explicit = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...input,
+    workingDir: '/workspace',
+  });
+  assert.equal(explicit.exitCode, 0);
+  assert.equal(adapter.execCalls[1].workingDir, '/workspace');
+  assert.equal(f.store.listWriterFences().length, 0);
+
+  // The public API normalizes an explicit null to absent: the engine request
+  // must omit the field, not send null.
+  const nullDir = await f.service.execInSandbox(ALPHA_RUNNER, {
+    ...input,
+    workingDir: null,
+  });
+  assert.equal(nullDir.exitCode, 0);
+  assert.equal(adapter.execCalls[2].workingDir, undefined);
+  assert.equal(f.store.listWriterFences().length, 0);
+  assert.equal(f.store.listPendingExecIntents().length, 0);
+});
 
 test('create allocates metadata without starting a VM and is idempotent', async (t) => {
   const { service, engine, store } = setup(t, { label: 'create' });

@@ -2916,7 +2916,10 @@ function createSandboxService(options = {}) {
             timeoutMs,
             maxOutputBytes,
             tty: body.tty,
-            workingDir: body.workingDir,
+            // An omitted or null workingDir is optional: the worker treats
+            // undefined as absent and rejects a null directory, so the field
+            // must be left out of the engine request entirely.
+            ...(body.workingDir === null ? {} : { workingDir: body.workingDir }),
           });
         },
         'exec',

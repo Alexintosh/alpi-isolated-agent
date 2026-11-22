@@ -34,6 +34,7 @@ const resourceStatus = Object.freeze({
   engine_unavailable: 503, engine_unqualified: 503, network_unavailable: 503,
   engine_unsupported: 422, engine_uncertain: 503, operation_timeout: 504, exec_uncertain: 504,
   exec_failed: 502, journal_busy: 503, service_closed: 503,
+  writer_fenced: 423,
   export_required: 409, payload_too_large: 413, quota_exceeded: 429,
   invalid_size: 400, invalid_digest: 400, invalid_chunk: 400, invalid_offset: 400,
   offset_mismatch: 409, conflict: 409, not_ready: 409, incomplete: 409,

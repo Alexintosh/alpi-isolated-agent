@@ -12,6 +12,227 @@ const { requestJson } = require('../packages/alpi-client/src/transport.cjs');
 const { createClient } = require('../packages/alpi-client/src/client.cjs');
 const { matchResource, resourceRequest } = require('../packages/alpi-server/src/resource-routes.cjs');
 
+// ---------------------------------------------------------------------------
+// FI-1 regression: a writer_fenced quarantine (active uncertain-writer fence
+// or a pending exec intent) must reach the authenticated HTTPS client as
+// HTTP 423 with resourceCode 'writer_fenced', without any extra engine
+// dispatch, and must survive a daemon restart on the same persisted state.
+// ---------------------------------------------------------------------------
+
+const { openHostResources } = require('../packages/alpi-server/src/host-resources.cjs');
+const { WorkStoreError } = require('../packages/alpi-server/src/work-store.cjs');
+const { matchesResourceError } = require('../packages/alpi-server/src/resource-routes.cjs');
+const { TransportError } = require('../packages/alpi-client/src/transport.cjs');
+
+function quarantineProfileResolver() {
+  return async ({ engine, profile }) => ({
+    engine,
+    profile,
+    qualified: true,
+    available: true,
+    engineVersion: '0.14.1',
+    imageDigest: 'sha256:' + 'a'.repeat(64),
+    limits: { vcpus: 2, memoryMiB: 2048, diskMiB: 10240 },
+    networkMode: 'disabled',
+    capabilities: ['create', 'inspect', 'start', 'stop', 'destroy', 'list-owned', 'exec', 'pty'],
+  });
+}
+
+// Deterministic engine adapter with the same result shapes the service
+// expects from a real BoxLite adapter. No VM, network or host path is used.
+function quarantineEngineAdapter() {
+  const boxes = new Map();
+  let counter = 0;
+  const info = (box) => ({
+    allocationId: box.allocationId,
+    launchGeneration: box.launchGeneration,
+    name: box.name,
+    nativeId: box.nativeId,
+    state: box.running ? 'running' : 'stopped',
+    running: box.running,
+  });
+  const adapter = {
+    execCalls: 0,
+    execHook: null,
+    boxFor(ref) {
+      const box = boxes.get(`${ref.allocationId}:${ref.launchGeneration}`);
+      if (!box) throw { code: 'engine_box_missing', message: 'missing box' };
+      return box;
+    },
+    async createBox(spec) {
+      const key = `${spec.allocationId}:${spec.launchGeneration}`;
+      let box = boxes.get(key);
+      const created = !box;
+      if (!box) {
+        box = {
+          allocationId: spec.allocationId,
+          launchGeneration: spec.launchGeneration,
+          name: `alpi-${spec.allocationId}-g${spec.launchGeneration}`,
+          nativeId: `native-${++counter}`,
+          running: false,
+        };
+        boxes.set(key, box);
+      }
+      return { allocationId: box.allocationId, launchGeneration: box.launchGeneration, name: box.name, nativeId: box.nativeId, created };
+    },
+    async inspect(ref) {
+      return info(adapter.boxFor(ref));
+    },
+    async start(ref) {
+      adapter.boxFor(ref).running = true;
+      return adapter.inspect(ref);
+    },
+    async stop(ref) {
+      adapter.boxFor(ref).running = false;
+      return adapter.inspect(ref);
+    },
+    async destroy(ref) {
+      const box = boxes.get(`${ref.allocationId}:${ref.launchGeneration}`);
+      boxes.delete(`${ref.allocationId}:${ref.launchGeneration}`);
+      return { destroyed: true, alreadyGone: !box, allocationId: ref.allocationId,
+        launchGeneration: ref.launchGeneration, name: ref.name, nativeId: ref.nativeId };
+    },
+    async listOwned() {
+      return [...boxes.values()].map(info);
+    },
+    async exec(ref, spec) {
+      adapter.execCalls += 1;
+      adapter.boxFor(ref);
+      if (adapter.execHook) return adapter.execHook(ref, spec);
+      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false,
+        timedOut: false, cancelled: false, executionId: 'exec-1' };
+    },
+    async probe() {
+      return { available: true, version: '0.14.1',
+        capabilities: ['create', 'inspect', 'start', 'stop', 'destroy', 'list-owned', 'exec', 'pty'] };
+    },
+    async close() {},
+  };
+  return adapter;
+}
+
+async function errorOf(promise) {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected the request to fail');
+}
+
+async function quarantineScenario(t, mode) {
+  const engine = quarantineEngineAdapter();
+  const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'af-'));
+  const stateDir = path.join(parent, 's');
+  let store;
+  const open = (port) => startServer({
+    stateDir, port, handleSignals: false,
+    openResources: async (options) => {
+      const opened = await openHostResources({
+        ...options,
+        sandboxHost: {
+          resolveProfile: quarantineProfileResolver(),
+          withEngine: (_record, use) => use(engine),
+        },
+        services: { capture: (_request, captured) => { store = captured; return {}; } },
+      });
+      // The capture route is only reachable through the trusted resource
+      // layer; use it to hold the live work-store instance for lease setup.
+      await opened.execute({
+        name: 'capture', params: {}, body: {},
+        principal: { project: 'alpha', role: 'runner', clientId: 'fixture-bootstrap' },
+        authenticate() {},
+      });
+      return opened;
+    },
+  });
+  let server = await open(0);
+  t.after(async () => {
+    await server.close();
+    await fs.rm(parent, { recursive: true, force: true });
+  });
+  const invite = await issuePairing({ stateDir, project: 'alpha', role: 'runner' });
+  const endpoint = { origin: server.origin, fingerprint: invite.fingerprint };
+  const grant = await requestJson({ ...endpoint, method: 'POST', path: '/v1/pair/exchange',
+    body: { invitation: invite.invitation, name: 'quarantine' } });
+  const client = createClient({ ...endpoint, ...grant, serverId: invite.serverId,
+    credentialExpiresAt: grant.expiresAt });
+  const principal = { project: 'alpha', role: 'runner', clientId: grant.clientId };
+  const created = await client.requestResource('createSandbox', {},
+    { requestId: randomUUID(), engine: 'boxlite', profile: 'pi-dev' });
+  const ref = { sandboxId: created.sandboxId };
+  await client.requestResource('startSandbox', ref, {});
+  const lease = store.acquireLease(principal, { workspaceId: created.workspaceId });
+  const input = { workspaceId: created.workspaceId, leaseEpoch: lease.epoch, argv: ['true'] };
+  if (mode === 'uncertain') {
+    engine.execHook = () => { throw { code: 'engine_termination_unverified' }; };
+    const first = await errorOf(client.requestResource('exec', ref, input));
+    assert.equal(first.statusCode, 504);
+    assert.equal(first.resourceCode, 'exec_uncertain');
+  } else {
+    const mark = store.markExecIntent.bind(store);
+    store.markExecIntent = () => { throw new WorkStoreError('store_busy', 'synthetic store_busy'); };
+    try {
+      await client.requestResource('exec', ref, input);
+    } finally {
+      store.markExecIntent = mark;
+    }
+    assert.equal(store.listPendingExecIntents().length, 1);
+  }
+  engine.execHook = null;
+  const dispatched = engine.execCalls;
+  const quarantined = await errorOf(client.requestResource('exec', ref, input));
+  assert.equal(quarantined.statusCode, 423);
+  assert.equal(quarantined.resourceCode, 'writer_fenced');
+  assert.equal(engine.execCalls, dispatched);
+  // Reopen the daemon on the same state and port; the quarantine contract
+  // must survive the restart unchanged.
+  const port = Number(new URL(server.origin).port);
+  await server.close();
+  server = await open(port);
+  const afterRestart = await errorOf(client.requestResource('exec', ref, input));
+  assert.equal(afterRestart.statusCode, 423);
+  assert.equal(afterRestart.resourceCode, 'writer_fenced');
+  assert.equal(engine.execCalls, dispatched);
+  // Verified stop/start settles ownership; the same exec then succeeds.
+  await client.requestResource('stopSandbox', ref, {});
+  await client.requestResource('startSandbox', ref, {});
+  await client.requestResource('exec', ref, input);
+  assert.equal(engine.execCalls, dispatched + 1);
+}
+
+test('an active writer fence reaches the client as 423 writer_fenced and survives restart', async (t) => {
+  await quarantineScenario(t, 'uncertain');
+});
+
+test('a pending exec intent reaches the client as 423 writer_fenced and survives restart', async (t) => {
+  await quarantineScenario(t, 'pending');
+});
+
+test('resource code filtering keeps matched codes and drops unknown or mismatched ones', () => {
+  assert.equal(matchesResourceError('writer_fenced', 423), true);
+  assert.equal(matchesResourceError('writer_fenced', 500), false);
+  assert.equal(matchesResourceError('not_a_registered_code', 423), false);
+  const kept = new TransportError('HTTP_STATUS', 'test', { statusCode: 423, resourceCode: 'writer_fenced' });
+  assert.equal(kept.resourceCode, 'writer_fenced');
+  const mismatched = new TransportError('HTTP_STATUS', 'test', { statusCode: 500, resourceCode: 'writer_fenced' });
+  assert.equal(mismatched.resourceCode, undefined);
+  const unknown = new TransportError('HTTP_STATUS', 'test', { statusCode: 423, resourceCode: 'not_a_registered_code' });
+  assert.equal(unknown.resourceCode, undefined);
+  const client = createClient({
+    origin: 'https://127.0.0.1:4443',
+    fingerprint: '1'.repeat(64),
+    credential: Buffer.alloc(32, 1).toString('base64url'),
+    serverId: '11111111-1111-4111-8111-111111111111',
+    project: 'alpha',
+    role: 'runner',
+    credentialExpiresAt: Date.now() + 60000,
+    requestJson: async () => { throw { code: 'HTTP_STATUS', statusCode: 423, resourceCode: 'writer_fenced' }; },
+  });
+  return assert.rejects(client.requestResource('listSandboxes'),
+    { statusCode: 423, resourceCode: 'writer_fenced' });
+});
+
 test('work route identifiers and event cursors have a single safe transport representation', () => {
   const jobId = randomUUID();
   const route = resourceRequest('getEvents', { jobId, after: '7' });
