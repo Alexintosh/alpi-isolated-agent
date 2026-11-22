@@ -505,3 +505,122 @@ test('real ensureImage never starts a pull after a lookup-window cancellation', 
     { code: 'ENOENT' }
   );
 });
+
+test('a cache miss revokes the receipt credit and enforces the full fresh admission before pulling', async (t) => {
+  const { cachePinnedImage, IMAGE_CACHE_OVERHEAD_BYTES } = require('../src/profile-image.cjs');
+  const image = config().profiles[0].image;
+  const digest = image.split('@')[1];
+  const profile = config().profiles[0];
+  const set = 'boxlite-0.9.0-0123456789abcdef';
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'alpi-image-miss-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const stateDir = path.join(dir, 'state');
+  await fs.mkdir(stateDir, { mode: 0o700 });
+  const required = 512 * 1024 * 1024 + IMAGE_CACHE_OVERHEAD_BYTES;
+  const statfsWith = (bytes) => async () => ({ bavail: BigInt(bytes), bsize: 1n });
+  let pulls = 0;
+  const native = { images: {
+    async get() { return { versions: pulls > 0 ? [{ digest }] : [] }; },
+    async pull(ref) { assert.equal(ref, image); pulls += 1; },
+  } };
+  const admission = { stateDir, profile, set };
+
+  // The lookup reports a miss while available capacity is below the fresh
+  // requirement: fail closed with the typed rejection and zero pulls.
+  await assert.rejects(
+    cachePinnedImage(native, image, undefined, { ...admission, statfs: statfsWith(required - 1) }),
+    (error) => error.name === 'RuntimeInstallerError' && error.code === 'insufficient_disk_space'
+  );
+  assert.equal(pulls, 0);
+
+  // The same miss at ample capacity proceeds to a successful pull.
+  assert.equal(
+    await cachePinnedImage(native, image, undefined, { ...admission, statfs: statfsWith(required) }),
+    digest
+  );
+  assert.equal(pulls, 1);
+});
+
+test('real ensureImage re-enforces the fresh requirement when a retained receipt misses the native cache', async (t) => {
+  const harness = await imageHarness(t, { sdkSource: [
+    'import { existsSync, readFileSync, writeFileSync } from "node:fs";',
+    'const events = (globalThis.__alpiImageProbe ??= []);',
+    'export class JsBoxlite {',
+    '  constructor(options) {',
+    '    events.push({ type: "construct", homeDir: options.homeDir });',
+    '    // The native cache state lives in its own store file, independent of',
+    '    // the wrapper receipt marker, so a receipt can survive a native miss.',
+    '    const store = options.homeDir + "/native-store.json";',
+    '    let versions = existsSync(store) ? JSON.parse(readFileSync(store, "utf8")) : [];',
+    '    this.images = {',
+    '      async get(repository) {',
+    '        events.push({ type: "get", repository });',
+    '        return { versions };',
+    '      },',
+    '      async pull(reference) {',
+    '        events.push({ type: "pull", reference });',
+    '        versions = [{ digest: reference.split("@")[1] }];',
+    '        writeFileSync(store, JSON.stringify(versions));',
+    '      },',
+    '    };',
+    '  }',
+    '  close() { events.push({ type: "close" }); }',
+    '}',
+  ].join('\n') + '\n' });
+  const profile = config().profiles[0];
+  const candidateSet = 'boxlite-0.9.0-0123456789abcdef';
+  const digest = profile.image.split('@')[1];
+  const cacheKey = require('node:crypto')
+    .createHash('sha256')
+    .update(candidateSet + '\n' + profile.image)
+    .digest('hex');
+  const cacheDir = path.join(harness.stateDir, 'profile-images', cacheKey);
+  const receiptPath = path.join(cacheDir, 'manifest.json');
+
+  // First acquisition at ample capacity: an authentic receipt written by the
+  // real wrapper after a fully verified pull.
+  const first = await harness.ensureImage({
+    stateDir: harness.stateDir, profile, set: candidateSet,
+    statfs: async () => ({ bavail: 1n << 40n, bsize: 1n }),
+  });
+  assert.deepEqual(first, {
+    profile: 'pi-dev', image: profile.image, runtime: candidateSet, manifestDigest: digest,
+  });
+  const receiptBefore = await fs.readFile(receiptPath, 'utf8');
+
+  // The native cache loses the pinned manifest while the receipt survives.
+  await fs.rm(path.join(cacheDir, 'native-store.json'));
+
+  // The wrapper must fail closed at 1024 available bytes: typed rejection,
+  // zero new pulls, receipt and selection untouched.
+  await assert.rejects(
+    harness.ensureImage({
+      stateDir: harness.stateDir, profile, set: candidateSet,
+      statfs: async () => ({ bavail: 1024n, bsize: 1n }),
+    }),
+    (error) => error.name === 'RuntimeInstallerError' && error.code === 'insufficient_disk_space'
+  );
+  assert.deepEqual(
+    harness.events.slice(5).map((event) => event.type),
+    ['construct', 'get', 'close']
+  );
+  assert.equal(await fs.readFile(receiptPath, 'utf8'), receiptBefore);
+  await assert.rejects(
+    fs.lstat(path.join(harness.stateDir, 'runtimes', 'current.json')),
+    { code: 'ENOENT' }
+  );
+
+  // The same miss at ample capacity pulls and succeeds; the receipt stays valid.
+  const third = await harness.ensureImage({
+    stateDir: harness.stateDir, profile, set: candidateSet,
+    statfs: async () => ({ bavail: 1n << 40n, bsize: 1n }),
+  });
+  assert.deepEqual(third, first);
+  assert.deepEqual(
+    harness.events.slice(8).map((event) => event.type),
+    ['construct', 'get', 'pull', 'get', 'close']
+  );
+  assert.deepEqual(JSON.parse(await fs.readFile(receiptPath, 'utf8')), {
+    image: profile.image, runtime: candidateSet, manifestDigest: digest,
+  });
+});

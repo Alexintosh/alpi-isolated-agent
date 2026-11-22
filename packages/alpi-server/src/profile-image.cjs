@@ -60,7 +60,10 @@ async function imageAdmissionBytes(profile, options = {}) {
   if (!Number.isSafeInteger(required)) {
     throw new TypeError('Profile image admission requirement is too large.');
   }
-  if (options.stateDir !== undefined || options.set !== undefined) {
+  // The fresh flag explicitly bypasses the historical receipt credit: it is
+  // used when an actual SDK cache lookup contradicts the receipt and the
+  // full preparation requirement must be re-enforced before a new pull.
+  if (!options.fresh && (options.stateDir !== undefined || options.set !== undefined)) {
     if (await hasVerifiedImageCache(options.stateDir, options.set, profile.image)) return 0;
   }
   return required;
@@ -68,9 +71,9 @@ async function imageAdmissionBytes(profile, options = {}) {
 
 // Advisory capacity check for pinned-image preparation against the
 // destination filesystem. Runs before verification, SDK import and pull.
-async function assertImageAdmission({ stateDir, profile, set, signal, statfs } = {}) {
+async function assertImageAdmission({ stateDir, profile, set, signal, statfs, fresh } = {}) {
   signal?.throwIfAborted();
-  const required = await imageAdmissionBytes(profile, { stateDir, set });
+  const required = await imageAdmissionBytes(profile, { stateDir, set, fresh });
   let stat;
   try {
     stat = await (statfs ?? fs.statfs)(stateDir, { bigint: true });
@@ -98,7 +101,11 @@ async function assertImageAdmission({ stateDir, profile, set, signal, statfs } =
   return { required, available };
 }
 
-async function cachePinnedImage(native, image, signal) {
+// Admission carries the capacity boundary for a fresh re-check after an
+// actual cache miss: { stateDir, profile, set, statfs }. It is optional for
+// direct callers, but the production wrapper always supplies it so a stale
+// receipt can never wave through a newly dispatched pull.
+async function cachePinnedImage(native, image, signal, admission = {}) {
   const [repository, manifestDigest] = image.split('@');
   const hasManifest = async () => {
     const detail = await native.images.get(repository);
@@ -118,6 +125,14 @@ async function cachePinnedImage(native, image, signal) {
   // The awaited lookup above may have consumed the whole cancellation window:
   // recheck immediately before dispatching a new acquisition.
   signal?.throwIfAborted();
+  // A cache miss revokes the historical receipt credit: admission decided on
+  // the assumption of a reusable cache, so enforce the full trusted image
+  // preparation requirement now, against the same injectable capacity
+  // boundary, before any pull is dispatched. The cancellation check above is
+  // preserved at this exact boundary.
+  if (admission.profile !== undefined) {
+    await assertImageAdmission({ ...admission, signal, fresh: true });
+  }
   // Once dispatched, the pull is supervised rather than interruptible: this
   // SDK boundary exposes no cancellation contract, so the pull runs to
   // completion under the per-cache process guard and close() in the caller's
@@ -159,7 +174,8 @@ async function ensureImage({ stateDir, profile, set, signal, statfs }) {
   let native;
   try {
     native = new sdk.JsBoxlite({ homeDir });
-    const manifestDigest = await cachePinnedImage(native, profile.image, signal);
+    const manifestDigest = await cachePinnedImage(native, profile.image, signal,
+      { stateDir, profile, set, statfs });
     signal?.throwIfAborted();
     // Record the verified acquisition so a later admission for this exact
     // candidate credits the cache instead of charging a fresh pull. Best

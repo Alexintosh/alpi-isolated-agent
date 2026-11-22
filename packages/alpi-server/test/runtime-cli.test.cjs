@@ -49,6 +49,22 @@ function writeArchives(directory, release) {
 // An SDK fixture that behaves like the real boxed SDK for image work: an ESM
 // dist/index.js exposing a JsBoxlite whose digest-addressed image cache
 // persists through the manifest marker written by the production wrapper.
+function cliSdkPackageEntries(version, sdkSource) {
+  return [
+    {
+      name: 'package/package.json',
+      mode: 0o644,
+      content: Buffer.from(JSON.stringify({ name: '@boxlite-ai/boxlite', version, type: 'module' })),
+    },
+    { name: 'package/dist/index.js', mode: 0o644, content: Buffer.from(sdkSource) },
+    { name: 'package/dist/agents.js', mode: 0o644, content: Buffer.from('sdk-agents-' + version) },
+    { name: 'package/native/boxlite.js', mode: 0o644, content: Buffer.from('sdk-native-' + version) },
+  ];
+}
+
+// An SDK fixture that behaves like the real boxed SDK for image work: an ESM
+// dist/index.js exposing a JsBoxlite whose digest-addressed image cache
+// persists through the manifest marker written by the production wrapper.
 function cliSdkEntries(version) {
   const sdkSource = [
     "import { appendFileSync, readFileSync, existsSync } from 'node:fs';",
@@ -70,16 +86,35 @@ function cliSdkEntries(version) {
     '  close() { record({ type: "sdk-close" }); }',
     '}',
   ].join('\n') + '\n';
-  return [
-    {
-      name: 'package/package.json',
-      mode: 0o644,
-      content: Buffer.from(JSON.stringify({ name: '@boxlite-ai/boxlite', version, type: 'module' })),
-    },
-    { name: 'package/dist/index.js', mode: 0o644, content: Buffer.from(sdkSource) },
-    { name: 'package/dist/agents.js', mode: 0o644, content: Buffer.from('sdk-agents-' + version) },
-    { name: 'package/native/boxlite.js', mode: 0o644, content: Buffer.from('sdk-native-' + version) },
-  ];
+  return cliSdkPackageEntries(version, sdkSource);
+}
+
+// The same SDK boundary, but the native cache state persists in its own store
+// file instead of the wrapper receipt marker. Deleting the store models a
+// native cache that lost the pinned manifest while the receipt survived.
+function cliSdkNativeStoreEntries(version) {
+  const sdkSource = [
+    "import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';",
+    'const config = JSON.parse(readFileSync(process.env.ALPI_CLI_TEST_CONFIG, "utf8"));',
+    'const record = (event) => appendFileSync(config.eventsPath, JSON.stringify({ source: "sdk", ...event }) + "\\n");',
+    'export class JsBoxlite {',
+    '  constructor(options) {',
+    '    record({ type: "sdk-construct", homeDir: options.homeDir });',
+    '    const store = options.homeDir + "/native-store.json";',
+    '    let versions = existsSync(store) ? JSON.parse(readFileSync(store, "utf8")) : [];',
+    '    this.images = {',
+    '      async get(repository) { record({ type: "sdk-get", repository }); return { versions }; },',
+    '      async pull(reference) {',
+    '        record({ type: "sdk-pull", reference });',
+    '        versions = [{ digest: reference.split("@")[1] }];',
+    '        writeFileSync(store, JSON.stringify(versions));',
+    '      },',
+    '    };',
+    '  }',
+    '  close() { record({ type: "sdk-close" }); }',
+    '}',
+  ].join('\n') + '\n';
+  return cliSdkPackageEntries(version, sdkSource);
 }
 
 function preloadSource() {
@@ -581,6 +616,117 @@ test('CLI reuses a verified image cache without charging a fresh acquisition', a
     ['prepare', 'callback', 'sdk-construct', 'sdk-get', 'sdk-close', 'commit']
   );
   assert.equal(secondEvents.some((event) => event.type === 'sdk-pull'), false);
+  const inventory = await listRuntimes({ stateDir: first.stateDir });
+  assert.equal(inventory.active.id, set);
+  assert.equal(inventory.previous, null);
+});
+
+test('a retained image receipt cannot waive admission when the native cache misses the manifest', async (t) => {
+  const { createHash } = require('node:crypto');
+  const { imageAdmissionBytes } = require('../src/profile-image.cjs');
+  const profile = pinnedProfile('pi-dev', 8192, 512);
+  const release = makeRelease({
+    version: '0.1.0',
+    archiveEntries: { 'boxlite-sdk': cliSdkNativeStoreEntries('0.1.0') },
+  });
+
+  // First run at ample capacity: the real wrapper earns its receipt through a
+  // fully verified pull against the synthetic native cache.
+  const first = prepareHarness(t, 'stale-receipt-first', {
+    release,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+  });
+  const firstRun = runCli(first);
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  const set = JSON.parse(firstRun.stdout).set;
+  const cacheKey = createHash('sha256').update(set + '\n' + profile.image).digest('hex');
+  const cacheDir = path.join(first.stateDir, 'profile-images', cacheKey);
+  const receiptBefore = fs.readFileSync(path.join(cacheDir, 'manifest.json'));
+  assert.match(JSON.parse(receiptBefore.toString('utf8')).manifestDigest, /^sha256:[a-f0-9]{64}$/);
+
+  // The native cache loses the pinned manifest while the receipt survives.
+  fs.rmSync(path.join(cacheDir, 'native-store.json'));
+
+  // Second run: the capacity funds the intact core reinstall but could never
+  // fund a fresh image acquisition. The lookup miss must revoke the receipt
+  // credit and reject before dispatching any pull.
+  const requiredFresh = await imageAdmissionBytes(profile);
+  const availableBytes = diskAdmissionBytes({
+    manifests: release.manifests,
+    existingValid: true,
+  });
+  assert.ok(requiredFresh > availableBytes);
+
+  const second = prepareHarness(t, 'stale-receipt-miss', {
+    release,
+    stateDir: first.stateDir,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+    callbackBytes: 0,
+    availableBytes,
+  });
+  const secondRun = runCli(second);
+  assert.equal(secondRun.status, 1);
+  assert.match(secondRun.stderr, /Insufficient free space/);
+  const secondEvents = readEvents(second.config.eventsPath);
+  assert.deepEqual(
+    secondEvents.map((event) => event.type),
+    ['prepare', 'callback', 'sdk-construct', 'sdk-get', 'sdk-close']
+  );
+  assert.equal(secondEvents.some((event) => event.type === 'sdk-pull'), false);
+  // The receipt and the selection are untouched: the wrapper failed closed.
+  assert.ok(fs.readFileSync(path.join(cacheDir, 'manifest.json')).equals(receiptBefore));
+  const inventory = await listRuntimes({ stateDir: first.stateDir });
+  assert.equal(inventory.active.id, set);
+  assert.equal(inventory.previous, null);
+});
+
+test('a cache miss at ample capacity pulls successfully and the receipt remains valid', async (t) => {
+  const { createHash } = require('node:crypto');
+  const profile = pinnedProfile('pi-dev', 8192, 512);
+  const release = makeRelease({
+    version: '0.1.0',
+    archiveEntries: { 'boxlite-sdk': cliSdkNativeStoreEntries('0.1.0') },
+  });
+
+  const first = prepareHarness(t, 'stale-receipt-ample-first', {
+    release,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+  });
+  const firstRun = runCli(first);
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  const set = JSON.parse(firstRun.stdout).set;
+  const cacheKey = createHash('sha256').update(set + '\n' + profile.image).digest('hex');
+  const cacheDir = path.join(first.stateDir, 'profile-images', cacheKey);
+  fs.rmSync(path.join(cacheDir, 'native-store.json'));
+
+  // The same miss scenario at ample capacity: the full fresh requirement is
+  // admitted and the pull proceeds to a successful commit.
+  const second = prepareHarness(t, 'stale-receipt-ample-second', {
+    release,
+    stateDir: first.stateDir,
+    imagePreparationMiB: 512,
+    useRealImageModule: true,
+    callbackBytes: 0,
+  });
+  const secondRun = runCli(second);
+  assert.equal(secondRun.status, 0, secondRun.stderr);
+  assert.equal(JSON.parse(secondRun.stdout).set, set);
+  const secondEvents = readEvents(second.config.eventsPath);
+  assert.deepEqual(
+    secondEvents.map((event) => event.type),
+    ['prepare', 'callback', 'sdk-construct', 'sdk-get', 'sdk-pull', 'sdk-get', 'sdk-close', 'commit']
+  );
+  assert.equal(secondEvents.filter((event) => event.type === 'sdk-pull').length, 1);
+  // The receipt remains valid afterwards for this exact candidate.
+  const receipt = JSON.parse(fs.readFileSync(path.join(cacheDir, 'manifest.json'), 'utf8'));
+  assert.deepEqual(receipt, {
+    image: profile.image,
+    runtime: set,
+    manifestDigest: profile.image.split('@')[1],
+  });
   const inventory = await listRuntimes({ stateDir: first.stateDir });
   assert.equal(inventory.active.id, set);
   assert.equal(inventory.previous, null);
