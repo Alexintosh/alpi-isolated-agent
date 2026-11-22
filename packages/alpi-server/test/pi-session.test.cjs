@@ -336,7 +336,21 @@ const WRAPPER_SOURCE = [
   "const renameSync = fs.renameSync;",
   "fs.renameSync = function (from, to) {",
   "  if (gates.rename && to === gates.rename.target) gateWait('rename', gates.rename.file);",
+  "  if (gates.restoreRenameGate && to === gates.restoreRenameGate.target &&",
+  "      String(from).endsWith('.restore')) gateWait('restoreRename', gates.restoreRenameGate.file);",
+  "  if (gates.restoreRenameFault && String(from).endsWith('.restore') &&",
+  "      fs.existsSync(gates.restoreRenameFault.trigger)) {",
+  "    const error = new Error('injected restore rename failure');",
+  "    error.code = gates.restoreRenameFault.code || 'EIO';",
+  "    throw error;",
+  "  }",
+  "  if (gates.renameFrom && from === gates.renameFrom.path) gateWait('renameFrom', gates.renameFrom.file);",
   "  return renameSync.call(fs, from, to);",
+  "};",
+  "const unlinkSync = fs.unlinkSync;",
+  "fs.unlinkSync = function (target) {",
+  "  if (gates.unlinkGate && target === gates.unlinkGate.target) gateWait('unlink', gates.unlinkGate.file);",
+  "  return unlinkSync.call(fs, target);",
   "};",
   "const fsyncSync = fs.fsyncSync;",
   "fs.fsyncSync = function (fd) {",
@@ -380,7 +394,7 @@ function spawnWrappedSupervisor(supervisor, gates, options = {}) {
   const wrapperPath = path.join(supervisor.root, 'supervisor-patch.cjs');
   fs.writeFileSync(wrapperPath, WRAPPER_SOURCE);
   return spawn(NODE, [SUPERVISOR, ...supervisorLaunchArgs(supervisor, options)], {
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: supervisorTestEnv(gates, wrapperPath),
   });
 }
@@ -538,6 +552,12 @@ async function waitForPidGone(pid, timeoutMs = 8_000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return false;
+}
+
+async function deadPid() {
+  const probe = spawn(NODE, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+  await waitForExit(probe, 5_000);
+  return probe.pid;
 }
 
 async function waitForSupervisorGone(socketPath, timeoutMs = 8_000) {
@@ -2048,4 +2068,398 @@ test('host adapter force detach on a live supervisor never claims verified termi
     (error) => error instanceof PiHarnessError && error.code === 'session_not_attached'
   );
   adapter.closeSync();
+});
+
+// --- PI-R2 repair pass 3 regressions (PI-R3-01 / PI-R3-02) ---
+
+function writeDeadRecord(filePath, pid, sessionId) {
+  fs.writeFileSync(filePath, JSON.stringify({
+    version: 1,
+    pid,
+    ...(sessionId ? { sessionId } : {}),
+    startedAt: new Date().toISOString(),
+  }));
+}
+
+test('stale recovery-guard takeover fails closed and preserves the replacement guard', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'stale-guard' });
+  const lockPath = spec.statePath + '.lock';
+  const reclaimPath = lockPath + '.reclaim';
+  // A dead main lock and a dead recovery guard: both complete records naming
+  // provably absent pids, so every starter must conclude recovery is needed.
+  writeDeadRecord(lockPath, await deadPid(), spec.sessionId);
+  writeDeadRecord(reclaimPath, await deadPid());
+
+  // Starter A parks after reading the dead guard (liveness proven absent) and
+  // before its rename of the guard pathname.
+  const gateA = path.join(spec.root, 'gate-guard-rename');
+  fs.writeFileSync(gateA, 'on');
+  const a = spawnWrappedSupervisor(spec, {
+    renameFrom: { file: gateA, path: reclaimPath },
+  });
+  spec.attachChild(a);
+  let aStdout = '';
+  a.stdout.on('data', (chunk) => { aStdout += chunk; });
+  assert.equal(
+    await waitForFile(gateA + '.reached', 10_000),
+    true,
+    'starter A did not reach the guard-rename gate'
+  );
+
+  // Starter B captures the dead guard, publishes its own guard, replaces the
+  // dead main lock, and parks at its guard release.
+  const gateB = path.join(spec.root, 'gate-guard-release');
+  fs.writeFileSync(gateB, 'on');
+  const b = spawnWrappedSupervisor(spec, {
+    unlinkGate: { file: gateB, target: reclaimPath },
+  });
+  spec.attachChild(b);
+  assert.equal(
+    await waitForFile(gateB + '.reached', 20_000),
+    true,
+    'starter B did not reach the guard-release gate'
+  );
+  const bGuard = readJsonFile(reclaimPath);
+  assert.ok(bGuard, 'starter B did not publish a replacement guard');
+  assert.equal(bGuard.pid, b.pid);
+  const bLock = readJsonFile(lockPath);
+  assert.ok(bLock, 'starter B did not publish a replacement main lock');
+  assert.equal(bLock.pid, b.pid);
+
+  // Resume A. Its rename now captures B's live guard, so the takeover must
+  // fail closed, restore the captured guard, and never delete or replace it.
+  fs.unlinkSync(gateA);
+  const aExit = await supervisorExitCode(a, 15_000);
+  assert.equal(aExit, 2, 'starter A must fail closed; it stayed live');
+  const aResult = parseJson(aStdout);
+  assert.equal(aResult && aResult.code, 'lock_busy',
+    'starter A must report a clear lock error, saw: ' + aStdout);
+  const guardAfter = readJsonFile(reclaimPath);
+  assert.ok(guardAfter, 'the replacement guard was destroyed by the stale takeover');
+  assert.equal(guardAfter.pid, b.pid);
+  const lockAfter = readJsonFile(lockPath);
+  assert.ok(lockAfter, 'the replacement main lock was destroyed by the stale takeover');
+  assert.equal(lockAfter.pid, b.pid);
+
+  // B completes recovery: exactly one supervisor and one Pi child exist.
+  fs.unlinkSync(gateB);
+  const status = await waitForStatus(spec.socketPath, 15_000);
+  assert.ok(status, 'starter B did not become ready');
+  assert.equal(processAlive(b.pid), true);
+  const lockRecord = readJsonFile(lockPath);
+  assert.ok(lockRecord);
+  assert.equal(lockRecord.pid, b.pid);
+  assert.equal(
+    await pollUntil(() => fakePiPids(spec.workspace).length === 1, 5_000),
+    true,
+    'expected exactly one Pi child'
+  );
+});
+
+test('main-lock recovery refuses to destroy a lock published after its liveness check', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'stale-lock' });
+  const lockPath = spec.statePath + '.lock';
+  const reclaimPath = lockPath + '.reclaim';
+  writeDeadRecord(lockPath, await deadPid(), spec.sessionId);
+  writeDeadRecord(reclaimPath, await deadPid());
+
+  // The starter parks after its main-lock recheck, before the destructive
+  // capture of the dead lock.
+  const gateA = path.join(spec.root, 'gate-lock-capture');
+  fs.writeFileSync(gateA, 'on');
+  const a = spawnWrappedSupervisor(spec, {
+    renameFrom: { file: gateA, path: lockPath },
+  });
+  spec.attachChild(a);
+  let aStdout = '';
+  a.stdout.on('data', (chunk) => { aStdout += chunk; });
+  assert.equal(
+    await waitForFile(gateA + '.reached', 10_000),
+    true,
+    'starter did not reach the main-lock capture gate'
+  );
+  const aGuard = readJsonFile(reclaimPath);
+  assert.ok(aGuard, 'starter did not publish its recovery guard');
+  assert.equal(aGuard.pid, a.pid);
+
+  // A replacement lock is published after the starter's liveness observation.
+  const thiefRecord = {
+    version: 1,
+    pid: process.pid,
+    sessionId: spec.sessionId,
+    startedAt: new Date().toISOString(),
+  };
+  fs.unlinkSync(lockPath);
+  fs.writeFileSync(lockPath, JSON.stringify(thiefRecord));
+
+  fs.unlinkSync(gateA);
+  const aExit = await supervisorExitCode(a, 15_000);
+  assert.equal(aExit, 2, 'starter must fail closed instead of stealing the replacement lock');
+  const aResult = parseJson(aStdout);
+  assert.equal(aResult && aResult.code, 'lock_busy',
+    'starter must report a clear lock error, saw: ' + aStdout);
+  const thiefAfter = readJsonFile(lockPath);
+  assert.ok(thiefAfter, 'the replacement lock was destroyed by stale recovery');
+  assert.deepEqual(thiefAfter, thiefRecord);
+});
+
+test('resume records a durable transition-ambiguity marker before publishing state', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'ambig-marker', scenario: { settleDelayMs: 10 } });
+  const ambiguityPath = spec.statePath + '.ambiguous';
+  const renameGate = path.join(spec.root, 'gate-resume-rename');
+  const a = spawnWrappedSupervisor(spec, {
+    rename: { file: renameGate, target: spec.statePath },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+  const submitted = await submitCli(spec, {
+    requestId: 'marker-1', generation: 1, message: 'work',
+  });
+  assert.equal(submitted.json.accepted, true);
+  assert.ok(await waitSettledCli(spec));
+  const paused = await runCli([
+    'pause', '--socket', spec.socketPath, '--generation', '1', '--owner', 'op-1',
+  ]);
+  assert.equal(paused.json.ok, true);
+
+  fs.writeFileSync(renameGate, 'on');
+  const resumedPromise = runCli([
+    'resume', '--socket', spec.socketPath,
+    '--generation', String(paused.json.generation), '--owner', 'op-1',
+  ]);
+  assert.equal(
+    await waitForFile(renameGate + '.reached', 10_000),
+    true,
+    'resume never reached the state rename'
+  );
+  // The ambiguity fence is durable before the state rename happens.
+  const markerBefore = readJsonFile(ambiguityPath);
+  assert.ok(markerBefore, 'no durable ambiguity marker before the rename');
+  assert.equal(markerBefore.kind, 'resume');
+  assert.equal(markerBefore.generation, paused.json.generation + 1);
+  fs.unlinkSync(renameGate);
+  const resumed = await resumedPromise;
+  assert.equal(resumed.json.ok, true);
+  assert.equal(fs.existsSync(ambiguityPath), false,
+    'the ambiguity marker must be cleared after a durable commit');
+});
+
+test('failed restoration leaves evidence a replacement must refuse', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'ambig-restore', scenario: { settleDelayMs: 10 } });
+  const ambiguityPath = spec.statePath + '.ambiguous';
+  const renameGate = path.join(spec.root, 'gate-resume-rename');
+  const dirFsyncTrigger = path.join(spec.root, 'trigger-dirfsync');
+  const restoreTrigger = path.join(spec.root, 'trigger-restore-rename');
+  const a = spawnWrappedSupervisor(spec, {
+    rename: { file: renameGate, target: spec.statePath },
+    dirFsyncFault: { code: 'EIO', errno: -5, trigger: dirFsyncTrigger },
+    restoreRenameFault: { code: 'EIO', errno: -5, trigger: restoreTrigger },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+  const piPid = status.piPid;
+  const submitted = await submitCli(spec, {
+    requestId: 'restore-1', generation: 1, message: 'work',
+  });
+  assert.equal(submitted.json.accepted, true);
+  assert.ok(await waitSettledCli(spec));
+  const paused = await runCli([
+    'pause', '--socket', spec.socketPath, '--generation', '1', '--owner', 'op-1',
+  ]);
+  assert.equal(paused.json.ok, true);
+  const resumedGeneration = paused.json.generation + 1;
+
+  fs.writeFileSync(renameGate, 'on');
+  const resumedPromise = runCli([
+    'resume', '--socket', spec.socketPath,
+    '--generation', String(paused.json.generation), '--owner', 'op-1',
+  ]);
+  assert.equal(await waitForFile(renameGate + '.reached', 10_000), true);
+  // The commit fails after the rename lands, and the restoration fails before
+  // it can put the old state back.
+  fs.writeFileSync(dirFsyncTrigger, 'on');
+  fs.writeFileSync(restoreTrigger, 'on');
+  fs.unlinkSync(renameGate);
+  const resumed = await resumedPromise;
+  assert.equal(resumed.json.ok, false);
+  assert.equal(resumed.json.code, 'state_write_failed');
+
+  const live = await runCli(['status', '--socket', spec.socketPath]);
+  assert.equal(live.json.ok, true);
+  assert.equal(live.json.paused, true);
+  assert.equal(live.json.generation, paused.json.generation);
+
+  // The unpaused state is visible on disk with the ambiguity marker.
+  const onDisk = readJsonFile(spec.statePath);
+  assert.equal(onDisk.generation, resumedGeneration);
+  assert.equal(onDisk.paused, false);
+
+  // The Pi child must be verifiably absent before the replacement runs.
+  process.kill(piPid, 'SIGKILL');
+  assert.equal(await waitForPidGone(piPid, 8_000), true);
+  a.kill('SIGKILL');
+  await waitForExit(a, 8_000);
+
+  // A replacement must refuse to honor the unpaused, never-committed grant.
+  const refused = await runCli(supervisorLaunchArgs(spec), 20_000);
+  assert.equal(refused.code, 2,
+    'replacement must refuse the ambiguous state, saw: ' + refused.stdout);
+  assert.equal(refused.json.ok, false);
+  assert.equal(refused.json.code, 'cleanup_pending');
+  assert.match(refused.json.message, /uncommitted transition/i);
+  assert.ok(refused.json.details && refused.json.details.cleanupPending === true);
+  assert.equal(refused.json.details.ambiguousTransition.kind, 'resume');
+
+  // The evidence survives the refusal untouched.
+  const afterRefusal = readJsonFile(spec.statePath);
+  assert.equal(afterRefusal.generation, resumedGeneration);
+  assert.equal(afterRefusal.paused, false);
+  const marker = readJsonFile(ambiguityPath);
+  assert.ok(marker, 'the ambiguity marker did not survive the failed restoration');
+  assert.equal(marker.kind, 'resume');
+});
+
+test('abrupt exit during rollback leaves an ambiguous grant a replacement refuses', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'ambig-crash', scenario: { settleDelayMs: 10 } });
+  const ambiguityPath = spec.statePath + '.ambiguous';
+  const renameGate = path.join(spec.root, 'gate-resume-rename');
+  const restoreGate = path.join(spec.root, 'gate-restore-rename');
+  const dirFsyncTrigger = path.join(spec.root, 'trigger-dirfsync');
+  const a = spawnWrappedSupervisor(spec, {
+    rename: { file: renameGate, target: spec.statePath },
+    restoreRenameGate: { file: restoreGate, target: spec.statePath },
+    dirFsyncFault: { code: 'EIO', errno: -5, trigger: dirFsyncTrigger },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+  const piPid = status.piPid;
+  const submitted = await submitCli(spec, {
+    requestId: 'crash-1', generation: 1, message: 'work',
+  });
+  assert.equal(submitted.json.accepted, true);
+  assert.ok(await waitSettledCli(spec));
+  const paused = await runCli([
+    'pause', '--socket', spec.socketPath, '--generation', '1', '--owner', 'op-1',
+  ]);
+  assert.equal(paused.json.ok, true);
+  const resumedGeneration = paused.json.generation + 1;
+
+  fs.writeFileSync(restoreGate, 'on');
+  fs.writeFileSync(renameGate, 'on');
+  const resumed = runCli([
+    'resume', '--socket', spec.socketPath,
+    '--generation', String(paused.json.generation), '--owner', 'op-1',
+  ]);
+  assert.equal(await waitForFile(renameGate + '.reached', 10_000), true);
+  fs.writeFileSync(dirFsyncTrigger, 'on');
+  fs.unlinkSync(renameGate);
+  // The rename lands, the directory fsync fails, the rollback starts, and the
+  // supervisor exits abruptly in the middle of it. No rollback is possible.
+  assert.equal(
+    await waitForFile(restoreGate + '.reached', 10_000),
+    true,
+    'rollback never reached the restore rename'
+  );
+  a.kill('SIGKILL');
+  await waitForExit(a, 8_000);
+  await resumed;
+
+  // The crash boundary leaves the renamed state and the durable marker.
+  const onDisk = readJsonFile(spec.statePath);
+  assert.equal(onDisk.generation, resumedGeneration);
+  assert.equal(onDisk.paused, false);
+
+  try {
+    process.kill(piPid, 'SIGKILL');
+  } catch (error) {
+    // The orphaned child exits on its own once the supervisor's pipe closes.
+    if (error.code !== 'ESRCH') throw error;
+  }
+  assert.equal(await waitForPidGone(piPid, 8_000), true);
+
+  // A replacement must refuse the ambiguous grant instead of resuming it.
+  const refused = await runCli(supervisorLaunchArgs(spec), 20_000);
+  assert.equal(refused.code, 2,
+    'replacement must refuse the ambiguous state, saw: ' + refused.stdout);
+  assert.equal(refused.json.ok, false);
+  assert.equal(refused.json.code, 'cleanup_pending');
+  assert.match(refused.json.message, /uncommitted transition/i);
+  assert.equal(refused.json.details.ambiguousTransition.kind, 'resume');
+  const marker = readJsonFile(ambiguityPath);
+  assert.ok(marker, 'no ambiguity marker at the crash boundary');
+  assert.equal(marker.kind, 'resume');
+});
+
+test('durable rollback clears the ambiguity marker and recovery proceeds', async (t) => {
+  const spec = await createSupervisorSpec(t, { label: 'ambig-rollback', scenario: { settleDelayMs: 10 } });
+  const ambiguityPath = spec.statePath + '.ambiguous';
+  const renameGate = path.join(spec.root, 'gate-resume-rename');
+  const restoreGate = path.join(spec.root, 'gate-restore-rename');
+  const dirFsyncTrigger = path.join(spec.root, 'trigger-dirfsync');
+  const a = spawnWrappedSupervisor(spec, {
+    rename: { file: renameGate, target: spec.statePath },
+    restoreRenameGate: { file: restoreGate, target: spec.statePath },
+    dirFsyncFault: { code: 'EIO', errno: -5, trigger: dirFsyncTrigger },
+  });
+  spec.attachChild(a);
+  const status = await waitForStatus(spec.socketPath, 10_000);
+  assert.ok(status, 'supervisor did not become ready: ' + (spec.lastStderr || ''));
+  const submitted = await submitCli(spec, {
+    requestId: 'rollback-1', generation: 1, message: 'work',
+  });
+  assert.equal(submitted.json.accepted, true);
+  assert.ok(await waitSettledCli(spec));
+  const paused = await runCli([
+    'pause', '--socket', spec.socketPath, '--generation', '1', '--owner', 'op-1',
+  ]);
+  assert.equal(paused.json.ok, true);
+
+  fs.writeFileSync(restoreGate, 'on');
+  fs.writeFileSync(renameGate, 'on');
+  const resumedPromise = runCli([
+    'resume', '--socket', spec.socketPath,
+    '--generation', String(paused.json.generation), '--owner', 'op-1',
+  ]);
+  assert.equal(await waitForFile(renameGate + '.reached', 10_000), true);
+  fs.writeFileSync(dirFsyncTrigger, 'on');
+  fs.unlinkSync(renameGate);
+  assert.equal(await waitForFile(restoreGate + '.reached', 10_000), true);
+  // Make the rollback itself durable before letting it land.
+  fs.unlinkSync(dirFsyncTrigger);
+  fs.unlinkSync(restoreGate);
+  const resumed = await resumedPromise;
+  assert.equal(resumed.json.ok, false);
+  assert.equal(resumed.json.code, 'state_write_failed');
+
+  // The rollback is durable and the marker is cleared in the same critical
+  // section.
+  const onDisk = readJsonFile(spec.statePath);
+  assert.equal(onDisk.generation, paused.json.generation);
+  assert.equal(onDisk.paused, true);
+  assert.equal(fs.existsSync(ambiguityPath), false,
+    'a durable rollback must clear the ambiguity marker');
+  const live = await runCli(['status', '--socket', spec.socketPath]);
+  assert.equal(live.json.paused, true);
+  assert.equal(live.json.pauseOwner, 'op-1');
+
+  // A replacement recovers normally after the cleared fence.
+  const piPid = live.json.piPid;
+  process.kill(piPid, 'SIGKILL');
+  assert.equal(await waitForPidGone(piPid, 8_000), true);
+  a.kill('SIGKILL');
+  await waitForExit(a, 8_000);
+  const replacement = spawnSupervisorProcess(spec);
+  spec.attachChild(replacement);
+  const replacementStatus = await waitForStatus(spec.socketPath, 15_000);
+  assert.ok(replacementStatus, 'replacement did not recover normally');
+  assert.equal(replacementStatus.paused, true);
+  assert.equal(replacementStatus.pauseOwner, 'op-1');
+  const resumedAgain = await runCli([
+    'resume', '--socket', spec.socketPath,
+    '--generation', String(replacementStatus.generation), '--owner', 'op-1',
+  ]);
+  assert.equal(resumedAgain.json.ok, true);
 });

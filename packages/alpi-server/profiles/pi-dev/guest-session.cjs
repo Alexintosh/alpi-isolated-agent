@@ -232,6 +232,8 @@ function writeAtomic(filePath, data, { requireDurableDirectory = false } = {}) {
   let restoreBytes = null;
   let restoreAbsent = false;
   let renamed = false;
+  let restoreAttempted = false;
+  let restoreVerified = false;
   try {
     fd = fs.openSync(temporary, 'wx', 0o600);
     fs.writeFileSync(fd, data, 'utf8');
@@ -255,9 +257,20 @@ function writeAtomic(filePath, data, { requireDurableDirectory = false } = {}) {
     fsyncDirectory(directory, { requireDurable: requireDurableDirectory });
   } catch {
     if (renamed && (restoreAbsent || restoreBytes !== null)) {
-      restoreRenamedState(filePath, restoreAbsent ? null : restoreBytes);
+      restoreAttempted = true;
+      try {
+        restoreRenamedState(filePath, restoreAbsent ? null : restoreBytes);
+        restoreVerified = true;
+      } catch {
+        // The latched storage fault already fences every further transition;
+        // the reported details say whether the rename was durably reversed.
+      }
     }
-    fail('state_write_failed', 'Guest supervisor state could not be written.');
+    fail('state_write_failed', 'Guest supervisor state could not be written.', {
+      renameApplied: renamed,
+      restoreAttempted,
+      restoreVerified,
+    });
   } finally {
     if (fd !== undefined) {
       try {
@@ -277,32 +290,66 @@ function writeAtomic(filePath, data, { requireDurableDirectory = false } = {}) {
 }
 
 /**
- * Best-effort reversal of a rename whose directory entry could not be made
- * durable: put back the previous file contents, or remove the file when none
- * existed. Never throws; the original state_write_failed report is the
- * authoritative outcome.
+ * Reversal of a rename whose directory entry could not be made durable: put
+ * back the previous file contents, or remove the file when none existed. The
+ * reversal itself must be durable before it can be trusted, so the restored
+ * directory entry is fsynced too, and any failure throws: the caller then
+ * knows the on-disk state may still reflect the interrupted write.
  */
 function restoreRenamedState(filePath, bytes) {
-  try {
-    if (bytes === null) {
-      fs.unlinkSync(filePath);
-      return;
-    }
-    const temporary = path.join(
-      path.dirname(filePath),
-      '.' + path.basename(filePath) + '.' + crypto.randomBytes(8).toString('hex') + '.restore'
-    );
-    const fd = fs.openSync(temporary, 'wx', 0o600);
-    try {
-      fs.writeFileSync(fd, bytes);
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(temporary, filePath);
-  } catch {
-    // The latched storage fault already fences every further transition.
+  if (bytes === null) {
+    fs.unlinkSync(filePath);
+    fsyncDirectory(path.dirname(filePath), { requireDurable: true });
+    return;
   }
+  const temporary = path.join(
+    path.dirname(filePath),
+    '.' + path.basename(filePath) + '.' + crypto.randomBytes(8).toString('hex') + '.restore'
+  );
+  const fd = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporary);
+    } catch {
+      // The original failure is reported by the rethrow below.
+    }
+    throw error;
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(temporary, filePath);
+  fsyncDirectory(path.dirname(filePath), { requireDurable: true });
+}
+
+/**
+ * Read a pending transition-ambiguity marker. Returns null when no marker
+ * exists, the parsed record when it has a usable shape, and { invalid: true }
+ * for an unreadable or malformed marker (which must be treated as evidence).
+ */
+function readTransitionAmbiguity(ambiguityPath) {
+  let raw;
+  try {
+    raw = fs.readFileSync(ambiguityPath, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return null;
+    }
+    return { invalid: true };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+      parsed.version === 1 && typeof parsed.kind === 'string' &&
+      Number.isSafeInteger(parsed.generation) && parsed.generation >= 1) {
+      return parsed;
+    }
+  } catch {
+    // Fall through to the invalid marker below.
+  }
+  return { invalid: true };
 }
 
 /**
@@ -763,6 +810,7 @@ function createSupervisor(config) {
     signal: null,
   };
   const ownershipPath = `${statePath}.owner`;
+  const ambiguityPath = `${statePath}.ambiguous`;
   let reclaimPath = null;
   let lockStartedAt = null;
   let guardStartedAt = null;
@@ -853,6 +901,15 @@ function createSupervisor(config) {
   /**
    * Critical ownership/lifecycle state. Throws when the transition was not
    * durably committed, and refuses further writes after any critical failure.
+   *
+   * Every transition is fenced by a durable "transition-ambiguous" marker
+   * written BEFORE the state rename. The marker is recorded while the caller
+   * holds the lock and names the transition (kind, target generation,
+   * intent), so its validity never depends on the rollback or on directory
+   * durability: if the rename lands and cannot be durably reversed, the
+   * marker stays on disk and the next supervisor refuses to treat the
+   * renamed state as a committed grant. The marker is cleared only after a
+   * verified durable commit, or a verified durable rollback.
    */
   function writeStateCritical(operation) {
     if (finalizing) {
@@ -868,10 +925,55 @@ function createSupervisor(config) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
+    if (readTransitionAmbiguity(ambiguityPath)) {
+      // A marker from an earlier ambiguous transition must never be silently
+      // overwritten; the next supervisor must see the evidence.
+      const stale = new SupervisorError('state_write_failed', 'Guest supervisor state has an unresolved transition marker.');
+      if (!storageFault) {
+        recordStorageFault(operation, stale);
+      }
+      throw stale;
+    }
     const data = JSON.stringify(serializeState(), null, 2);
+    const marker = JSON.stringify({
+      version: 1,
+      sessionId,
+      kind: operation,
+      generation,
+      intent: `${operation} transition of guest supervisor session state`,
+      recordedAt: nowIso(),
+    }, null, 2);
     try {
+      // Stage 1: the fence is durable before any state rename happens.
+      writeAtomic(ambiguityPath, marker, { requireDurableDirectory: true });
+    } catch (error) {
+      if (!storageFault) {
+        recordStorageFault(operation, error);
+      }
+      throw error instanceof SupervisorError
+        ? error
+        : new SupervisorError('state_write_failed', 'Guest supervisor transition marker could not be committed.', {
+          operation,
+        });
+    }
+    try {
+      // Stage 2: the critical state write.
       writeAtomic(statePath, data, { requireDurableDirectory: true });
     } catch (error) {
+      const details = (error && error.details) || {};
+      if (details.renameApplied === true && details.restoreVerified !== true) {
+        // The rename landed and could not be durably reversed. The marker
+        // stays as durable evidence for the next supervisor.
+      } else {
+        try {
+          // No rename landed, or the rollback was durably verified: the
+          // transition provably did not reach the disk, so the fence can go.
+          unlinkDurable(ambiguityPath);
+        } catch {
+          // A lingering fence is safe: the restart reconciles it against the
+          // loaded generation.
+        }
+      }
       if (!storageFault) {
         recordStorageFault(operation, error);
       }
@@ -880,6 +982,17 @@ function createSupervisor(config) {
         : new SupervisorError('state_write_failed', 'Guest supervisor state could not be committed.', {
           operation,
         });
+    }
+    try {
+      // Stage 3: the transition is durably committed; retire the fence.
+      unlinkDurable(ambiguityPath);
+    } catch (error) {
+      if (!storageFault) {
+        recordStorageFault(operation, error);
+      }
+      throw new SupervisorError('state_write_failed', 'Guest supervisor transition marker could not be cleared.', {
+        operation,
+      });
     }
   }
 
@@ -2284,12 +2397,63 @@ function createSupervisor(config) {
   }
 
   /**
+   * True when a record captured by rename is exactly the dead record that was
+   * observed at the public path before the capture. Identity includes pid and
+   * startedAt, so a replacement published in between can never pass.
+   */
+  function capturedRecordMatchesObserved(captured, observed) {
+    return lockRecordIdentifies(captured) && lockRecordIdentifies(observed) &&
+      captured.pid === observed.pid && captured.startedAt === observed.startedAt;
+  }
+
+  /**
+   * Put a record captured by rename back at its public path. The restore
+   * uses link(), which never replaces an existing file: if another starter
+   * published at the public path while the record was captured, the captured
+   * record is left orphaned at its private path (inert) instead of being
+   * renamed over — or deleted from — the newer publication. Deleting or
+   * superseding a guard/lock published after our liveness observation is
+   * therefore impossible; the caller fails closed either way.
+   */
+  function restoreCapturedRecord(capturedPath, publicPath) {
+    try {
+      fs.linkSync(capturedPath, publicPath);
+    } catch (error) {
+      if (error && error.code === 'EEXIST') {
+        return;
+      }
+      throw error;
+    }
+    try {
+      fs.unlinkSync(capturedPath);
+    } catch {
+      // The public hard link carries the record; the private name is spare.
+    }
+  }
+
+  /**
+   * Refuse to continue recovery unless the public recovery guard still names
+   * this supervisor. It is re-checked immediately before every destructive
+   * step (capturing the dead lock and publishing the replacement), so a
+   * takeover that displaced this supervisor cannot inherit its progress.
+   */
+  function verifyRecoveryGuardOwnership() {
+    const current = readLockRecord(reclaimPath);
+    if (!lockRecordIdentifies(current) ||
+      current.pid !== process.pid || current.startedAt !== guardStartedAt) {
+      fail('lock_busy', 'Guest supervisor recovery guard was taken over during ownership recovery.');
+    }
+  }
+
+  /**
    * Serialize every reclamation decision behind a guard file published with
    * the same link-based protocol as the lock itself, so a guard record is
    * never observed partially written. A guard whose owner is provably dead
-   * (ESRCH) is taken over by renaming it away — an atomic operation only one
-   * contender can win — and the winner re-publishes the public guard under
-   * its own identity before touching anything else.
+   * (ESRCH) is taken over by capturing it with a rename — an atomic operation
+   * only one contender can win — and verifying the captured record against
+   * the dead one observed BEFORE publishing a replacement. If the pathname
+   * had come to name a newer guard, the captured record is restored intact
+   * and the takeover fails closed; it is never deleted or superseded.
    */
   function acquireRecoveryGuard() {
     const guardRecord = {
@@ -2302,6 +2466,11 @@ function createSupervisor(config) {
         return;
       }
       const existing = readLockRecord(reclaimPath);
+      if (!existing) {
+        // The guard vanished between the failed create and the read: its
+        // holder released it. Retry the publication.
+        continue;
+      }
       const liveness = supervisorLiveness(existing);
       if (liveness === 'alive') {
         fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
@@ -2309,30 +2478,43 @@ function createSupervisor(config) {
       if (liveness === 'unknown') {
         fail('lock_failed', 'Guest supervisor recovery guard is not verifiable.');
       }
-      const stolenPath = reclaimPath + '.' + process.pid + '.' +
-        crypto.randomBytes(6).toString('hex') + '.stolen';
+      const capturedPath = reclaimPath + '.' + process.pid + '.' +
+        crypto.randomBytes(6).toString('hex') + '.captured';
       try {
-        fs.renameSync(reclaimPath, stolenPath);
+        fs.renameSync(reclaimPath, capturedPath);
       } catch (error) {
         if (error && error.code === 'ENOENT') {
           continue;
         }
         fail('lock_failed', 'Guest supervisor recovery guard could not be recovered.');
       }
+      const captured = readLockRecord(capturedPath);
+      if (!capturedRecordMatchesObserved(captured, existing)) {
+        // The pathname named a replacement guard, not the dead one observed.
+        restoreCapturedRecord(capturedPath, reclaimPath);
+        const replacement = readLockRecord(reclaimPath);
+        if (supervisorLiveness(replacement) === 'alive') {
+          fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
+        }
+        // The replacement guard is gone or dead again; retry the takeover.
+        continue;
+      }
       if (createLockFile(reclaimPath, guardRecord)) {
+        // The captured record was verified dead; removing the private copy
+        // is safe.
         try {
-          fs.unlinkSync(stolenPath);
+          fs.unlinkSync(capturedPath);
         } catch {
-          // The stolen copy is inert.
+          // The private copy is inert.
         }
         return;
       }
-      const current = readLockRecord(reclaimPath);
       try {
-        fs.unlinkSync(stolenPath);
+        fs.unlinkSync(capturedPath);
       } catch {
-        // The stolen copy is inert.
+        // The captured record was verified dead; the private copy is inert.
       }
+      const current = readLockRecord(reclaimPath);
       if (supervisorLiveness(current) === 'alive') {
         fail('lock_busy', 'Guest supervisor ownership recovery is already in progress.');
       }
@@ -2380,31 +2562,70 @@ function createSupervisor(config) {
     acquireRecoveryGuard();
     try {
       const existing = readLockRecord(lockPath);
-      const liveness = supervisorLiveness(existing);
-      if (liveness === 'alive') {
-        fail('already_running', 'A guest supervisor already owns this session.');
-      }
-      if (liveness === 'unknown') {
-        fail('lock_failed', 'Guest supervisor lock record is not verifiable.');
-      }
       if (existing) {
+        const liveness = supervisorLiveness(existing);
+        if (liveness === 'alive') {
+          fail('already_running', 'A guest supervisor already owns this session.');
+        }
+        if (liveness === 'unknown') {
+          fail('lock_failed', 'Guest supervisor lock record is not verifiable.');
+        }
         // The record was proven dead. Under the guard no protocol participant
-        // can replace it; re-read to confirm the identity before unlinking.
+        // can replace it legitimately. Re-read to confirm the identity, then
+        // capture the dead lock with a rename and verify the captured record
+        // at its private location before publishing the replacement: the
+        // capture is atomic, so a lock published after the liveness
+        // observation is never unlinked or superseded on the strength of a
+        // stale observation.
         const recheck = readLockRecord(lockPath);
         if (!lockRecordIdentifies(recheck) ||
           recheck.pid !== existing.pid || recheck.startedAt !== existing.startedAt) {
           fail('lock_busy', 'Guest supervisor lock changed during ownership recovery.');
         }
+        verifyRecoveryGuardOwnership();
+        const capturedPath = lockPath + '.' + process.pid + '.' +
+          crypto.randomBytes(6).toString('hex') + '.captured';
         try {
-          fs.unlinkSync(lockPath);
-        } catch (unlinkError) {
-          if (!unlinkError || unlinkError.code !== 'ENOENT') {
-            fail('lock_failed', 'A stale guest supervisor lock could not be cleared.');
+          fs.renameSync(lockPath, capturedPath);
+        } catch (error) {
+          if (error && error.code === 'ENOENT') {
+            fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+          }
+          fail('lock_failed', 'A stale guest supervisor lock could not be cleared.');
+        }
+        let capturedDead = false;
+        let published = false;
+        try {
+          const captured = readLockRecord(capturedPath);
+          if (!capturedRecordMatchesObserved(captured, existing)) {
+            // The pathname named a newer lock, not the dead one observed.
+            restoreCapturedRecord(capturedPath, lockPath);
+            fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+          }
+          capturedDead = true;
+          verifyRecoveryGuardOwnership();
+          published = createLockFile(lockPath, lockRecord);
+        } finally {
+          // Only a captured record verified to be the observed dead lock is
+          // ever removed here; an unverified capture is left in place.
+          if (capturedDead) {
+            try {
+              fs.unlinkSync(capturedPath);
+            } catch {
+              // The private copy is inert.
+            }
           }
         }
-      }
-      if (!createLockFile(lockPath, lockRecord)) {
-        fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+        if (!published) {
+          fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+        }
+      } else {
+        // Absence proves no live owner. Publish while the guard still names
+        // this supervisor.
+        verifyRecoveryGuardOwnership();
+        if (!createLockFile(lockPath, lockRecord)) {
+          fail('lock_busy', 'Guest supervisor lock was replaced during ownership recovery.');
+        }
       }
     } finally {
       releaseRecoveryGuard();
@@ -2453,6 +2674,7 @@ function createSupervisor(config) {
       if (!Number.isSafeInteger(loaded.generation) || loaded.generation < 1) {
         fail('state_corrupt', 'Guest supervisor state has an invalid generation.');
       }
+      assertNoAmbiguousTransition(loaded);
       if (typeof loaded.paused !== 'boolean' || typeof loaded.status !== 'string') {
         fail('state_corrupt', 'Guest supervisor state has an invalid lifecycle.');
       }
@@ -2541,7 +2763,43 @@ function createSupervisor(config) {
         exitCode: null,
         signal: null,
       };
+      assertNoAmbiguousTransition(null);
     }
+  }
+
+  /**
+   * A durable transition-ambiguity marker means the previous supervisor died
+   * (or failed) between renaming the critical state and proving that rename
+   * committed or durably reversed. The loaded state may reflect a transition
+   * that was never acknowledged, so it must not be honored: refuse until an
+   * operator resets the session or verified reconciliation applies. Verified
+   * reconciliation is possible only when the fenced transition provably did
+   * not survive: the loaded generation is older than the fenced target (or a
+   * fenced first create never produced a state file). That stale marker is
+   * cleared durably and startup continues.
+   */
+  function assertNoAmbiguousTransition(loaded) {
+    const ambiguity = readTransitionAmbiguity(ambiguityPath);
+    if (!ambiguity) {
+      return;
+    }
+    const survived = ambiguity.invalid === true || (loaded
+      ? loaded.generation >= ambiguity.generation
+      : ambiguity.generation > 1);
+    if (survived) {
+      fail('cleanup_pending', 'Guest supervisor state may reflect an uncommitted transition; refusing to honor it.', {
+        cleanupPending: true,
+        ambiguousTransition: ambiguity.invalid === true
+          ? { invalid: true }
+          : {
+            kind: ambiguity.kind,
+            generation: ambiguity.generation,
+            intent: ambiguity.intent || null,
+            recordedAt: ambiguity.recordedAt || null,
+          },
+      });
+    }
+    unlinkDurable(ambiguityPath);
   }
 
   function bindServer() {
