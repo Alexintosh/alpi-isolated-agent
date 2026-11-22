@@ -31,6 +31,41 @@ async function waitFor(check, timeoutMs = 2000) {
   }
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+// Ordinary deferred fake adapter: openIngress() is pending until the test
+// resolves it, which lets stop/fault interleavings be exercised deterministically.
+function deferredIngress(baseNetwork, events) {
+  const gate = deferred();
+  const handle = {
+    port: 43123,
+    target: 'iron-proxy',
+    closed: false,
+    healthy: () => true,
+    close: async () => {
+      handle.closed = true;
+    },
+  };
+  let opened = false;
+  const network = {
+    ...baseNetwork,
+    async openIngress() {
+      opened = true;
+      events.push('ingress-open');
+      return gate.promise;
+    },
+  };
+  return { network, gate, handle, isOpened: () => opened };
+}
+
 function makePolicyHelpers() {
   // Prefer the canonical module when the reference checkout is available.
   const root = process.env.IRON_CANONICAL_ROOT;
@@ -468,6 +503,277 @@ test('grant expiry fences an established stream and needs explicit restart', asy
   await lifecycle.stop();
 });
 
+test('stop during pending ingress fences, joins the launch and closes the late handle', async (t) => {
+  const harness = makeHarness(t);
+  const pending = deferredIngress(harness.network, harness.events);
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    network: pending.network,
+  });
+  const startOutcome = lifecycle.start().then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => pending.isOpened());
+  const stopPromise = lifecycle.stop();
+  assert.equal(lifecycle.status().phase, 'stopping');
+
+  pending.gate.resolve(pending.handle);
+  const status = await stopPromise;
+  const startError = await startOutcome;
+
+  assert.ok(startError, 'the superseded start must reject');
+  assert.match(startError.message, /closing|closed|aborted|superseded/);
+  assert.equal(status.phase, 'stopped');
+  assert.equal(status.resources, 0);
+  assert.equal(status.retryRequired, false);
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(lifecycle.healthy(), false);
+  assert.equal(pending.handle.closed, true);
+  assert.equal(harness.network.ingressClosed, false);
+  assert.equal(harness.processes.length, 1);
+  assert.equal(harness.callbacks.length, 1);
+});
+
+test('callback fault during pending ingress never publishes or clears retryRequired', async (t) => {
+  const harness = makeHarness(t);
+  const pending = deferredIngress(harness.network, harness.events);
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    network: pending.network,
+  });
+  const startOutcome = lifecycle.start().then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => pending.isOpened() && harness.callbacks.length === 1);
+  harness.callbacks[0].fail();
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(harness.relay.fenceCount, 1);
+
+  pending.gate.resolve(pending.handle);
+  const startError = await startOutcome;
+  assert.ok(startError, 'the fenced start must reject');
+  await waitFor(() => lifecycle.status().resources === 0);
+
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(lifecycle.healthy(), false);
+  assert.equal(pending.handle.closed, true);
+  assert.equal(harness.network.ingressClosed, false);
+
+  // Only an explicit restart may recover.
+  await lifecycle.restart();
+  assert.equal(lifecycle.status().phase, 'ready');
+  assert.equal(lifecycle.status().retryRequired, false);
+  assert.equal(harness.processes.length, 2);
+  await lifecycle.stop();
+});
+
+test('a duplicate restart joins the in-flight restart and does not overlap launches', async (t) => {
+  const harness = makeHarness(t);
+  const lifecycle = iron.createIronLifecycle(harness.options);
+  await lifecycle.start();
+
+  const first = lifecycle.restart();
+  const second = lifecycle.restart();
+  const [firstStatus, secondStatus] = await Promise.all([first, second]);
+
+  assert.equal(firstStatus.phase, 'ready');
+  assert.equal(secondStatus.phase, 'ready');
+  assert.equal(harness.processes.length, 2);
+  assert.equal(harness.callbacks.length, 2);
+  assert.equal(lifecycle.status().resources, 3);
+  await lifecycle.stop();
+});
+
+test('concurrent restart and stop do not start an overlapping launch', async (t) => {
+  const harness = makeHarness(t);
+  const lifecycle = iron.createIronLifecycle(harness.options);
+  await lifecycle.start();
+
+  const restartOutcome = lifecycle.restart().then(
+    () => null,
+    (error) => error
+  );
+  const status = await lifecycle.stop();
+  const restartError = await restartOutcome;
+
+  assert.ok(restartError, 'restart must refuse once the lifecycle is closing');
+  assert.match(restartError.message, /closing|closed/);
+  assert.equal(status.phase, 'stopped');
+  assert.equal(status.resources, 0);
+  assert.equal(harness.processes.length, 1);
+  assert.equal(harness.callbacks.length, 1);
+  assert.equal(lifecycle.status().retryRequired, false);
+});
+
+test('a failing resource close retains ownership, blocks restart, and succeeds on retry', async (t) => {
+  const harness = makeHarness(t);
+  let closeAttempts = 0;
+  const baseStart = harness.options.helpers.startOwnedProcess;
+  const helpers = {
+    ...harness.options.helpers,
+    async startOwnedProcess(options) {
+      const handle = await baseStart(options);
+      const realClose = handle.close;
+      handle.close = async () => {
+        closeAttempts += 1;
+        if (closeAttempts === 1) throw new Error('injected close failure');
+        return realClose();
+      };
+      return handle;
+    },
+  };
+  const lifecycle = iron.createIronLifecycle({ ...harness.options, helpers });
+  await lifecycle.start();
+  const launchId = lifecycle.status().launchId;
+  const launchDir = path.join(harness.stateDir, 'iron', 'env-test', launchId);
+
+  const status = await lifecycle.stop();
+  assert.equal(status.phase, 'offline');
+  assert.equal(status.reason, 'resource-close-failed');
+  assert.equal(status.retryRequired, true);
+  assert.equal(status.resources, 1);
+  assert.equal(lifecycle.healthy(), false);
+  // The suspect process is still healthy and its identity/directory is kept.
+  assert.equal(harness.processes[0].healthy(), true);
+  assert.ok(fs.existsSync(launchDir));
+  await assert.rejects(lifecycle.restart(), /cleanup_required|closing|closed/);
+
+  // A repeated stop retries the close and only then reports stopped.
+  const retry = await lifecycle.stop();
+  assert.equal(retry.phase, 'stopped');
+  assert.equal(retry.resources, 0);
+  assert.equal(retry.retryRequired, false);
+  assert.equal(harness.processes[0].healthy(), false);
+  assert.equal(fs.existsSync(launchDir), false);
+});
+
+test('a fence failure is recorded and cannot yield a completed stop', async (t) => {
+  const harness = makeHarness(t);
+  let fenceAttempts = 0;
+  harness.relay.fence = () => {
+    fenceAttempts += 1;
+    harness.events.push('fence');
+    if (fenceAttempts <= 2) throw new Error('injected fence failure');
+    for (const stream of harness.relay.streams) stream.closed = true;
+    harness.relay.streams.clear();
+  };
+  const lifecycle = iron.createIronLifecycle(harness.options);
+  await lifecycle.start();
+
+  const status = await lifecycle.stop();
+  assert.equal(status.phase, 'offline');
+  assert.equal(status.reason, 'fence-failed');
+  assert.equal(status.retryRequired, true);
+  assert.equal(status.resources, 0);
+  assert.equal(lifecycle.healthy(), false);
+
+  const retry = await lifecycle.stop();
+  assert.equal(retry.phase, 'stopped');
+  assert.equal(retry.reason, 'environment-stopped');
+  assert.equal(retry.retryRequired, false);
+  assert.ok(fenceAttempts >= 2);
+});
+
+test('a relay close failure is real and retryable', async (t) => {
+  const harness = makeHarness(t);
+  let closeAttempts = 0;
+  harness.relay.close = () => {
+    closeAttempts += 1;
+    harness.events.push('relay-close');
+    if (closeAttempts === 1) throw new Error('injected relay close failure');
+  };
+  const lifecycle = iron.createIronLifecycle(harness.options);
+  await lifecycle.start();
+
+  const status = await lifecycle.stop();
+  assert.equal(status.phase, 'offline');
+  assert.equal(status.reason, 'relay-close-failed');
+  assert.equal(status.retryRequired, true);
+  assert.equal(status.resources, 0);
+  assert.equal(lifecycle.healthy(), false);
+
+  const retry = await lifecycle.stop();
+  assert.equal(retry.phase, 'stopped');
+  assert.equal(retry.retryRequired, false);
+  assert.equal(closeAttempts, 2);
+});
+
+test('current callback health is rechecked before publishing a late ingress', async (t) => {
+  const harness = makeHarness(t);
+  const pending = deferredIngress(harness.network, harness.events);
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    network: pending.network,
+  });
+  const startOutcome = lifecycle.start().then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => pending.isOpened() && harness.callbacks.length === 1);
+  // Simulate a health transition that did not emit onFault.
+  harness.callbacks[0].alive = false;
+  pending.gate.resolve(pending.handle);
+
+  const startError = await startOutcome;
+  assert.ok(startError);
+  assert.match(startError.message, /callback is not healthy/);
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().reason, 'callback_unhealthy');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(lifecycle.healthy(), false);
+  assert.equal(pending.handle.closed, true);
+  assert.equal(harness.network.ingressClosed, false);
+});
+
+test('listener attribution is rechecked after ingress acquisition before ready', async (t) => {
+  const harness = makeHarness(t);
+  const pending = deferredIngress(harness.network, harness.events);
+  let ingressOpened = false;
+  const helpers = {
+    ...harness.options.helpers,
+    async ownsListener() {
+      return !ingressOpened;
+    },
+  };
+  const network = {
+    ...pending.network,
+    async openIngress(options) {
+      ingressOpened = true;
+      return pending.network.openIngress(options);
+    },
+  };
+  const lifecycle = iron.createIronLifecycle({
+    ...harness.options,
+    helpers,
+    network,
+  });
+  const startOutcome = lifecycle.start().then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => pending.isOpened());
+  pending.gate.resolve(pending.handle);
+
+  const startError = await startOutcome;
+  assert.ok(startError);
+  assert.match(startError.message, /does not belong/);
+  assert.equal(lifecycle.status().phase, 'offline');
+  assert.equal(lifecycle.status().reason, 'listener_unowned');
+  assert.equal(lifecycle.status().retryRequired, true);
+  assert.equal(lifecycle.ingress(), null);
+  assert.equal(pending.handle.closed, true);
+});
+
 test('callback config and policy allow only the exact fixed POST', () => {
   const now = Date.now();
   const input = {
@@ -712,6 +1018,9 @@ test('profile staging rejects a missing canonical source', async (t) => {
   );
 });
 
+// A stock request-path smoke through the actual proxy listener requires the
+// pinned linux-amd64 Iron binary and a Linux host, so it is deferred to the
+// Linux evidence gate; this suite only verifies the binary digest locally.
 test('optional official Iron binary digest check', {
   skip: !process.env.IRON_TEST_BINARY,
 }, async () => {

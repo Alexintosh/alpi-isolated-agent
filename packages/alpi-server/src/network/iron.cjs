@@ -92,6 +92,97 @@ function fail(code, message) {
   throw new IronError(code, message);
 }
 
+// Status reasons are fixed codes. Adapter-provided error strings are never
+// copied into public status, even under the trusted-adapter assumption.
+const SAFE_REASONS = new Set([
+  'not-started',
+  'initial-start',
+  'explicit-restart',
+  'environment-stopped',
+  'grant-expired',
+  'callback-fault',
+  'iron-fault',
+  'launch-failed',
+  'resource-close-failed',
+  'directory-removal-failed',
+  'relay-close-failed',
+  'fence-failed',
+  'cleanup-failed',
+  'cleanup-required',
+  'restart_required',
+  'closed',
+  'not_started',
+  'already_started',
+  'already_restarting',
+  'invalid_environment',
+  'invalid_model',
+  'invalid_port',
+  'invalid_connector',
+  'invalid_grant',
+  'invalid_digest',
+  'invalid_relay',
+  'callback_profile_required',
+  'invalid_grant_window',
+  'invalid_callback_address',
+  'helpers_missing',
+  'iron_missing',
+  'iron_invalid',
+  'iron_digest_mismatch',
+  'unsafe_directory',
+  'ca_invalid',
+  'callback_exited',
+  'callback_error',
+  'callback_timeout',
+  'aborted',
+  'callback_invalid',
+  'callback_profile_missing',
+  'canonical_missing',
+  'canonical_invalid',
+  'profile_invalid',
+  'profile_incomplete',
+  'profile_version_mismatch',
+  'npm_install_failed',
+  'port_busy',
+  'readiness_timeout',
+  'callback_unhealthy',
+  'iron_unhealthy',
+  'ingress_invalid',
+  'listener_unowned',
+]);
+
+function safeReason(value, fallback = 'launch-failed') {
+  return typeof value === 'string' && SAFE_REASONS.has(value)
+    ? value
+    : fallback;
+}
+
+// Caller cancellation and per-launch invalidation are both honoured. The
+// per-launch controller lets stop/fault/restart abort an acquisition
+// synchronously without depending on the caller's signal.
+function mergeAbortSignals(signals) {
+  const present = signals.filter(
+    (signal) => signal && typeof signal === 'object'
+  );
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  if (
+    typeof AbortSignal !== 'undefined' &&
+    typeof AbortSignal.any === 'function'
+  ) {
+    return AbortSignal.any(present);
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of present) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+  }
+  return controller.signal;
+}
+
 function assertAbsolutePath(value, label) {
   if (
     typeof value !== 'string' ||
@@ -896,13 +987,21 @@ class IronLifecycle {
     this.startedAt = null;
     this.retryRequired = false;
     this.fenceCount = 0;
+    // Live handles are only removed after a close contract confirms release.
+    // A failed close leaves the handle (and its pid/directory evidence) owned.
     this.resources = new Set();
     this.callback = null;
     this.iron = null;
     this.ingressHandle = null;
     this.closing = false;
     this.closePromise = null;
-    this.teardownPromise = null;
+    this.cleanupFailure = null;
+    this.fenceFailure = null;
+    this.stopFenceConfirmed = false;
+    this.relayClosed = false;
+    this.activeLaunch = null;
+    this.operationTail = Promise.resolve();
+    this.restartPromise = null;
   }
 
   status() {
@@ -930,6 +1029,8 @@ class IronLifecycle {
   healthy() {
     return (
       !this.closing &&
+      !this.cleanupFailure &&
+      !this.fenceFailure &&
       this.phase === 'ready' &&
       this.iron?.healthy() === true &&
       this.callback?.healthy() === true &&
@@ -939,35 +1040,83 @@ class IronLifecycle {
 
   async start() {
     if (this.closing) fail('closed', 'The Iron lifecycle is closing.');
+    if (this.cleanupFailure || this.fenceFailure) {
+      fail(
+        'cleanup_required',
+        'Cleanup or fencing is unconfirmed; stop must succeed before a launch.'
+      );
+    }
     if (this.retryRequired) {
       fail('restart_required', 'A fault requires an explicit restart.');
     }
     if (this.phase !== 'idle') {
       fail('already_started', 'Use restart() for an explicit new launch.');
     }
-    await this.#launch('initial-start');
-    return this.status();
+    return this.#serialize(async () => {
+      if (this.closing) fail('closed', 'The Iron lifecycle is closing.');
+      if (this.cleanupFailure || this.fenceFailure) {
+        fail('cleanup_required', 'Cleanup or fencing is unconfirmed.');
+      }
+      if (this.retryRequired) {
+        fail('restart_required', 'A fault requires an explicit restart.');
+      }
+      if (this.phase !== 'idle') {
+        fail('already_started', 'Use restart() for an explicit new launch.');
+      }
+      const launch = this.#beginLaunch('initial-start');
+      await launch.promise;
+      return this.status();
+    });
   }
 
   async restart() {
     if (this.closing) fail('closed', 'The Iron lifecycle is closing.');
+    if (this.cleanupFailure || this.fenceFailure) {
+      fail(
+        'cleanup_required',
+        'Cleanup or fencing is unconfirmed; stop must succeed before a restart.'
+      );
+    }
     if (this.phase === 'idle') {
       fail('not_started', 'The Iron lifecycle has not started.');
     }
-    this.retryRequired = false;
+    // A duplicate restart joins the one already in flight instead of stacking
+    // overlapping teardown/launch pairs.
+    if (this.restartPromise) return this.restartPromise;
+
     this.phase = 'restarting';
     this.reason = 'explicit-restart';
     this.updatedAt = new Date().toISOString();
-    this.fenceCount += 1;
-    try {
-      this.options.relay.fence();
-    } catch {}
-    await this.#teardown();
-    this.phase = 'starting';
-    this.reason = 'explicit-restart';
-    this.updatedAt = new Date().toISOString();
-    await this.#launch('explicit-restart');
-    return this.status();
+    this.stopFenceConfirmed = false;
+    // Fence and invalidate synchronously so an in-flight launch cannot publish
+    // after the restart decision.
+    this.#fenceSync('explicit-restart');
+    this.#invalidateActiveLaunch();
+
+    const promise = this.#serialize(async () => {
+      await this.#joinActiveLaunch();
+      const cleaned = await this.#cleanupAll('explicit-restart');
+      if (this.closing) fail('closed', 'The Iron lifecycle is closing.');
+      if (!cleaned || this.cleanupFailure || this.fenceFailure) {
+        this.phase = 'offline';
+        this.reason = this.cleanupFailure?.code ?? 'fence-failed';
+        this.retryRequired = true;
+        this.updatedAt = new Date().toISOString();
+        fail(
+          'cleanup_required',
+          'Cleanup or fencing is unconfirmed; the restart is refused.'
+        );
+      }
+      const launch = this.#beginLaunch('explicit-restart');
+      await launch.promise;
+      return this.status();
+    });
+    this.restartPromise = promise;
+    const clear = () => {
+      if (this.restartPromise === promise) this.restartPromise = null;
+    };
+    promise.then(clear, clear);
+    return promise;
   }
 
   async stop() {
@@ -976,102 +1125,283 @@ class IronLifecycle {
     this.phase = 'stopping';
     this.reason = 'environment-stopped';
     this.updatedAt = new Date().toISOString();
-    this.fenceCount += 1;
-    try {
-      this.options.relay.fence();
-    } catch {}
-    this.closePromise = (async () => {
-      await this.#teardown();
-      try {
-        await this.options.relay.close?.();
-      } catch {}
-      this.phase = 'stopped';
-      this.reason = 'environment-stopped';
-      this.retryRequired = false;
-      this.updatedAt = new Date().toISOString();
-    })();
-    return this.closePromise;
-  }
-
-  #fault(reason, detail, epoch) {
-    if (
-      this.closing ||
-      epoch !== this.launchEpoch ||
-      this.phase === 'offline' ||
-      this.phase === 'stopping' ||
-      this.phase === 'stopped'
-    ) {
-      return;
+    // Synchronous fence before any await. A failed fence is retained as an
+    // unconfirmed state and cannot yield a completed stop.
+    if (!this.stopFenceConfirmed) {
+      this.stopFenceConfirmed = this.#fenceSync('environment-stopped');
     }
-    this.retryRequired = true;
-    this.phase = 'offline';
-    this.reason = reason;
-    this.updatedAt = new Date().toISOString();
-    this.fenceCount += 1;
-    // Synchronous fence before any await: established streams must not survive
-    // either an Iron exit or a callback fault/expiry.
-    try {
-      this.options.relay.fence();
-    } catch {}
-    const ingress = this.ingressHandle;
-    this.ingressHandle = null;
-    if (ingress) {
-      try {
-        Promise.resolve(ingress.close()).catch(() => {});
-      } catch {}
-    }
-    this.#teardown().catch(() => {});
+    // Invalidate and abort an in-flight launch synchronously, then join it.
+    this.#invalidateActiveLaunch();
+
+    const promise = this.#serialize(() => this.#stopTask());
+    this.closePromise = promise;
+    const clear = () => {
+      // Only a confirmed stop stays cached. Any other outcome remains
+      // retryable through another stop()/explicit cleanup.
+      if (this.closePromise === promise) this.closePromise = null;
+    };
+    promise.then((status) => {
+      if (status?.phase !== 'stopped') clear();
+    }, clear);
+    return promise;
   }
 
-  #teardown() {
-    if (this.teardownPromise) return this.teardownPromise;
-    this.teardownPromise = (async () => {
-      const handles = [...this.resources].reverse();
-      this.resources.clear();
-      for (const handle of handles) {
-        try {
-          await handle.close?.();
-        } catch {}
-      }
-      this.callback = null;
-      this.iron = null;
-      this.ingressHandle = null;
-      this.pid = null;
-      if (this.dir) {
-        const directory = this.dir;
-        this.dir = null;
-        await fsp.rm(directory, { recursive: true, force: true }).catch(() => {});
-      }
-    })().finally(() => {
-      this.teardownPromise = null;
-    });
-    return this.teardownPromise;
-  }
-
-  async #launch(reason) {
-    const epoch = ++this.launchEpoch;
-    const launchId = crypto.randomUUID();
-    this.launchId = launchId;
-    this.dir = path.join(
-      this.options.stateDir,
-      'iron',
-      this.options.environmentId,
-      launchId
+  #serialize(operation) {
+    const run = this.operationTail.then(() => operation());
+    this.operationTail = run.then(
+      () => undefined,
+      () => undefined
     );
+    return run;
+  }
+
+  #beginLaunch(reason) {
+    const generation = ++this.launchEpoch;
+    const controller = new AbortController();
+    const launchId = crypto.randomUUID();
+    const launch = {
+      generation,
+      controller,
+      signal: mergeAbortSignals([this.options.signal, controller.signal]),
+      reason,
+      launchId,
+      directory: path.join(
+        this.options.stateDir,
+        'iron',
+        this.options.environmentId,
+        launchId
+      ),
+      settled: false,
+      promise: null,
+      settledPromise: null,
+    };
+    this.activeLaunch = launch;
+    this.launchId = launchId;
+    this.dir = launch.directory;
+    this.grantExpiresAt = null;
+    this.startedAt = null;
     this.phase = 'starting';
     this.reason = reason;
     this.updatedAt = new Date().toISOString();
-    const helpers = loadHelpers(this.options);
-    const signal = this.options.signal;
+    launch.promise = this.#launchBody(launch);
+    launch.settledPromise = launch.promise.then(
+      () => undefined,
+      () => undefined
+    );
+    return launch;
+  }
+
+  #invalidateActiveLaunch() {
+    const launch = this.activeLaunch;
+    if (launch && !launch.settled) launch.controller.abort();
+    // Advance the generation so every stale continuation, late acquisition
+    // and late fault sees an invalid epoch.
+    this.launchEpoch += 1;
+  }
+
+  #assertLaunchValid(launch) {
+    if (this.closing) fail('closed', 'The Iron lifecycle is closing.');
+    if (this.cleanupFailure) {
+      fail('cleanup_required', 'Cleanup or fencing is unconfirmed.');
+    }
+    if (launch.generation !== this.launchEpoch) {
+      fail('aborted', 'The Iron launch was superseded.');
+    }
+    launch.signal?.throwIfAborted();
+  }
+
+  #fenceSync(reason) {
+    this.fenceCount += 1;
+    try {
+      this.options.relay.fence();
+      this.fenceFailure = null;
+      return true;
+    } catch {
+      this.fenceFailure = 'fence-failed';
+      this.reason = safeReason(reason, this.reason);
+      return false;
+    }
+  }
+
+  #fault(reason, detail, generation) {
+    if (this.closing) return;
+    if (generation !== this.launchEpoch) return;
+    if (
+      this.phase === 'offline' ||
+      this.phase === 'stopping' ||
+      this.phase === 'stopped' ||
+      this.phase === 'restarting'
+    ) {
+      return;
+    }
+    const launch = this.activeLaunch;
+    const launchActive =
+      launch && !launch.settled && launch.generation === generation;
+    // Invalidate synchronously. The launch body observes the aborted signal
+    // and closes whatever it acquired; it must never publish afterwards.
+    this.launchEpoch += 1;
+    if (launchActive) launch.controller.abort();
+    this.retryRequired = true;
+    this.phase = 'offline';
+    this.reason = safeReason(reason, 'iron-fault');
+    this.updatedAt = new Date().toISOString();
+    // Synchronous fence before any await: established streams must not survive
+    // either an Iron exit or a callback fault/expiry.
+    this.#fenceSync(reason);
+    if (!launchActive) {
+      // The launch already settled, so no catch block will clean up its
+      // handles. Schedule serialized cleanup behind any current operation.
+      this.#scheduleCleanup(this.reason);
+    }
+  }
+
+  #scheduleCleanup(reason) {
+    this.#serialize(async () => {
+      await this.#cleanupAll(reason);
+    }).catch(() => {});
+  }
+
+  async #joinActiveLaunch() {
+    const launch = this.activeLaunch;
+    if (!launch) return;
+    await launch.settledPromise;
+  }
+
+  async #stopTask() {
+    await this.#joinActiveLaunch();
+    const cleaned = await this.#cleanupAll('environment-stopped');
+    if (!this.stopFenceConfirmed) {
+      this.stopFenceConfirmed = this.#fenceSync('environment-stopped');
+    }
+    let relayFailure = null;
+    if (!this.relayClosed) {
+      relayFailure = await this.#closeRelay();
+    }
+    const fenceOk = this.stopFenceConfirmed === true && !this.fenceFailure;
+    let failureCode = null;
+    if (!cleaned) {
+      failureCode = this.cleanupFailure?.code ?? 'cleanup-failed';
+    } else if (!fenceOk) {
+      failureCode = 'fence-failed';
+    } else if (relayFailure) {
+      this.cleanupFailure = { code: 'relay-close-failed' };
+      failureCode = 'relay-close-failed';
+    }
+    if (failureCode) {
+      // Never claim stopped while a resource, fence or relay is unconfirmed.
+      this.phase = 'offline';
+      this.reason = failureCode;
+      this.retryRequired = true;
+    } else {
+      this.phase = 'stopped';
+      this.reason = 'environment-stopped';
+      this.retryRequired = false;
+      this.cleanupFailure = null;
+    }
+    this.updatedAt = new Date().toISOString();
+    return this.status();
+  }
+
+  async #closeRelay() {
+    const close = this.options.relay.close;
+    if (typeof close !== 'function') {
+      this.relayClosed = true;
+      return null;
+    }
+    try {
+      await close.call(this.options.relay);
+      this.relayClosed = true;
+      return null;
+    } catch {
+      this.relayClosed = false;
+      return new Error('relay-close-failed');
+    }
+  }
+
+  async #closeResources() {
+    let failure = null;
+    for (const handle of [...this.resources].reverse()) {
+      if (!this.resources.has(handle)) continue;
+      if (typeof handle?.close !== 'function') {
+        // A handle without a close contract holds nothing further.
+        this.resources.delete(handle);
+        continue;
+      }
+      try {
+        await handle.close();
+        // Only remove ownership after the close contract resolves.
+        this.resources.delete(handle);
+      } catch {
+        // Retain the suspect handle for a later cleanup retry.
+        failure = failure ?? new Error('resource-close-failed');
+      }
+    }
+    this.#pruneReferences();
+    return failure;
+  }
+
+  #pruneReferences() {
+    if (this.callback && !this.resources.has(this.callback)) {
+      this.callback = null;
+    }
+    if (this.iron && !this.resources.has(this.iron)) {
+      this.iron = null;
+      this.pid = null;
+    }
+    if (this.ingressHandle && !this.resources.has(this.ingressHandle)) {
+      this.ingressHandle = null;
+    }
+  }
+
+  async #removeDirectory() {
+    if (this.resources.size > 0) return null;
+    if (!this.dir) return null;
     const directory = this.dir;
     try {
+      await fsp.rm(directory, { recursive: true, force: true });
+      this.dir = null;
+      return null;
+    } catch {
+      return new Error('directory-removal-failed');
+    }
+  }
+
+  async #cleanupAll(reason) {
+    const handleFailure = await this.#closeResources();
+    const directoryFailure = await this.#removeDirectory();
+    if (handleFailure || directoryFailure) {
+      this.cleanupFailure = {
+        code: handleFailure
+          ? 'resource-close-failed'
+          : 'directory-removal-failed',
+      };
+      this.phase = 'offline';
+      this.reason = this.cleanupFailure.code;
+      this.retryRequired = true;
+      this.updatedAt = new Date().toISOString();
+      return false;
+    }
+    this.cleanupFailure = null;
+    return true;
+  }
+
+  #track(handle) {
+    this.resources.add(handle);
+  }
+
+  async #launchBody(launch) {
+    const helpers = loadHelpers(this.options);
+    const signal = launch.signal;
+    const directory = launch.directory;
+    try {
       signal?.throwIfAborted();
+      this.#assertLaunchValid(launch);
       helpers.privateDirectory(directory);
       await verifyIronBinary(
         this.options.ironBinary,
         this.options.ironSha256
       );
-      signal?.throwIfAborted();
+      this.#assertLaunchValid(launch);
 
       let proxyPort;
       if (this.options.network?.prepare) {
@@ -1081,13 +1411,15 @@ class IronLifecycle {
           connector: this.options.connector,
           signal,
         });
+        this.#assertLaunchValid(launch);
         proxyPort = prepared?.proxyPort;
         assertPort(proxyPort, 'Proxy port');
       } else {
         proxyPort = await helpers.findFreePort();
+        this.#assertLaunchValid(launch);
       }
       await helpers.assertPortFree(proxyPort);
-      signal?.throwIfAborted();
+      this.#assertLaunchValid(launch);
 
       const ca = await helpers.ensureCA(path.join(directory, 'ca'), { signal });
       if (
@@ -1097,7 +1429,7 @@ class IronLifecycle {
       ) {
         fail('ca_invalid', 'The host certificate authority is invalid.');
       }
-      signal?.throwIfAborted();
+      this.#assertLaunchValid(launch);
 
       if (this.options.network?.configureRoute) {
         await this.options.network.configureRoute({
@@ -1108,8 +1440,8 @@ class IronLifecycle {
           directory,
           signal,
         });
+        this.#assertLaunchValid(launch);
       }
-      signal?.throwIfAborted();
 
       const now = this.options.now();
       const grant = validateGrant({
@@ -1122,6 +1454,7 @@ class IronLifecycle {
         expiresAt: now + this.options.grantMs,
         model: this.options.model,
       });
+      this.#assertLaunchValid(launch);
       this.grantExpiresAt = grant.expiresAt;
 
       const callback = await startCallback(
@@ -1135,16 +1468,14 @@ class IronLifecycle {
               ? 'grant-expired'
               : 'callback-fault',
             callbackReason,
-            epoch
+            launch.generation
           )
       );
-      if (epoch !== this.launchEpoch) {
-        await callback.close?.();
-        fail('aborted', 'The Iron launch was superseded.');
-      }
+      // Register the handle under its creating generation before any further
+      // await. If the launch is already invalid, cleanup still owns it.
+      this.#track(callback);
+      this.#assertLaunchValid(launch);
       this.callback = callback;
-      this.resources.add(callback);
-      signal?.throwIfAborted();
       if (callback.healthy() !== true) {
         fail('callback_unhealthy', 'The callback is not healthy.');
       }
@@ -1162,7 +1493,7 @@ class IronLifecycle {
           'The callback'
         );
       }
-      signal?.throwIfAborted();
+      this.#assertLaunchValid(launch);
 
       const ironConfig = buildIronConfig({
         proxyPort,
@@ -1180,27 +1511,28 @@ class IronLifecycle {
         signal,
         onExit: () => {
           if (
-            epoch === this.launchEpoch &&
+            launch.generation === this.launchEpoch &&
             !this.closing &&
             this.phase !== 'restarting' &&
             this.phase !== 'stopping' &&
             this.phase !== 'stopped'
           ) {
-            this.#fault('iron-fault', 'process-exited', epoch);
+            this.#fault('iron-fault', 'process-exited', launch.generation);
           }
         },
       });
-      if (epoch !== this.launchEpoch) {
-        await iron.close?.();
-        fail('aborted', 'The Iron launch was superseded.');
-      }
+      this.#track(iron);
+      this.#assertLaunchValid(launch);
       this.iron = iron;
       this.pid = iron.pid ?? null;
-      this.resources.add(iron);
-      signal?.throwIfAborted();
       await waitUntil(
         async () => {
-          if (iron.healthy() !== true || !await helpers.ownsListener(iron.pid, proxyPort)) return false;
+          if (
+            iron.healthy() !== true ||
+            !(await helpers.ownsListener(iron.pid, proxyPort))
+          ) {
+            return false;
+          }
           return helpers
             .probe('127.0.0.1', proxyPort, 200)
             .then(() => true, () => false);
@@ -1209,7 +1541,7 @@ class IronLifecycle {
         signal,
         'Iron'
       );
-      signal?.throwIfAborted();
+      this.#assertLaunchValid(launch);
 
       let ingress;
       if (this.options.network?.openIngress) {
@@ -1230,29 +1562,51 @@ class IronLifecycle {
       if (!ingress || typeof ingress.close !== 'function') {
         fail('ingress_invalid', 'The private Iron ingress bridge is invalid.');
       }
+      // Retain the returned handle as a cleanup obligation even when the
+      // launch was invalidated while openIngress() was pending.
+      this.#track(ingress);
+      this.#assertLaunchValid(launch);
+      // Recheck current health and kernel listener attribution immediately
+      // before publishing. A late handle is closed by the catch path.
+      if (callback.healthy() !== true) {
+        fail('callback_unhealthy', 'The callback is not healthy.');
+      }
+      if (iron.healthy() !== true) {
+        fail('iron_unhealthy', 'The Iron process is not healthy.');
+      }
+      const owned = await helpers.ownsListener(iron.pid, proxyPort);
+      this.#assertLaunchValid(launch);
+      if (!owned) {
+        fail(
+          'listener_unowned',
+          'The proxy listener does not belong to the owned Iron process.'
+        );
+      }
+      signal?.throwIfAborted();
+
       this.ingressHandle = ingress;
-      this.resources.add(ingress);
       this.phase = 'ready';
-      this.reason = reason;
+      this.reason = launch.reason;
       this.startedAt = new Date().toISOString();
       this.retryRequired = false;
       this.updatedAt = this.startedAt;
     } catch (error) {
-      if (epoch === this.launchEpoch) {
+      const current =
+        launch.generation === this.launchEpoch && !this.closing;
+      if (current) {
         this.retryRequired = true;
         this.phase = 'offline';
-        this.reason =
-          error && typeof error.code === 'string'
-            ? error.code
-            : 'launch-failed';
+        this.reason = safeReason(error?.code, 'launch-failed');
         this.updatedAt = new Date().toISOString();
-        this.fenceCount += 1;
-        try {
-          this.options.relay.fence();
-        } catch {}
-        await this.#teardown();
+        this.#fenceSync(this.reason);
       }
+      // Close every handle acquired by this launch, including a late ingress.
+      // Failures leave ownership retained and visible.
+      await this.#cleanupAll(launch.reason);
       throw error;
+    } finally {
+      launch.settled = true;
+      if (this.activeLaunch === launch) this.activeLaunch = null;
     }
   }
 }
