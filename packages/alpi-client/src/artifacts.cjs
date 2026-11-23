@@ -301,6 +301,24 @@ function validatePublished(value, expected) {
   return receipt;
 }
 
+function validateJobOutputReceipt(value, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    clientFail('protocol_error', 'Invalid job output receipt.');
+  }
+  const artifactId = normalizeUuid(value.artifactId);
+  if (
+    normalizeUuid(value.jobId) !== expected.jobId ||
+    value.label !== expected.label ||
+    value.totalLength !== expected.totalLength ||
+    value.sha256 !== expected.sha256 ||
+    !Number.isSafeInteger(value.recordedAt) ||
+    value.recordedAt < 0
+  ) {
+    clientFail('protocol_error', 'Job output receipt does not match the registration.');
+  }
+  return { ...value, artifactId, jobId: expected.jobId };
+}
+
 function resolveExecutable(value, label) {
   if (typeof value !== 'string' || value.length === 0) {
     clientFail('invalid_input', `Invalid ${label} path.`);
@@ -837,6 +855,141 @@ class ArtifactsClient {
     }
   }
 
+  // Register a completed job patch through the packaged API. The server
+  // stores the bytes in the durable artifact store under its own artifact id
+  // and records the digest on the job; the returned receipt is what a
+  // consumer later verifies against the fetched bytes.
+  async uploadJobPatch({ jobId, label, data, requestId } = {}) {
+    for (const method of ['registerJobOutput', 'getJobArtifacts']) {
+      if (typeof this._api[method] !== 'function') {
+        clientFail('invalid_input', `Job output API is missing ${method}.`);
+      }
+    }
+    const job = normalizeUuid(jobId);
+    const name = typeof label === 'string' &&
+      label.trim().length > 0 &&
+      label.length <= 128 &&
+      !hasControlCharacters(label)
+      ? label
+      : clientFail('invalid_input', 'A label of 1-128 characters is required.');
+    if (!Buffer.isBuffer(data) || data.length === 0 || data.length > MAX_CHUNK_BYTES) {
+      clientFail('invalid_input', 'A patch payload of 1-32768 bytes is required.');
+    }
+    const id = requestId === undefined ? crypto.randomUUID() : normalizeUuid(requestId);
+    const expected = {
+      jobId: job,
+      label: name,
+      totalLength: data.length,
+      sha256: digestOf(data),
+    };
+    const receipt = await this._api.registerJobOutput({
+      jobId: job,
+      requestId: id,
+      label: name,
+      totalLength: expected.totalLength,
+      sha256: expected.sha256,
+      data: data.toString('base64'),
+    });
+    return validateJobOutputReceipt(receipt, expected);
+  }
+
+  // List the output artifact receipts recorded on a job.
+  async listJobOutputs({ jobId } = {}) {
+    if (typeof this._api.getJobArtifacts !== 'function') {
+      clientFail('invalid_input', 'Job output API is missing getJobArtifacts.');
+    }
+    const result = await this._api.getJobArtifacts({ jobId: normalizeUuid(jobId) });
+    if (!result || typeof result !== 'object' || Array.isArray(result) ||
+        !Array.isArray(result.artifacts) || result.count !== result.artifacts.length) {
+      clientFail('protocol_error', 'Invalid job output list.');
+    }
+    return result.artifacts.map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        clientFail('protocol_error', 'Invalid job output receipt.');
+      }
+      return {
+        jobId: normalizeUuid(entry.jobId),
+        artifactId: normalizeUuid(entry.artifactId),
+        label: typeof entry.label === 'string' &&
+          entry.label.length > 0 &&
+          entry.label.length <= 128 &&
+          !hasControlCharacters(entry.label)
+          ? entry.label
+          : clientFail('protocol_error', 'Invalid job output label.'),
+        totalLength: entry.totalLength,
+        sha256: normalizeDigest(entry.sha256),
+        recordedAt: entry.recordedAt,
+      };
+    });
+  }
+
+  // Fetch a stored job patch through the packaged artifact routes and verify
+  // it byte for byte against the recorded receipt: every chunk digest and the
+  // whole-stream sha256 must match before the bytes are returned.
+  async readPatchBytes({ jobId, artifactId, totalLength, sha256 } = {}) {
+    const job = normalizeUuid(jobId);
+    const id = normalizeUuid(artifactId);
+    const expectedDigest = normalizeDigest(sha256);
+    if (
+      !Number.isSafeInteger(totalLength) ||
+      totalLength < 1 ||
+      totalLength > MAX_CHUNK_BYTES
+    ) {
+      clientFail('invalid_input', 'Invalid patch length.');
+    }
+    const metadata = await this._api.getArtifact({ artifactId: id });
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      clientFail('protocol_error', 'Invalid artifact metadata.');
+    }
+    if (metadata.state !== 'published' || metadata.totalLength !== totalLength ||
+        normalizeDigest(metadata.sha256) !== expectedDigest) {
+      clientFail('digest_mismatch', 'Artifact metadata does not match the receipt.');
+    }
+    const parts = [];
+    let cursor = 0;
+    while (cursor < totalLength) {
+      const chunk = await this._api.readChunk({ artifactId: id, offset: cursor });
+      if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) {
+        clientFail('protocol_error', 'Invalid artifact chunk.');
+      }
+      if (
+        chunk.artifactId !== undefined &&
+        normalizeUuid(chunk.artifactId) !== id
+      ) {
+        clientFail('protocol_error', 'Artifact chunk identity mismatch.');
+      }
+      if (
+        chunk.offset !== cursor ||
+        !Number.isSafeInteger(chunk.length) ||
+        chunk.length < 1 ||
+        chunk.length > this._chunkBytes ||
+        cursor + chunk.length > totalLength
+      ) {
+        clientFail('protocol_error', 'Artifact chunk offset or size mismatch.');
+      }
+      const bytes = decodeBase64(chunk.data, this._chunkBytes);
+      if (
+        bytes.length !== chunk.length ||
+        normalizeDigest(chunk.sha256) !== digestOf(bytes)
+      ) {
+        clientFail('digest_mismatch', 'Artifact chunk digest does not match.');
+      }
+      parts.push(bytes);
+      cursor += bytes.length;
+    }
+    const data = Buffer.concat(parts, cursor);
+    if (cursor !== totalLength || digestOf(data) !== expectedDigest) {
+      clientFail('digest_mismatch', 'Artifact digest does not match the receipt.');
+    }
+    return {
+      jobId: job,
+      artifactId: id,
+      totalLength,
+      sha256: expectedDigest,
+      data,
+    };
+  }
+
   // Upload a staged stream under an idempotent request UUID. Reusing the same
   // requestId and metadata after a lost reply resumes at receivedBytes or
   // returns the already published receipt.
@@ -1253,6 +1406,22 @@ function createHttpApi({
         'POST',
         `/v1/artifacts/${normalizeUuid(input.artifactId)}/acknowledge`,
         {}
+      );
+    },
+    registerJobOutput(input) {
+      return call('POST', `/v1/jobs/${normalizeUuid(input.jobId)}/outputs`, {
+        requestId: normalizeUuid(input.requestId),
+        totalLength: input.totalLength,
+        sha256: input.sha256,
+        label: input.label,
+        data: input.data,
+      });
+    },
+    getJobArtifacts(input) {
+      return call(
+        'GET',
+        `/v1/jobs/${normalizeUuid(input.jobId)}/outputs`,
+        undefined
       );
     },
   };

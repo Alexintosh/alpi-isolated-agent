@@ -44,6 +44,7 @@ const MAX_NATIVE_ID_LENGTH = 256;
 const MAX_HOLDER_LENGTH = 128;
 const MAX_EVENT_TYPE_LENGTH = 64;
 const MAX_CURSOR_LENGTH = 512;
+const MAX_JOB_ARTIFACT_LABEL_LENGTH = 128;
 const MAX_EXPORT_DIGEST_LENGTH = 256;
 const MAX_REASON_LENGTH = 256;
 const MAX_JSON_BYTES = 64 * 1024;
@@ -86,6 +87,10 @@ const JOB_TRANSITIONS = Object.freeze({
   failed: new Set(),
   cancelled: new Set(),
 });
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 const BUSY_TIMEOUT_MS = 5000;
 
@@ -406,6 +411,17 @@ function jobReceipt(row) {
   };
 }
 
+function jobArtifactReceipt(row) {
+  return {
+    jobId: row.job_id,
+    artifactId: row.artifact_id,
+    label: row.label,
+    totalLength: row.total_length,
+    sha256: row.sha256,
+    recordedAt: row.recorded_at,
+  };
+}
+
 function eventReceipt(row) {
   return {
     seq: row.seq,
@@ -580,6 +596,20 @@ function initializeSchema(db) {
     db.exec(`
       CREATE INDEX IF NOT EXISTS jobs_by_project
         ON jobs (project, created_at, job_id);
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS job_artifacts (
+        job_id TEXT NOT NULL,
+        artifact_id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        total_length INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        recorded_at INTEGER NOT NULL
+      );
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS job_artifacts_by_job
+        ON job_artifacts (job_id);
     `);
     db.exec(`
       CREATE TABLE IF NOT EXISTS idempotency (
@@ -2258,6 +2288,31 @@ class WorkStore {
   }
 
   /**
+   * Read the job output artifact references, project-scoped.
+   *
+   * The rows are written only by `recordJobArtifact` inside the same
+   * transaction that commits the job row update, so a returned reference is
+   * always consistent with the visible job disposition. This is the receipt
+   * source for consumers: it identifies the artifact that a client fetches
+   * through the packaged artifact routes.
+   */
+  getJobArtifacts(principalInput, jobId) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    const id = normalizeText(jobId, MAX_REQUEST_ID_LENGTH);
+    try {
+      const job = this._job(principal.project, id);
+      if (!job) notFound();
+      return this.db
+        .prepare('SELECT * FROM job_artifacts WHERE job_id = ?')
+        .all(jobId)
+        .map(jobArtifactReceipt);
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
    * List jobs in the principal's project, oldest first.
    */
   listJobs(principalInput) {
@@ -2331,6 +2386,84 @@ class WorkStore {
           )
           .run(disposition, detailJson, nowMs, jobId, principal.project);
         return jobReceipt(this._job(principal.project, jobId));
+      });
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+
+  /**
+   * Record a completed output artifact reference for a job.
+   *
+   * input: {jobId, artifactId, label, totalLength, sha256}
+   *
+   * The caller owns the artifact bytes in the durable artifact store; this
+   * row is the job-scoped receipt that published artifact routes can resolve.
+   * Recording is idempotent on (jobId, artifactId): an exact replay returns
+   * the persisted row, and a changed digest, length or label for the same
+   * artifact is a conflict rather than a silent overwrite. The recorded
+   * totalLength/sha256 are the digest metadata consumers verify against the
+   * artifact bytes; the artifact store remains the authority for the bytes.
+   */
+  recordJobArtifact(principalInput, input) {
+    this._ensureOpen();
+    const principal = normalizePrincipal(principalInput);
+    requireWriter(principal);
+    const body = normalizeInputObject(input);
+    const jobId = normalizeText(body.jobId, MAX_REQUEST_ID_LENGTH);
+    const artifactId = body.artifactId;
+    if (typeof artifactId !== 'string' || !UUID_PATTERN.test(artifactId)) {
+      invalidInput();
+    }
+    const label = normalizeText(
+      body.label,
+      MAX_JOB_ARTIFACT_LABEL_LENGTH
+    );
+    const totalLength = body.totalLength;
+    if (!Number.isSafeInteger(totalLength) || totalLength < 0) {
+      invalidInput();
+    }
+    const sha256 = body.sha256;
+    if (typeof sha256 !== 'string' || !SHA256_PATTERN.test(sha256)) {
+      invalidInput();
+    }
+
+    try {
+      return transact(this.db, () => {
+        const job = this._job(principal.project, jobId);
+        if (!job) {
+          notFound();
+        }
+        const normalizedId = artifactId.toLowerCase();
+        const existing = this.db
+          .prepare('SELECT * FROM job_artifacts WHERE artifact_id = ?')
+          .get(normalizedId);
+        if (existing) {
+          if (existing.job_id !== jobId) {
+            fail('conflict', 'Job artifact reference conflicts with its record.');
+          }
+          if (
+            existing.label !== label ||
+            existing.total_length !== totalLength ||
+            existing.sha256 !== sha256
+          ) {
+            fail('conflict', 'Job artifact reference conflicts with its record.');
+          }
+          return jobArtifactReceipt(existing);
+        }
+        const nowMs = this._now();
+        this.db
+          .prepare(
+            `INSERT INTO job_artifacts
+              (job_id, artifact_id, label, total_length, sha256, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          )
+          .run(jobId, normalizedId, label, totalLength, sha256, nowMs);
+        return jobArtifactReceipt(
+          this.db
+            .prepare('SELECT * FROM job_artifacts WHERE artifact_id = ?')
+            .get(normalizedId)
+        );
       });
     } catch (error) {
       throw translateError(error);

@@ -2,7 +2,7 @@
 
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { createSandboxService, SandboxServiceError } = require('./sandbox-service.cjs');
-const { openArtifactStore } = require('./artifact-store.cjs');
+const { openArtifactStore, MAX_CHUNK_BYTES } = require('./artifact-store.cjs');
 const { openWorkStore } = require('./work-store.cjs');
 const { createJobService } = require('./job-service.cjs');
 const { createEngineRegistry } = require('./engines/registry.cjs');
@@ -113,6 +113,13 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
     beginUpload: ['requestId', 'totalLength', 'sha256'], appendChunk: ['offset', 'data'],
     finishUpload: [], getArtifact: [], readChunk: [], acknowledge: [],
   };
+  // Job output registration accepts the complete artifact in one bounded
+  // body: it is delegated to the durable artifact store (begin, one chunk,
+  // finish) instead of any parallel storage mechanism. The single-chunk
+  // bound keeps the attachment atomic for patches; larger outputs go through
+  // the generic artifact routes.
+  const jobOutputFields = ['requestId', 'totalLength', 'sha256', 'label', 'data'];
+  const jobOutputBase64 = /^[A-Za-z0-9+/]+={0,2}$/;
   async function execute(request) {
     const { name, principal, params } = request;
     if (lifecycleRoutes.has(name)) {
@@ -156,6 +163,69 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
       return artifacts[name](input);
     }
     switch (name) {
+      case 'registerJobOutput': {
+        rejectDuplicateRouteParams(request);
+        const body = request.body;
+        if (Object.keys(body).length !== jobOutputFields.length ||
+            jobOutputFields.some(key => !Object.hasOwn(body, key))) {
+          throw Object.assign(new Error('Unexpected job output request.'),
+            { code: 'invalid_input' });
+        }
+        if (typeof body.data !== 'string' || body.data.length === 0 ||
+            body.data.length % 4 !== 0 || !jobOutputBase64.test(body.data)) {
+          throw Object.assign(new Error('Invalid job output encoding.'),
+            { code: 'invalid_input' });
+        }
+        if (Date.now() >= nextCollection) {
+          artifacts.collectGarbage();
+          nextCollection = Date.now() + 60000;
+        }
+        // The artifact store is the only byte authority: it assigns the
+        // artifact id, enforces the declared length and digest, and refuses
+        // to publish bytes that do not hash to the declared sha256.
+        const begun = artifacts.beginUpload({
+          project: principal.project,
+          requestId: body.requestId,
+          totalLength: body.totalLength,
+          sha256: body.sha256,
+        });
+        if (begun.state === 'uploading') {
+          const decoded = Buffer.from(body.data, 'base64');
+          if (decoded.length === 0 || decoded.length !== begun.totalLength ||
+              decoded.length > MAX_CHUNK_BYTES || decoded.toString('base64') !== body.data) {
+            throw Object.assign(new Error('Job output length mismatch.'),
+              { code: 'invalid_input' });
+          }
+          if (begun.receivedBytes < decoded.length) {
+            // A replay after a lost reply resumes from the stored prefix; the
+            // finish below still hashes the assembled stream, so bytes that
+            // differ from a previous attempt fail as digest_mismatch.
+            artifacts.appendChunk({
+              project: principal.project,
+              artifactId: begun.artifactId,
+              offset: begun.receivedBytes,
+              data: decoded.subarray(begun.receivedBytes).toString('base64'),
+            });
+          }
+        }
+        const published = artifacts.finishUpload({
+          project: principal.project, artifactId: begun.artifactId,
+        });
+        const recorded = store.recordJobArtifact(principal, {
+          jobId: params.jobId,
+          artifactId: published.artifactId,
+          label: body.label,
+          totalLength: published.totalLength,
+          sha256: published.sha256,
+        });
+        // The request key the caller used is echoed so a lost reply can be
+        // correlated with its idempotent replay without a second lookup.
+        return { ...recorded, requestId: published.requestId };
+      }
+      case 'getJobArtifacts': {
+        const outputs = store.getJobArtifacts(principal, params.jobId);
+        return { artifacts: outputs, count: outputs.length };
+      }
       case 'submitJob':
         rejectDuplicateRouteParams(request);
         return publicJob(jobService.submitJob(principal, { ...request.body, ...params }));

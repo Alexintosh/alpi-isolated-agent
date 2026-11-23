@@ -22,6 +22,8 @@ const operations = [
   ['getArtifact', 'GET', 'artifacts/:artifactId', 'observer'],
   ['readChunk', 'GET', 'artifacts/:artifactId/chunks/:offset', 'runner'],
   ['acknowledge', 'POST', 'artifacts/:artifactId/acknowledge', 'runner'],
+  ['registerJobOutput', 'POST', 'jobs/:jobId/outputs', 'runner'],
+  ['getJobArtifacts', 'GET', 'jobs/:jobId/outputs', 'observer'],
   ['importArtifact', 'POST', 'sandboxes/:sandboxId/imports', 'runner'],
   ['exportArtifact', 'POST', 'sandboxes/:sandboxId/exports', 'runner'],
   ['issueTicket', 'POST', 'sandboxes/:sandboxId/terminal-tickets', 'operator'],
