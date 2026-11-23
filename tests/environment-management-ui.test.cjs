@@ -256,7 +256,7 @@ test('management keeps visible destructive scope, accessible controls and strict
   assert.match(section, /next Connect; nothing starts automatically/);
   for (const id of ['environment-restart', 'environment-recreate'])
     assert.match(section, new RegExp('<button id="' + id + '" type="button"[^>]*aria-describedby='));
-  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'"/);
+  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'"/);
   const management = source.slice(source.indexOf('let environmentManagementPending'), source.indexOf('let resourceKey'));
   assert(!/window\.confirm\(|innerHTML\s*=/.test(management));
 });

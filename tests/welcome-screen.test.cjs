@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../src/v1/control.html'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '../src/v1/control.js'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '../src/v1/control.css'), 'utf8');
 
 // Execute the shipped renderer, its status subscription and actual click handlers.
 // Nodes come from the live HTML IDs, so missing markup fails instead of being invented.
@@ -247,7 +248,7 @@ test('a failed bootstrap returned as a snapshot keeps the VM running and marks H
   assert.equal(f.get('welcome-action').textContent, 'Retry');
 });
 
-test('welcome uses native keyboard controls, textual statuses and the unchanged strict CSP', () => {
+test('welcome uses native keyboard controls, textual statuses and strict CSP', () => {
   const welcome = html.match(/<main id="welcome"[\s\S]*?<\/main>/)[0];
   assert.match(welcome, /Your workspace, isolated\./);
   assert.match(welcome, /aria-labelledby="welcome-heading"/);
@@ -257,9 +258,22 @@ test('welcome uses native keyboard controls, textual statuses and the unchanged 
   assert.match(welcome, /Disconnect keeps jobs running\. Stop VM stops jobs\./);
   assert.match(welcome, /Quit stops managed environments/);
   assert(!/scenario|Switching environments/.test(welcome));
-  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'"/);
+  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'"/);
 });
 
+
+test('welcome uses the local Alpi logo decoratively with self-only image CSP', () => {
+  const welcome = html.match(/<main id="welcome"[\s\S]*?<\/main>/)[0];
+  assert.match(welcome, /<img class="welcome-logo" src="alpi-logo\.png" alt="" aria-hidden="true" width="24" height="24">Alpi<\/p>/);
+  assert(!welcome.includes('M3 3v10M13 3v10M3 8h10'));
+  assert.match(html, /content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'"/);
+  assert.doesNotMatch(html, /img-src[^;"]*(?:data:|blob:|\*|https?:)/);
+  assert.match(css, /#welcome \.welcome-mark\s*\{[^}]*flex-wrap:\s*wrap;/);
+  assert.match(css, /\.welcome-logo\s*\{[^}]*width:\s*24px;[^}]*height:\s*24px;[^}]*flex:\s*none;/);
+  const shipped = fs.readFileSync(path.join(__dirname, '../src/v1/alpi-logo.png'));
+  const original = fs.readFileSync(path.join(__dirname, '../assets/Alpi-1024.png'));
+  assert.equal(shipped.equals(original), true);
+});
 
 test('persisted ready values cannot appear verified before reconciliation completes',()=>{
  const f=fixture();
