@@ -633,3 +633,109 @@ test('each stdio connection lists and calls its own tools and cancels a waiting 
   assert.deepEqual(calls, [{ wait: false }, { wait: true }]);
   assert.ok(!session.messages.some(message => message.id === 4));
 });
+
+
+// ---- Paired job workflow work tools (work-tools.cjs) ----
+
+const { createJobWorkTools } = require('../src/work-tools.cjs');
+const ID = '11111111-1111-4111-8111-111111111111';
+const { ClientError } = require('../src/client.cjs');
+
+function jobHarness(client) {
+  const harness = createHarness(capabilities, createJobWorkTools(client));
+  harness.send(initialize(80));
+  harness.send({ jsonrpc: '2.0', id: 90, method: 'tools/list' });
+  return harness;
+}
+
+test('advertises the paired job workflow tools and calls the shared routes', async () => {
+  const calls = [];
+  const client = {
+    requestResource: async (name, params, body) => {
+      calls.push([name, params, body]);
+      if (name === 'submitJob') {
+        return { jobId: ID, disposition: 'acknowledged' };
+      }
+      if (name === 'getEvents') {
+        return { events: [{ type: 'job.submitted', seq: 1 }], nextSeq: 1,
+          firstSeq: 1, lastSeq: 1, gap: false, reset: false };
+      }
+      return { ok: name };
+    },
+  };
+  const harness = jobHarness(client);
+  const listing = await harness.waitForId(90);
+  const names = listing.result.tools.map((tool) => tool.name);
+  for (const expected of ['alpi_job_submit', 'alpi_job_get', 'alpi_job_events',
+    'alpi_job_lookup']) {
+    assert.ok(names.includes(expected), expected + ' advertised');
+  }
+  const call = (id, name, args) => harness.send({
+    jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+  });
+  call(91, 'alpi_job_submit', { sandboxId: ID, engine: 'fixture', requestId: ID });
+  const submit = await harness.waitForId(91);
+  assert.equal(submit.result.structuredContent.disposition, 'acknowledged');
+  call(92, 'alpi_job_events', { jobId: ID, after: 3, limit: 2 });
+  const events = await harness.waitForId(92);
+  assert.equal(events.result.structuredContent.events.length, 1);
+  call(93, 'alpi_job_lookup', { requestId: ID });
+  await harness.waitForId(93);
+  call(94, 'alpi_job_get', { jobId: ID });
+  await harness.waitForId(94);
+  assert.deepEqual(calls, [
+    ['submitJob', { sandboxId: ID }, { requestId: ID, engine: 'fixture' }],
+    ['getEvents', { jobId: ID, after: '3' }, undefined],
+    ['lookupJob', {}, { requestId: ID }],
+    ['getJob', { jobId: ID }, undefined],
+  ]);
+  harness.end();
+  await harness.done;
+});
+
+test('job tools refuse malformed arguments without touching the client', async () => {
+  let touched = 0;
+  const client = { requestResource: async () => { touched += 1; return {}; } };
+  const harness = jobHarness(client);
+  const call = (id, name, args) => harness.send({
+    jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+  });
+  call(95, 'alpi_job_submit', { sandboxId: ID, engine: 'fixture' });
+  call(96, 'alpi_job_submit', { sandboxId: ID, engine: 'BAD ENGINE', requestId: ID });
+  call(97, 'alpi_job_get', { jobId: 'not-a-uuid' });
+  call(98, 'alpi_job_events', { jobId: ID, after: -1 });
+  for (const id of [95, 96, 97, 98]) {
+    const response = await harness.waitForId(id);
+    assert.equal(response.result.isError, true);
+    assert.equal(response.result.content[0].text, 'Invalid job tool arguments.');
+  }
+  assert.equal(touched, 0);
+  harness.end();
+  await harness.done;
+});
+
+test('job tools map client failures to short safe messages', async () => {
+  const conflicts = new ClientError('HTTP_STATUS', 'Server rejected the request.', {
+    statusCode: 409, resourceCode: 'engine_identity_conflict',
+  });
+  const expired = new ClientError('CREDENTIAL_EXPIRED', 'The client credential has expired.');
+  const failures = [conflicts, expired];
+  const client = {
+    requestResource: async () => { throw failures.shift(); },
+  };
+  const harness = jobHarness(client);
+  const call = (id, name, args) => harness.send({
+    jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+  });
+  call(99, 'alpi_job_submit', { sandboxId: ID, engine: 'fixture', requestId: ID });
+  const refused = await harness.waitForId(99);
+  assert.equal(refused.result.isError, true);
+  assert.equal(refused.result.content[0].text,
+    'The server refused the job request (engine_identity_conflict).');
+  call(100, 'alpi_job_get', { jobId: ID });
+  const credential = await harness.waitForId(100);
+  assert.equal(credential.result.content[0].text, 'The client credential has expired.');
+  harness.end();
+  await harness.done;
+});
+

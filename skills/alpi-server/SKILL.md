@@ -5,7 +5,7 @@ description: Use a paired Alpi Server through its MCP connector to inspect the r
 
 # Work on a paired Alpi Server
 
-Use the connector for the named remote context. Call `alpi_capabilities` and check the server ID, project, role and installed runtimes. If the runtime list is empty, report that pairing succeeded and the host needs a runtime before it can accept jobs. Use the tools actually listed by that connector. A local Alpi Desktop environment has separate identities and credentials.
+Use the connector for the named remote context. Call `alpi_capabilities` and check the server ID, project, role and installed runtimes. If the runtime list is empty, report that pairing succeeded and the host needs a runtime before it can accept jobs. Use the tools actually listed by that connector. The connector also advertises the paired job workflow tools (alpi_job_submit, alpi_job_get, alpi_job_events, alpi_job_lookup): submit with an explicit engine and a caller request key, resume observation from the returned cursor, and recover a lost reply with alpi_job_lookup before any new submission. A local Alpi Desktop environment has separate identities and credentials.
 
 For sandbox work, select the advertised engine, guest profile, harness and model requested by the user. Stage the requested checkout on the client. Upload that tree and import the returned artifact into the selected sandbox. Keep the import receipt, workspace ID and content root. Giving the Linux server a path on the laptop does not transfer files.
 

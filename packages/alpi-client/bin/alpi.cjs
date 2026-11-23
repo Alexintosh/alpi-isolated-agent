@@ -10,6 +10,7 @@ const {
   validateContextName,
 } = require('../src/context.cjs');
 const { ClientError, createClient, pairClient } = require('../src/client.cjs');
+const { createJobWorkTools } = require('../src/work-tools.cjs');
 
 const USAGE = `Usage: alpi <command> [options]
 
@@ -208,6 +209,7 @@ async function runMcp(args) {
       await mcp.runMcp({
         getCapabilities: () => client.getCapabilities(),
         listSandboxes: () => client.requestResource('listSandboxes'),
+        workTools: createJobWorkTools(client),
         input: process.stdin,
         output: process.stdout,
       });
