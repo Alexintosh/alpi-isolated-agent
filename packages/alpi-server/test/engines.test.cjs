@@ -866,3 +866,19 @@ test('a name collision without an allocation receipt leaves the existing box unt
   assert.equal(runtime.boxes.get(box.id), box);
   assert.equal((await adapter.listOwned()).length, 0);
 });
+
+test('scripted job hooks require a locally opted-in test-only registry entry', async () => {
+  const production = createEngineRegistry();
+  assert.throws(() => production.install({ id: 'production', factory: async () => ({}),
+    testJob() {} }), assertCode('test_adapter_forbidden'));
+  const registry = createEngineRegistry({ allowTestAdapters: true });
+  assert.throws(() => registry.install({ id: 'production', factory: async () => ({}),
+    testJob() {} }), assertCode('test_adapter_forbidden'));
+  let called = 0;
+  registry.install({ id: 'fixture', testOnly: true, factory: async () => ({}),
+    testJob: () => { called++; } });
+  registry.runTestJob('fixture', {});
+  assert.equal(called, 1);
+  const { createScriptedFixtureJobs } = require('../src/engines/scripted-fixture.cjs');
+  assert.throws(() => createScriptedFixtureJobs({}), /explicit test opt-in/);
+});

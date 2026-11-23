@@ -147,10 +147,14 @@ function createEngineRegistry(options = {}) {
       if (testOnly && !allowTestAdapters) {
         fail('test_adapter_forbidden', 'Test-only engine adapters are disabled.');
       }
+      if (spec.testJob !== undefined &&
+          (!testOnly || !allowTestAdapters || typeof spec.testJob !== 'function')) {
+        fail('test_adapter_forbidden', 'Job fixtures require an explicit test-only registry entry.');
+      }
       if (entries.has(id)) {
         fail('engine_already_installed', `Engine already installed: ${id}.`);
       }
-      entries.set(id, { id, testOnly, factory: spec.factory });
+      entries.set(id, { id, testOnly, factory: spec.factory, testJob: spec.testJob });
       return { id, testOnly };
     },
 
@@ -168,6 +172,15 @@ function createEngineRegistry(options = {}) {
     requireSelectable(id) {
       const entry = entryFor(id);
       return Object.freeze({ id: entry.id, testOnly: entry.testOnly });
+    },
+
+    // Local configuration only: no route can install a runner or supply a
+    // command/path. Production entries cannot have this hook.
+    runTestJob(id, context) {
+      const entry = entryFor(id);
+      if (allowTestAdapters && entry.testOnly && entry.testJob) {
+        return entry.testJob(context);
+      }
     },
 
     list() {

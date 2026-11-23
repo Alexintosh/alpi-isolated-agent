@@ -667,7 +667,7 @@ test('advertises the paired job workflow tools and calls the shared routes', asy
   const listing = await harness.waitForId(90);
   const names = listing.result.tools.map((tool) => tool.name);
   for (const expected of ['alpi_job_submit', 'alpi_job_get', 'alpi_job_events',
-    'alpi_job_lookup']) {
+    'alpi_job_lookup', 'alpi_job_outputs']) {
     assert.ok(names.includes(expected), expected + ' advertised');
   }
   const call = (id, name, args) => harness.send({
@@ -892,3 +892,68 @@ test('job tools accept uppercase UUIDs like the server routes do', async () => {
   await harness.done;
 });
 
+
+
+test('job outputs return verified bounded bytes and paginate without duplicates', async () => {
+  const crypto = require('node:crypto');
+  const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  const bytes = Buffer.alloc(20000, 42);
+  const row = { jobId: ID, artifactId: ID, label: 'patch', totalLength: bytes.length,
+    sha256: hash(bytes), recordedAt: 1 };
+  const calls = [];
+  const client = { requestResource: async (name, params) => {
+    calls.push([name, params]);
+    if (name === 'getJobArtifacts') return { artifacts: [row, row], count: 2 };
+    if (name === 'getArtifact') return { ...row, state: 'published' };
+    if (name === 'readChunk') return { artifactId: ID, offset: 0, length: bytes.length,
+      sha256: hash(bytes), data: bytes.toString('base64') };
+    throw Error('unexpected route');
+  } };
+  const tool = createJobWorkTools(client).get('alpi_job_outputs');
+  const first = (await tool.run({ jobId: ID })).structuredContent;
+  assert.equal(first.artifacts.length, 1);
+  assert.equal(first.nextOffset, 1);
+  assert.equal(first.truncated, true);
+  assert.deepEqual(Buffer.from(first.artifacts[0].data, 'base64'), bytes);
+  assert.equal(first.artifacts[0].sha256, hash(bytes));
+  const second = (await tool.run({ jobId: ID, offset: first.nextOffset })).structuredContent;
+  assert.equal(second.nextOffset, 2);
+  assert.equal(second.truncated, false);
+  assert.deepEqual(calls.slice(0, 3), [
+    ['getJobArtifacts', { jobId: ID }], ['getArtifact', { artifactId: ID }],
+    ['readChunk', { artifactId: ID, offset: '0' }],
+  ]);
+  for (const args of [{ jobId: 'bad' }, { jobId: ID, limit: 9 },
+    { jobId: ID, offset: -1 }, { jobId: ID, project: 'other' }]) {
+    assert.equal((await tool.run(args)).isError, true);
+  }
+});
+
+test('job output projection refuses malformed identities, sizes, metadata and corrupt chunks', async () => {
+  const bytes = Buffer.from('fixture patch');
+  const hash = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const row = { jobId: ID, artifactId: ID, label: 'patch', totalLength: bytes.length,
+    sha256: hash, recordedAt: 1 };
+  const goodChunk = { artifactId: ID, offset: 0, length: bytes.length,
+    sha256: hash, data: bytes.toString('base64') };
+  const cases = [
+    { list: { artifacts: [row], count: 2 } },
+    { row: { ...row, jobId: '22222222-2222-4222-8222-222222222222' } },
+    { row: { ...row, totalLength: 32769 } },
+    { meta: { ...row, state: 'uploading' } },
+    { chunk: { ...goodChunk, offset: 1 } },
+    { chunk: { ...goodChunk, length: 0 } },
+    { chunk: { ...goodChunk, data: Buffer.from('broken bytes!').toString('base64') } },
+    { row: { ...row, sha256: '0'.repeat(64) }, meta: { ...row, state: 'published', sha256: '0'.repeat(64) } },
+  ];
+  for (const invalid of cases) {
+    const tool = createJobWorkTools({ requestResource: async name => {
+      if (name === 'getJobArtifacts') return invalid.list ?? { artifacts: [invalid.row ?? row], count: 1 };
+      if (name === 'getArtifact') return invalid.meta ?? { ...row, state: 'published' };
+      return invalid.chunk ?? goodChunk;
+    } }).get('alpi_job_outputs');
+    const result = await tool.run({ jobId: ID });
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, 'The server returned an invalid response.');
+  }
+});

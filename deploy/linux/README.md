@@ -19,6 +19,45 @@ systemctl is-active alpi-server.service
 
 The system service owns its private state under `/var/lib/alpi-server`. Run administrative commands as the service account or through the Linux operator's authorized administration channel. The database, TLS key and admin socket belong on the host.
 
+### Disposable scripted job fixture (local test registry only)
+
+For transport acceptance without KVM or a model engine, a local launcher may
+create an engine registry with `allowTestAdapters: true` and install a
+`testOnly: true` entry with a `testJob` hook from
+`src/engines/scripted-fixture.cjs:createScriptedFixtureJobs`. Both that factory's
+`allowTestEngines: true` argument and the registry opt-in are required. The
+production registry never installs it; `--allow-test-engines` alone does not
+configure a runner. Production adapters and native session dispatch are unchanged.
+
+The operator supplies an absolute disposable `workspaceDir`, `stateDir`, exact
+clean `baselineCommit` and `gateTimeoutMs` (100 ms to 30 minutes). The sandbox
+profile and submission payload's `scriptedProfile` must both be
+`scripted-counter-v1`. The workspace contains `counter.js` with
+`module.exports = () => 1;` and a trusted `check.cjs` assertion. Submission
+starts the engine's own in-process work after durable admission. It writes
+fsynced timestamped markers and progress events under
+`stateDir/scripted-fixture/<jobId>`, parks until the operator creates `release`
+in that directory, then changes the counter to 42, runs the fixed assertion,
+computes a Git diff, and attaches it through the server's artifact registration
+path. A stable upload key prevents duplicate artifacts. A heartbeat shows
+continued execution while the client transport is disconnected. Expiry or
+daemon shutdown fails the fixture without releasing the gate.
+
+One configured workspace supports one logical job. Submission replay does not
+repeat the edit or attach. A durable claim prevents automatic reexecution after
+a daemon restart; daemon restart recovery is deliberately outside this fixture's
+transport-continuity contract. Use fresh state and a fresh baseline clone for
+each independent gate. Commands, paths, edits and timeouts cannot be supplied
+by a remote payload, and no host shell tool is exposed.
+
+The paired MCP bridge's `alpi_job_outputs` lists the job's real output receipts
+and fetches artifact bytes, verifying metadata, chunk and complete SHA-256 and
+length before returning untrusted base64 data. Each page contains at most eight
+artifacts and 32768 decoded bytes; follow `nextOffset` while `truncated` is true.
+Outputs larger than that per-artifact bound are refused. Byte reads use the
+existing runner-authorized artifact route; an observer may list receipts but
+cannot retrieve bytes through this tool.
+
 ## Install the isolated worker on a KVM host
 
 The same server tarball contains the per-allocation worker and its service policy. With the global prefix above, install the templates as the Linux operator. The host needs systemd with cgroup v2, polkit, Node.js 24 on the system service PATH and a kvm group with access to /dev/kvm.

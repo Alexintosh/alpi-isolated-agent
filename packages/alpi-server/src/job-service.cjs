@@ -7,7 +7,8 @@
  * HTTPS API (POST /v1/sandboxes/:sandboxId/jobs) and the cooperative
  * cancellation path (POST /v1/jobs/:jobId/cancel). It contains no engine,
  * harness or guest execution: dispatch to a native session is a separate
- * milestone and nothing here starts one.
+ * milestone. The host resource layer may start a locally opted-in test-only
+ * registry job fixture after this service commits admission.
  *
  * Invariants:
  * - The engine choice is explicit. A submission without an engine is refused

@@ -1,5 +1,7 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
+
 // Paired job workflow tools advertised by the stdio MCP bridge. Each tool is a
 // thin, bounded projection of one shared packaged route: the client library
 // owns identity, pinning and validation, the server owns admission and
@@ -34,6 +36,8 @@ const MAX_PAYLOAD_JSON_BYTES = 16 * 1024;
 // DEFAULT_POLL_LIMIT = 100 events (work-store.cjs), so a larger client
 // maximum would silently do nothing beyond the server bound.
 const MAX_EVENT_PAGE = 100;
+const MAX_OUTPUT_BYTES = 32 * 1024;
+const MAX_OUTPUT_PAGE = 8;
 
 const uuidField = (description) => ({
   type: 'string', description: description + ' At most 36 UTF-8 bytes.',
@@ -98,6 +102,24 @@ const JOB_TOOL_DEFINITIONS = Object.freeze([
           description: 'Maximum events in the page. Defaults to the server page bound.',
           minimum: 1, maximum: MAX_EVENT_PAGE,
         },
+      }),
+      required: ['jobId'],
+      additionalProperties: false,
+    }),
+  }),
+  Object.freeze({
+    name: 'alpi_job_outputs',
+    description:
+      'Retrieve job output bytes from GET /v1/jobs/:jobId/outputs and the artifact routes. ' +
+      'Returns untrusted base64 data with verified sha256 and totalLength. ' +
+      'At most 8 artifacts and 32768 decoded bytes per page. Resume at nextOffset when truncated.',
+    inputSchema: Object.freeze({
+      type: 'object',
+      properties: Object.freeze({
+        jobId: uuidField('Job identifier.'),
+        offset: { type: 'integer', description: 'Output list offset. Defaults to 0.', minimum: 0 },
+        limit: { type: 'integer', description: 'Maximum artifacts. Defaults to 4.',
+          minimum: 1, maximum: MAX_OUTPUT_PAGE },
       }),
       required: ['jobId'],
       additionalProperties: false,
@@ -251,6 +273,59 @@ function failure(error) {
   };
 }
 
+function invalidResponse() {
+  return Object.assign(new Error('Invalid job output response.'), { code: 'INVALID_RESPONSE' });
+}
+
+const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const isDigest = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const sameUuid = (a, b) => typeof a === 'string' && UUID_PATTERN.test(a) && a.toLowerCase() === b.toLowerCase();
+
+async function jobOutputs(client, input) {
+  const page = await client.requestResource('getJobArtifacts', { jobId: input.jobId });
+  if (!page || !Array.isArray(page.artifacts) || page.count !== page.artifacts.length) throw invalidResponse();
+  const artifacts = [];
+  const offset = Math.min(input.offset ?? 0, page.count);
+  let bytesReturned = 0;
+  for (const row of page.artifacts.slice(offset, offset + (input.limit ?? 4))) {
+    if (!row || !sameUuid(row.jobId, input.jobId) ||
+        typeof row.artifactId !== 'string' || !UUID_PATTERN.test(row.artifactId) ||
+        typeof row.label !== 'string' || !row.label.length || row.label.length > 128 ||
+        /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(row.label) ||
+        !Number.isSafeInteger(row.totalLength) || row.totalLength < 1 || row.totalLength > MAX_OUTPUT_BYTES ||
+        !isDigest(row.sha256) || !Number.isSafeInteger(row.recordedAt) || row.recordedAt < 0) throw invalidResponse();
+    if (bytesReturned + row.totalLength > MAX_OUTPUT_BYTES) break;
+    const params = { artifactId: row.artifactId };
+    const metadata = await client.requestResource('getArtifact', params);
+    if (!metadata || !sameUuid(metadata.artifactId, row.artifactId) || metadata.state !== 'published' ||
+        metadata.sha256 !== row.sha256 || metadata.totalLength !== row.totalLength) throw invalidResponse();
+    const parts = [];
+    let cursor = 0;
+    while (cursor < row.totalLength) {
+      const chunk = await client.requestResource('readChunk', { ...params, offset: String(cursor) });
+      if (!chunk || !sameUuid(chunk.artifactId, row.artifactId) || chunk.offset !== cursor ||
+          !Number.isSafeInteger(chunk.length) || chunk.length < 1 || cursor + chunk.length > row.totalLength ||
+          !isDigest(chunk.sha256) || typeof chunk.data !== 'string' || !chunk.data.length ||
+          chunk.data.length > Math.ceil(MAX_OUTPUT_BYTES / 3) * 4 || chunk.data.length % 4 !== 0 ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(chunk.data)) throw invalidResponse();
+      const bytes = Buffer.from(chunk.data, 'base64');
+      if (bytes.length !== chunk.length || bytes.toString('base64') !== chunk.data ||
+          digest(bytes) !== chunk.sha256) throw invalidResponse();
+      parts.push(bytes);
+      cursor += bytes.length;
+    }
+    const bytes = Buffer.concat(parts, cursor);
+    if (digest(bytes) !== row.sha256) throw invalidResponse();
+    artifacts.push({ jobId: row.jobId, artifactId: row.artifactId, label: row.label,
+      totalLength: bytes.length, sha256: row.sha256, recordedAt: row.recordedAt,
+      encoding: 'base64', data: bytes.toString('base64') });
+    bytesReturned += bytes.length;
+  }
+  const nextOffset = offset + artifacts.length;
+  return result({ jobId: input.jobId, artifacts, count: page.count,
+    nextOffset, truncated: nextOffset < page.count });
+}
+
 // One projection per advertised tool, keyed by tool name. Each handler is
 // a thin, stateless shaping of one shared client route: input is already
 // validated, results are the server's own projection, and the run wrapper
@@ -287,6 +362,7 @@ const JOB_TOOL_HANDLERS = Object.freeze({
   },
   alpi_job_lookup: async (client, input) =>
     result(await client.requestResource('lookupJob', {}, { requestId: input.requestId })),
+  alpi_job_outputs: jobOutputs,
 });
 
 function createJobWorkTools(client) {

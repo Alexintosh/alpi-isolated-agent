@@ -98,9 +98,13 @@ test('the paired MCP bridge serves the job workflow on an explicit test engine',
     const listing = await call(2, 'tools/list', {});
     const names = listing.result.tools.map((tool) => tool.name);
     for (const expected of ['alpi_capabilities', 'alpi_sandbox_list',
-      'alpi_job_submit', 'alpi_job_get', 'alpi_job_events', 'alpi_job_lookup']) {
+      'alpi_job_submit', 'alpi_job_get', 'alpi_job_events', 'alpi_job_lookup', 'alpi_job_outputs']) {
       assert.ok(names.includes(expected), expected + ' advertised');
     }
+
+    const empty = await toolsCall(20, 'alpi_job_outputs', { jobId: randomUUID() });
+    assert.equal(empty.result.isError, true);
+    assert.match(empty.result.content[0].text, /not_found/);
 
     const requestId = randomUUID();
     const submit = await toolsCall(3, 'alpi_job_submit', {
@@ -226,3 +230,119 @@ test('the paired MCP bridge serves the job workflow on an explicit test engine',
   }
 });
 
+
+const fs = require('node:fs/promises');
+const { execFileSync } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
+const { createScriptedFixtureJobs, SCRIPTED_FIXTURE_PROFILE } =
+  require('../packages/alpi-server/src/engines/scripted-fixture.cjs');
+
+async function scriptedSetup(t, gateTimeoutMs = 10000) {
+  const fixture = await tempClientFixture(t, 'script-job');
+  const workspace = path.join(fixture.root, 'workspace');
+  await fs.mkdir(workspace);
+  await fs.writeFile(path.join(workspace, 'counter.js'), 'module.exports = () => 1;\n');
+  await fs.writeFile(path.join(workspace, 'check.cjs'),
+    "require('node:assert/strict').equal(require('./counter.js')(), 42);\n");
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=Fixture',
+    '-c', 'user.email=fixture@example.invalid', ...args], { cwd: workspace, encoding: 'utf8' });
+  git('init', '-q'); git('add', '.'); git('commit', '-qm', 'baseline');
+  const registry = createEngineRegistry({ allowTestAdapters: true });
+  const testJob = createScriptedFixtureJobs({ allowTestEngines: true, stateDir: fixture.stateDir,
+    workspaceDir: workspace, baselineCommit: git('rev-parse', 'HEAD').trim(), gateTimeoutMs });
+  registry.install({ id: 'fixture', testOnly: true, factory: fixtureEngineAdapter, testJob });
+  const server = await startFixtureServer({ stateDir: fixture.stateDir, engines: registry });
+  t.after(() => server.close());
+  const invite = await issuePairing({ stateDir: fixture.stateDir, project: PROJECT, role: 'runner' });
+  const paired = await pairWithCli(fixture, invite, 'scripted');
+  assert.equal(paired.code, 0, paired.stderr);
+  // Read the encrypted local context in a separate process with the fixture's
+  // own env; no globals or repository source imports enter the bridge.
+  const context = JSON.parse(execFileSync(process.execPath, ['-e',
+    `console.log(JSON.stringify(require(${JSON.stringify(path.resolve(__dirname,
+      '../packages/alpi-client/src/context.cjs'))}).openStore().get('scripted')))`],
+    { env: fixture.clientEnv, encoding: 'utf8' }));
+  const client = createClient(context);
+  const sandbox = await client.requestResource('createSandbox', {}, {
+    requestId: randomUUID(), engine: 'fixture', profile: SCRIPTED_FIXTURE_PROFILE,
+  });
+  const body = { requestId: randomUUID(), engine: 'fixture',
+    payload: { scriptedProfile: SCRIPTED_FIXTURE_PROFILE } };
+  const job = await client.requestResource('submitJob', { sandboxId: sandbox.sandboxId }, body);
+  const markers = path.join(fixture.stateDir, 'scripted-fixture', job.jobId);
+  async function waitMarker(phase) {
+    const deadline = Date.now() + 12000;
+    while (Date.now() < deadline) {
+      try { return JSON.parse(await fs.readFile(path.join(markers, phase + '.json'), 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      await delay(20);
+    }
+    throw Error('Missing fixture phase ' + phase);
+  }
+  return { ...fixture, workspace, client, sandbox, body, job, markers, waitMarker };
+}
+
+test('scripted submission starts before its gate and attaches its own patch once through MCP', async t => {
+  const f = await scriptedSetup(t);
+  const started = await f.waitMarker('started');
+  const parked = await f.waitMarker('parked');
+  assert.ok(Date.parse(started.at) <= Date.parse(parked.at));
+  assert.equal(parked.editCount, 0);
+  assert.equal(await fs.readFile(path.join(f.workspace, 'counter.js'), 'utf8'), 'module.exports = () => 1;\n');
+  assert.equal((await f.client.requestResource('getJobArtifacts', { jobId: f.job.jobId })).count, 0);
+  const before = await f.client.requestResource('getEvents', { jobId: f.job.jobId, after: '0' });
+  assert.ok(before.events.some(event => event.untrustedText?.includes('parked')));
+  const replay = await f.client.requestResource('submitJob', { sandboxId: f.sandbox.sandboxId }, f.body);
+  assert.equal(replay.jobId, f.job.jobId);
+  await fs.writeFile(path.join(f.markers, 'release'), 'release\n');
+  await f.waitMarker('completed');
+  const job = await f.client.requestResource('getJob', { jobId: f.job.jobId });
+  assert.equal(job.disposition, 'completed');
+  execFileSync(process.execPath, ['check.cjs'], { cwd: f.workspace });
+
+  const bridge = spawn(process.execPath, [CLIENT_BIN, 'mcp', '--context', 'scripted'],
+    { env: f.clientEnv, stdio: ['pipe', 'pipe', 'ignore'] });
+  t.after(() => { if (bridge.exitCode === null) bridge.kill('SIGKILL'); });
+  const lines = createInterface({ input: bridge.stdout })[Symbol.asyncIterator]();
+  async function rpc(id, method, params) {
+    bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    const response = JSON.parse((await lines.next()).value);
+    assert.equal(response.id, id);
+    return response.result;
+  }
+  await rpc(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {},
+    clientInfo: { name: 'scripted-fixture', version: '1' } });
+  const output = await rpc(2, 'tools/call', { name: 'alpi_job_outputs', arguments: { jobId: f.job.jobId } });
+  assert.ok(!output.isError, JSON.stringify(output));
+  const page = output.structuredContent;
+  assert.equal(page.count, 1);
+  assert.equal(page.truncated, false);
+  const patch = page.artifacts[0];
+  const bytes = Buffer.from(patch.data, 'base64');
+  assert.equal(bytes.length, patch.totalLength);
+  assert.match(bytes.toString(), /\+module.exports = \(\) => 42;/);
+  const registration = { requestId: f.job.jobId, label: patch.label, totalLength: patch.totalLength,
+    sha256: patch.sha256, data: patch.data };
+  const second = await f.client.requestResource('registerJobOutput', { jobId: f.job.jobId }, registration);
+  assert.equal(second.artifactId, patch.artifactId);
+  await assert.rejects(f.client.requestResource('registerJobOutput', { jobId: f.job.jobId },
+    { ...registration, sha256: '0'.repeat(64) }), error => error.resourceCode === 'conflict');
+  await f.client.requestResource('submitJob', { sandboxId: f.sandbox.sandboxId }, f.body);
+  assert.equal((await f.client.requestResource('getJobArtifacts', { jobId: f.job.jobId })).count, 1);
+  const events = await f.client.requestResource('getEvents', { jobId: f.job.jobId, after: '0' });
+  for (const phase of ['started', 'edited', 'attached', 'completed']) {
+    assert.equal(events.events.filter(event => event.untrustedText &&
+      JSON.parse(event.untrustedText).phase === phase).length, 1, phase + ' emitted once');
+  }
+  bridge.stdin.end();
+  await once(bridge, 'close');
+});
+
+test('scripted gate timeout fails without editing or attaching output', async t => {
+  const f = await scriptedSetup(t, 200);
+  await f.waitMarker('parked');
+  await f.waitMarker('failed');
+  assert.equal((await f.client.requestResource('getJob', { jobId: f.job.jobId })).disposition, 'failed');
+  assert.equal((await f.client.requestResource('getJobArtifacts', { jobId: f.job.jobId })).count, 0);
+  assert.equal(await fs.readFile(path.join(f.workspace, 'counter.js'), 'utf8'), 'module.exports = () => 1;\n');
+});

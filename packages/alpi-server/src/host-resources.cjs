@@ -72,6 +72,8 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
   const store = openWorkStore(stateDir, { limits });
   const admission = new AsyncLocalStorage();
   const active = new Set();
+  const testWork = new Set();
+  const testAbort = new AbortController();
   let closing = false;
   let artifacts;
   let sandbox;
@@ -226,9 +228,24 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
         const outputs = store.getJobArtifacts(principal, params.jobId);
         return { artifacts: outputs, count: outputs.length };
       }
-      case 'submitJob':
+      case 'submitJob': {
         rejectDuplicateRouteParams(request);
-        return publicJob(jobService.submitJob(principal, { ...request.body, ...params }));
+        const job = jobService.submitJob(principal, { ...request.body, ...params });
+        // Only an explicitly configured local test registry can dispatch this
+        // hook. Admission is already durable; work belongs to the daemon and
+        // is independent of the request socket or the MCP process lifetime.
+        const pending = engines?.runTestJob?.(request.body.engine, {
+          job, sandboxId: params.sandboxId, principal, store, signal: testAbort.signal,
+          attachPatch: (body) => execute({ name: 'registerJobOutput', principal,
+            params: { jobId: job.jobId }, body }),
+        });
+        if (pending) {
+          testWork.add(pending);
+          const settled = () => testWork.delete(pending);
+          pending.then(settled, settled);
+        }
+        return publicJob(job);
+      }
       case 'cancelJob':
         rejectDuplicateRouteParams(request);
         return publicJob(jobService.cancelJob(principal, { ...request.body, ...params }));
@@ -270,6 +287,8 @@ async function openHostResources({ stateDir, limits, services = {}, sandboxHost,
       closing = true;
       clearInterval(timer);
       await Promise.allSettled([...active, sweep]);
+      testAbort.abort();
+      await Promise.allSettled([...testWork]);
       await sandbox.settle();
       try { sandbox.close(); } finally {
         try { artifacts.close(); } finally { store.close(); }
