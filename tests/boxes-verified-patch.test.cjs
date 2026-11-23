@@ -19,23 +19,22 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { execFile: execFileCallback } = require('node:child_process');
 const { promisify } = require('node:util');
 const { test } = require('node:test');
 
-const { startServer } = require('../packages/alpi-server/src/daemon.cjs');
-const { issuePairing } = require('../packages/alpi-server/src/admin-client.cjs');
+const {
+  startFixtureServer, tempDirectory, tempStateDir, enrollContext
+} = require('./helpers/alpi-job-fixture.cjs');
+
 const { requestJson } = require('../packages/alpi-client/src/transport.cjs');
 const { createClient } = require('../packages/alpi-client/src/client.cjs');
 const {
   ArtifactsClient,
   createHttpApi,
 } = require('../packages/alpi-client/src/artifacts.cjs');
-const { createEngineRegistry } = require('../packages/alpi-server/src/engines/registry.cjs');
-const { openHostResources } = require('../packages/alpi-server/src/host-resources.cjs');
 const { openArtifactStore } = require('../packages/alpi-server/src/artifact-store.cjs');
 const { openWorkStore } = require('../packages/alpi-server/src/work-store.cjs');
 
@@ -48,108 +47,14 @@ const PATCH_LABEL = 'boxes-verified-patch';
 const BASE_COUNTER = 'module.exports = () => 1;';
 const PATCHED_COUNTER = 'module.exports = () => 42;';
 
-function fixtureEngineAdapter() {
-  const boxes = new Map();
-  let counter = 0;
-  const info = (box) => ({
-    allocationId: box.allocationId,
-    launchGeneration: box.launchGeneration,
-    name: box.name,
-    nativeId: box.nativeId,
-    state: box.running ? 'running' : 'stopped',
-    running: box.running,
-  });
-  const adapter = {
-    boxFor(ref) {
-      const box = boxes.get(`${ref.allocationId}:${ref.launchGeneration}`);
-      if (!box) throw { code: 'engine_box_missing', message: 'missing box' };
-      return box;
-    },
-    async createBox(spec) {
-      const key = `${spec.allocationId}:${spec.launchGeneration}`;
-      let box = boxes.get(key);
-      const created = !box;
-      if (!box) {
-        box = {
-          allocationId: spec.allocationId,
-          launchGeneration: spec.launchGeneration,
-          name: `alpi-${spec.allocationId}-g${spec.launchGeneration}`,
-          nativeId: `native-${++counter}`,
-          running: false,
-        };
-        boxes.set(key, box);
-      }
-      return { allocationId: box.allocationId, launchGeneration: box.launchGeneration,
-        name: box.name, nativeId: box.nativeId, created };
-    },
-    async inspect(ref) { return info(adapter.boxFor(ref)); },
-    async start(ref) { adapter.boxFor(ref).running = true; return adapter.inspect(ref); },
-    async stop(ref) { adapter.boxFor(ref).running = false; return adapter.inspect(ref); },
-    async destroy(ref) {
-      const box = adapter.boxFor(ref);
-      boxes.delete(`${ref.allocationId}:${ref.launchGeneration}`);
-      return { destroyed: true, alreadyGone: false, allocationId: ref.allocationId,
-        launchGeneration: ref.launchGeneration, name: ref.name, nativeId: box.nativeId };
-    },
-    async listOwned() { return [...boxes.values()].map(info); },
-    async exec() {
-      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false,
-        timedOut: false, cancelled: false, executionId: 'exec-1' };
-    },
-    async probe() {
-      return { available: true, version: '0.14.1',
-        capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-          'list-owned', 'exec', 'pty'] };
-    },
-    async close() {},
-  };
-  return adapter;
-}
-
-function fixtureProfileResolver() {
-  return async ({ engine, profile }) => ({
-    engine,
-    profile,
-    qualified: true,
-    available: true,
-    engineVersion: '0.14.1',
-    imageDigest: 'sha256:' + 'a'.repeat(64),
-    limits: { vcpus: 2, memoryMiB: 2048, diskMiB: 10240 },
-    networkMode: 'disabled',
-    capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-      'list-owned', 'exec', 'pty'],
-  });
-}
-
-function devTestRegistry() {
-  const registry = createEngineRegistry({ allowTestAdapters: true });
-  registry.install({ id: 'fixture', testOnly: true, factory: async () => fixtureEngineAdapter() });
-  return registry;
-}
-
-async function tempStateDir(t, label) {
-  const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), `${label}-`));
-  t.after(() => fs.rm(parent, { recursive: true, force: true }));
-  return path.join(parent, 'state');
-}
-
 async function enroll(stateDir, server, role) {
-  const invite = await issuePairing({ stateDir, project: PROJECT, role });
-  const endpoint = { origin: server.origin, fingerprint: invite.fingerprint };
-  const response = await requestJson({
-    ...endpoint, method: 'POST', path: '/v1/pair/exchange',
-    body: { invitation: invite.invitation, name: role },
-  });
-  const context = {
-    ...endpoint, serverId: invite.serverId, project: PROJECT, role,
-    credential: response.credential, credentialExpiresAt: response.expiresAt,
-  };
+  const context = await enrollContext(stateDir, server, PROJECT, role);
   const client = createClient(context);
   const artifacts = new ArtifactsClient({
     api: createHttpApi({
       requestJson,
-      origin: endpoint.origin,
-      fingerprint: endpoint.fingerprint,
+      origin: context.origin,
+      fingerprint: context.fingerprint,
       credential: context.credential,
     }),
     allowedRoots: [REPO_ROOT],
@@ -160,8 +65,7 @@ async function enroll(stateDir, server, role) {
 // Build the recorded base and the intended change with real git, so the
 // verified patch is a genuine git diff between two committed states.
 async function buildBaseAndPatch(t) {
-  const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'bvp-git-'));
-  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const parent = await tempDirectory(t, 'bvp-git');
   const baseDir = path.join(parent, 'base');
   const git = (...args) => execFile('git',
     ['-c', 'user.email=boxes-verified-patch@example.invalid',
@@ -195,16 +99,8 @@ function recomputeDigest(bytes) {
 test('a job patch is durable, retrievable through the artifact routes, verifiable and applies', async (t) => {
   const { baseDir, baseCommit, patchBytes } = await buildBaseAndPatch(t);
   const stateDir = await tempStateDir(t, 'bvp');
-  const open = () => startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(fixtureEngineAdapter()),
-      },
-    }),
+  const open = () => startFixtureServer({
+    stateDir,
   });
   const server = await open();
   t.after(async () => { await server.close(); });
@@ -345,16 +241,8 @@ test('a job patch is durable, retrievable through the artifact routes, verifiabl
 test('job output registration enforces role, body shape and job scope', async (t) => {
   const { baseDir, patchBytes } = await buildBaseAndPatch(t);
   const stateDir = await tempStateDir(t, 'bvp-guard');
-  const server = await startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(fixtureEngineAdapter()),
-      },
-    }),
+  const server = await startFixtureServer({
+    stateDir,
   });
   t.after(async () => { await server.close(); });
   const runner = await enroll(stateDir, server, 'runner');
@@ -422,16 +310,8 @@ test('job output registration enforces role, body shape and job scope', async (t
 test('registerJobOutput replay: exact replay is idempotent, differing suffix bytes fail at finish, changed metadata conflicts at begin', async (t) => {
   const { patchBytes } = await buildBaseAndPatch(t);
   const stateDir = await tempStateDir(t, 'bvp-replay');
-  const server = await startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(fixtureEngineAdapter()),
-      },
-    }),
+  const server = await startFixtureServer({
+    stateDir,
   });
   t.after(async () => { await server.close(); });
   const runner = await enroll(stateDir, server, 'runner');

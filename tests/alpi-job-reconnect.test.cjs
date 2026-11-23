@@ -43,21 +43,19 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const net = require('node:net');
-const os = require('node:os');
 const path = require('node:path');
-const { randomBytes, randomUUID } = require('node:crypto');
+const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
-const { spawn } = require('node:child_process');
 
-const { startServer } = require('../packages/alpi-server/src/daemon.cjs');
+const {
+  fixtureEngineAdapter, startFixtureServer, tempClientFixture, runNode, pairWithCli
+} = require('./helpers/alpi-job-fixture.cjs');
+
 const { issuePairing, listClients } = require('../packages/alpi-server/src/admin-client.cjs');
 const { createClient } = require('../packages/alpi-client/src/client.cjs');
 const { openStore } = require('../packages/alpi-client/src/context.cjs');
 const { openWorkStore } = require('../packages/alpi-server/src/work-store.cjs');
-const { createEngineRegistry } = require('../packages/alpi-server/src/engines/registry.cjs');
-const { openHostResources } = require('../packages/alpi-server/src/host-resources.cjs');
 
-const CLIENT_BIN = path.join(__dirname, '..', 'packages', 'alpi-client', 'bin', 'alpi.cjs');
 const RECONNECT_CLIENT = path.join(__dirname, 'helpers', 'alpi-reconnect-client.cjs');
 const PROJECT = 'test-project';
 const CONTEXT_NAME = 'reconnect-runner';
@@ -66,113 +64,15 @@ const CROSS_PROJECT = 'other-project';
 const CROSS_CONTEXT_NAME = 'reconnect-cross-runner';
 const SEVER_CODES = ['CONNECTION_CLOSED', 'CONNECTION_ERROR'];
 
-function fixtureEngineAdapter() {
-  const boxes = new Map();
-  let counter = 0;
-  const info = (box) => ({
-    allocationId: box.allocationId,
-    launchGeneration: box.launchGeneration,
-    name: box.name,
-    nativeId: box.nativeId,
-    state: box.running ? 'running' : 'stopped',
-    running: box.running,
-  });
-  const adapter = {
-    boxFor(ref) {
-      const box = boxes.get(`${ref.allocationId}:${ref.launchGeneration}`);
-      if (!box) throw { code: 'engine_box_missing', message: 'missing box' };
-      return box;
-    },
-    async createBox(spec) {
-      const key = `${spec.allocationId}:${spec.launchGeneration}`;
-      let box = boxes.get(key);
-      const created = !box;
-      if (!box) {
-        box = {
-          allocationId: spec.allocationId,
-          launchGeneration: spec.launchGeneration,
-          name: `alpi-${spec.allocationId}-g${spec.launchGeneration}`,
-          nativeId: `native-${++counter}`,
-          running: false,
-        };
-        boxes.set(key, box);
-      }
-      return { allocationId: box.allocationId, launchGeneration: box.launchGeneration,
-        name: box.name, nativeId: box.nativeId, created };
-    },
-    async inspect(ref) { return info(adapter.boxFor(ref)); },
-    async start(ref) { adapter.boxFor(ref).running = true; return adapter.inspect(ref); },
-    async stop(ref) { adapter.boxFor(ref).running = false; return adapter.inspect(ref); },
-    async destroy(ref) {
-      const box = adapter.boxFor(ref);
-      boxes.delete(`${ref.allocationId}:${ref.launchGeneration}`);
-      return { destroyed: true, alreadyGone: false, allocationId: ref.allocationId,
-        launchGeneration: ref.launchGeneration, name: ref.name, nativeId: box.nativeId };
-    },
-    async listOwned() { return [...boxes.values()].map(info); },
-    async exec() {
-      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false,
-        timedOut: false, cancelled: false, executionId: 'exec-1' };
-    },
-    async probe() {
-      return { available: true, version: '0.14.1',
-        capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-          'list-owned', 'exec', 'pty'] };
-    },
-    async close() {},
-  };
-  return adapter;
-}
-
-function fixtureProfileResolver() {
-  return async ({ engine, profile }) => ({
-    engine,
-    profile,
-    qualified: true,
-    available: true,
-    engineVersion: '0.14.1',
-    imageDigest: 'sha256:' + 'a'.repeat(64),
-    limits: { vcpus: 2, memoryMiB: 2048, diskMiB: 10240 },
-    networkMode: 'disabled',
-    capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-      'list-owned', 'exec', 'pty'],
-  });
-}
-
-function devTestRegistry() {
-  const registry = createEngineRegistry({ allowTestAdapters: true });
-  registry.install({ id: 'fixture', testOnly: true, factory: async () => fixtureEngineAdapter() });
-  return registry;
-}
-
 async function tempFixture(t, label) {
-  const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), `${label}-`));
-  t.after(() => fs.rm(parent, { recursive: true, force: true }));
-  // The layout stays flat: the daemon refuses state directories whose
-  // administration socket path would exceed 100 bytes, and the macOS temp
-  // root is already long.
-  const stateDir = path.join(parent, 'state');
-  const configDir = path.join(parent, 'config');
-  const keyFile = path.join(parent, 'context.key');
-  const receiptFile = path.join(parent, 'job-receipt.json');
-  // The context key lives outside the config directory, exactly as the
-  // packaged CLI requires; the state and config directories are created by
-  // the server and the client store with their private modes.
-  await fs.writeFile(keyFile, randomBytes(32), { mode: 0o600 });
+  const fixture = await tempClientFixture(t, label);
   return {
-    root: parent,
-    stateDir,
-    configDir,
-    keyFile,
-    receiptFile,
+    ...fixture,
+    receiptFile: path.join(fixture.root, 'job-receipt.json'),
     clientEnv: {
-      ...process.env,
-      ALPI_CONFIG_DIR: configDir,
-      ALPI_CONTEXT_KEY_FILE: keyFile,
-      // Test-only affordance: the helper's ack-boundary audit opens the
-      // server's work store from the fresh client process at the sever
-      // instant, proving the admission committed before the response byte.
-      ALPI_TEST_SERVER_STATE_DIR: stateDir,
+      ...fixture.clientEnv,
+      // The fresh process audits the committed admission at the sever instant.
+      ALPI_TEST_SERVER_STATE_DIR: fixture.stateDir,
     },
   };
 }
@@ -189,37 +89,13 @@ function freePort() {
   });
 }
 
-function runNode(args, env, timeoutMs = 45000) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
-    });
-  });
-}
-
 function lastJsonLine(stdout) {
   const lines = stdout.trim().split('\n');
   return JSON.parse(lines[lines.length - 1]);
 }
 
 async function pairPersistedContext(t, fixture, invite, name) {
-  const invitePath = path.join(fixture.root, `invite-${name}.json`);
-  await fs.writeFile(invitePath, JSON.stringify(invite), { mode: 0o600 });
-  const result = await runNode(
-    [CLIENT_BIN, 'pair', '--name', name, '--invite-file', invitePath],
-    fixture.clientEnv,
-  );
+  const result = await pairWithCli(fixture, invite, name);
   assert.equal(result.code, 0, `pairing ${name} exited ${result.code}: ${result.stderr}`);
 }
 
@@ -280,18 +156,10 @@ test('a fresh client process reattaches with the persisted credential and reache
   const fixture = await tempFixture(t, 'jr-ack');
   const engine = fixtureEngineAdapter();
   const port = await freePort();
-  const open = () => startServer({
+  const open = () => startFixtureServer({
     stateDir: fixture.stateDir,
     port,
-    handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+    withEngine: (_record, use) => use(engine),
   });
   const server = await open();
   t.after(async () => { await server.close(); });
@@ -441,18 +309,10 @@ test('two concurrent first-time submissions with the same key through the packag
   const fixture = await tempFixture(t, 'jr-race');
   const engine = fixtureEngineAdapter();
   const port = await freePort();
-  const server = await startServer({
+  const server = await startFixtureServer({
     stateDir: fixture.stateDir,
     port,
-    handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+    withEngine: (_record, use) => use(engine),
   });
   t.after(async () => { await server.close(); });
 
@@ -509,18 +369,10 @@ test('the reconnect converges after a server restart between the drop and the re
   // The fixed port keeps the persisted origin valid across the restart, as
   // it would be for the packaged daemon's default port.
   const port = await freePort();
-  const open = () => startServer({
+  const open = () => startFixtureServer({
     stateDir: fixture.stateDir,
     port,
-    handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+    withEngine: (_record, use) => use(engine),
   });
   let server = await open();
   t.after(async () => { if (server) await server.close(); });
@@ -567,18 +419,10 @@ test('a drop that may land before the server reads the request still converges o
   const fixture = await tempFixture(t, 'jr-mid');
   const engine = fixtureEngineAdapter();
   const port = await freePort();
-  const server = await startServer({
+  const server = await startFixtureServer({
     stateDir: fixture.stateDir,
     port,
-    handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+    withEngine: (_record, use) => use(engine),
   });
   t.after(async () => { await server.close(); });
 

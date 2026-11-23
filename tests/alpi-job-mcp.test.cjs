@@ -8,123 +8,30 @@
 // transport.
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
-const { randomBytes, randomUUID } = require('node:crypto');
+const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { createInterface } = require('node:readline');
 const { test } = require('node:test');
 
-const { startServer } = require('../packages/alpi-server/src/daemon.cjs');
+const {
+  fixtureEngineAdapter, startFixtureServer, tempClientFixture, pairWithCli
+} = require('./helpers/alpi-job-fixture.cjs');
+
 const { issuePairing } = require('../packages/alpi-server/src/admin-client.cjs');
 const { createClient } = require('../packages/alpi-client/src/client.cjs');
 const { openStore } = require('../packages/alpi-client/src/context.cjs');
 const { createEngineRegistry } = require('../packages/alpi-server/src/engines/registry.cjs');
-const { openHostResources } = require('../packages/alpi-server/src/host-resources.cjs');
 const { openWorkStore } = require('../packages/alpi-server/src/work-store.cjs');
 
 const PROJECT = 'mcp-job-project';
 const CLIENT_BIN = path.resolve(__dirname, '../packages/alpi-client/bin/alpi.cjs');
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function fixtureEngineAdapter() {
-  const boxes = new Map();
-  const destroyed = [];
-  let counter = 0;
-  const info = (box) => ({
-    allocationId: box.allocationId,
-    launchGeneration: box.launchGeneration,
-    name: box.name,
-    nativeId: box.nativeId,
-    state: box.running ? 'running' : 'stopped',
-    running: box.running,
-  });
-  const adapter = {
-    destroyed,
-    boxFor(ref) {
-      const box = boxes.get(`${ref.allocationId}:${ref.launchGeneration}`);
-      if (!box) throw { code: 'engine_box_missing', message: 'missing box' };
-      return box;
-    },
-    async createBox(spec) {
-      const key = `${spec.allocationId}:${spec.launchGeneration}`;
-      let box = boxes.get(key);
-      const created = !box;
-      if (!box) {
-        box = {
-          allocationId: spec.allocationId,
-          launchGeneration: spec.launchGeneration,
-          name: `alpi-${spec.allocationId}-g${spec.launchGeneration}`,
-          nativeId: `native-${++counter}`,
-          running: false,
-        };
-        boxes.set(key, box);
-      }
-      return { allocationId: box.allocationId, launchGeneration: box.launchGeneration,
-        name: box.name, nativeId: box.nativeId, created };
-    },
-    async inspect(ref) { return info(adapter.boxFor(ref)); },
-    async start(ref) { adapter.boxFor(ref).running = true; return adapter.inspect(ref); },
-    async stop(ref) { adapter.boxFor(ref).running = false; return adapter.inspect(ref); },
-    async destroy(ref) {
-      const box = adapter.boxFor(ref);
-      destroyed.push({ nativeId: box.nativeId, allocationId: ref.allocationId });
-      boxes.delete(`${ref.allocationId}:${ref.launchGeneration}`);
-      return { destroyed: true, alreadyGone: false, allocationId: ref.allocationId,
-        launchGeneration: ref.launchGeneration, name: ref.name, nativeId: box.nativeId };
-    },
-    async listOwned() { return [...boxes.values()].map(info); },
-    async exec() {
-      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false,
-        timedOut: false, cancelled: false, executionId: 'exec-1' };
-    },
-    async probe() {
-      return { available: true, version: '0.14.1',
-        capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-          'list-owned', 'exec', 'pty'] };
-    },
-    async close() {},
-  };
-  return adapter;
-}
-
-function fixtureProfileResolver() {
-  return async ({ engine, profile }) => ({
-    engine,
-    profile,
-    qualified: true,
-    available: true,
-    engineVersion: '0.14.1',
-    imageDigest: 'sha256:' + 'a'.repeat(64),
-    limits: { vcpus: 2, memoryMiB: 2048, diskMiB: 10240 },
-    networkMode: 'disabled',
-    capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-      'list-owned', 'exec', 'pty'],
-  });
-}
-
-async function runNode(args, env) {
-  const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const stdout = [];
-  child.stdout.on('data', (chunk) => stdout.push(chunk));
-  let stderr = '';
-  child.stderr.on('data', (chunk) => { stderr += chunk; });
-  const code = await once(child, 'close');
-  return { code: code[0], stdout: Buffer.concat(stdout).toString('utf8'), stderr };
-}
-
 test('the paired MCP bridge serves the job workflow on an explicit test engine', async (t) => {
-  const temp = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'alpi-job-mcp-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const stateDir = path.join(temp, 'state');
-  const env = {
-    ...process.env,
-    ALPI_CONFIG_DIR: path.join(temp, 'contexts'),
-    ALPI_CONTEXT_KEY_FILE: path.join(temp, 'context.key'),
-  };
-  await fs.writeFile(env.ALPI_CONTEXT_KEY_FILE, randomBytes(32), { mode: 0o600 });
+  const fixture = await tempClientFixture(t, 'alpi-job-mcp', { configName: 'contexts' });
+  const { stateDir, clientEnv: env } = fixture;
   // The test process itself opens the persisted context store with the same
   // disposable environment the CLI children receive.
   process.env.ALPI_CONFIG_DIR = env.ALPI_CONFIG_DIR;
@@ -135,24 +42,17 @@ test('the paired MCP bridge serves the job workflow on an explicit test engine',
   // A second selectable engine, so the identity-conflict path (sandbox
   // engine mismatch) is reachable past the registry gate.
   registry.install({ id: 'second', testOnly: true, factory: fixtureEngineAdapter });
-  const server = await startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: registry,
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(fixtureEngineAdapter()),
-      },
-    }),
+  const server = await startFixtureServer({
+    stateDir,
+    engines: registry,
+    withEngine: (_record, use) => use(fixtureEngineAdapter({ trackDestroyed: true })),
   });
   t.after(async () => { await server.close(); });
 
   const invite = await issuePairing({ stateDir, project: PROJECT, role: 'runner' });
-  const invitePath = path.join(temp, 'invite.json');
-  await fs.writeFile(invitePath, JSON.stringify(invite), { mode: 0o600 });
-  const paired = await runNode(
-    [CLIENT_BIN, 'pair', '--name', 'mcp-job', '--invite-file', invitePath], env);
+  const paired = await pairWithCli(fixture, invite, 'mcp-job', {
+    invitationFile: 'invite.json', timeoutMs: 0,
+  });
   assert.equal(paired.code, 0, paired.stderr);
   assert.ok(!paired.stdout.includes(invite.invitation), 'the invitation is never echoed');
 

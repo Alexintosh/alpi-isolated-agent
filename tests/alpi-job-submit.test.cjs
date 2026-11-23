@@ -29,11 +29,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
+
+const {
+  fixtureEngineAdapter, fixtureProfileResolver, devTestRegistry, startFixtureServer,
+  tempStateDir, enrollContext
+} = require('./helpers/alpi-job-fixture.cjs');
 const { spawn } = require('node:child_process');
 
 const { startServer } = require('../packages/alpi-server/src/daemon.cjs');
-const { issuePairing } = require('../packages/alpi-server/src/admin-client.cjs');
-const { requestJson } = require('../packages/alpi-client/src/transport.cjs');
 const { createClient } = require('../packages/alpi-client/src/client.cjs');
 const {
   createEngineRegistry,
@@ -44,111 +47,13 @@ const { openWorkStore } = require('../packages/alpi-server/src/work-store.cjs');
 
 const PROJECT = 'test-project';
 
-function fixtureEngineAdapter() {
-  const boxes = new Map();
-  const destroyed = [];
-  let counter = 0;
-  const info = (box) => ({
-    allocationId: box.allocationId,
-    launchGeneration: box.launchGeneration,
-    name: box.name,
-    nativeId: box.nativeId,
-    state: box.running ? 'running' : 'stopped',
-    running: box.running,
-  });
-  const adapter = {
-    destroyed,
-    boxFor(ref) {
-      const box = boxes.get(`${ref.allocationId}:${ref.launchGeneration}`);
-      if (!box) throw { code: 'engine_box_missing', message: 'missing box' };
-      return box;
-    },
-    async createBox(spec) {
-      const key = `${spec.allocationId}:${spec.launchGeneration}`;
-      let box = boxes.get(key);
-      const created = !box;
-      if (!box) {
-        box = {
-          allocationId: spec.allocationId,
-          launchGeneration: spec.launchGeneration,
-          name: `alpi-${spec.allocationId}-g${spec.launchGeneration}`,
-          nativeId: `native-${++counter}`,
-          running: false,
-        };
-        boxes.set(key, box);
-      }
-      return { allocationId: box.allocationId, launchGeneration: box.launchGeneration,
-        name: box.name, nativeId: box.nativeId, created };
-    },
-    async inspect(ref) { return info(adapter.boxFor(ref)); },
-    async start(ref) { adapter.boxFor(ref).running = true; return adapter.inspect(ref); },
-    async stop(ref) { adapter.boxFor(ref).running = false; return adapter.inspect(ref); },
-    async destroy(ref) {
-      const box = adapter.boxFor(ref);
-      destroyed.push({ nativeId: box.nativeId, allocationId: ref.allocationId });
-      boxes.delete(`${ref.allocationId}:${ref.launchGeneration}`);
-      return { destroyed: true, alreadyGone: false, allocationId: ref.allocationId,
-        launchGeneration: ref.launchGeneration, name: ref.name, nativeId: box.nativeId };
-    },
-    async listOwned() { return [...boxes.values()].map(info); },
-    async exec() {
-      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false,
-        timedOut: false, cancelled: false, executionId: 'exec-1' };
-    },
-    async probe() {
-      return { available: true, version: '0.14.1',
-        capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-          'list-owned', 'exec', 'pty'] };
-    },
-    async close() {},
-  };
-  return adapter;
-}
-
-function fixtureProfileResolver() {
-  return async ({ engine, profile }) => ({
-    engine,
-    profile,
-    qualified: true,
-    available: true,
-    engineVersion: '0.14.1',
-    imageDigest: 'sha256:' + 'a'.repeat(64),
-    limits: { vcpus: 2, memoryMiB: 2048, diskMiB: 10240 },
-    networkMode: 'disabled',
-    capabilities: ['create', 'inspect', 'start', 'stop', 'destroy',
-      'list-owned', 'exec', 'pty'],
-  });
-}
-
-function devTestRegistry() {
-  const registry = createEngineRegistry({ allowTestAdapters: true });
-  registry.install({ id: 'fixture', testOnly: true, factory: async () => fixtureEngineAdapter() });
-  registry.install({ id: 'other', factory: async () => fixtureEngineAdapter() });
-  return registry;
-}
-
-async function tempStateDir(t, label) {
-  const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), `${label}-`));
-  t.after(() => fs.rm(parent, { recursive: true, force: true }));
-  return path.join(parent, 'state');
-}
-
 async function enroll(stateDir, server, role) {
-  const invite = await issuePairing({ stateDir, project: PROJECT, role });
-  const endpoint = { origin: server.origin, fingerprint: invite.fingerprint };
-  const response = await requestJson({
-    ...endpoint, method: 'POST', path: '/v1/pair/exchange',
-    body: { invitation: invite.invitation, name: role },
-  });
-  return createClient({
-    ...endpoint, serverId: invite.serverId, project: PROJECT, role,
-    credential: response.credential, credentialExpiresAt: response.expiresAt,
-  });
+  return createClient(await enrollContext(stateDir, server, PROJECT, role));
 }
 
 test('packaged production path never admits a job on a test engine', async (t) => {
   const stateDir = await tempStateDir(t, 'js-prod');
-  const engine = fixtureEngineAdapter();
+  const engine = fixtureEngineAdapter({ trackDestroyed: true });
   // Even an adversarial host that qualifies the test engine cannot make the
   // packaged production admission path accept it.
   const server = await startServer({
@@ -193,17 +98,11 @@ test('packaged production path never admits a job on a test engine', async (t) =
 
 test('packaged job submission is durable before ack, engine-scoped, and survives restart', async (t) => {
   const stateDir = await tempStateDir(t, 'js-dev');
-  const engine = fixtureEngineAdapter();
-  const open = () => startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+  const engine = fixtureEngineAdapter({ trackDestroyed: true });
+  const open = () => startFixtureServer({
+    stateDir,
+    engines: devTestRegistry(['other']),
+    withEngine: (_record, use) => use(engine),
   });
   const server = await open();
   const runner = await enroll(stateDir, server, 'runner');
@@ -285,17 +184,11 @@ test('packaged job submission is durable before ack, engine-scoped, and survives
 
 test('a cancelled job releases its disposable workspace while the receipt stays durable', async (t) => {
   const stateDir = await tempStateDir(t, 'js-lifecycle');
-  const engine = fixtureEngineAdapter();
-  const server = await startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+  const engine = fixtureEngineAdapter({ trackDestroyed: true });
+  const server = await startFixtureServer({
+    stateDir,
+    engines: devTestRegistry(['other']),
+    withEngine: (_record, use) => use(engine),
   });
   t.after(async () => { await server.close(); });
   const runner = await enroll(stateDir, server, 'runner');
@@ -356,17 +249,11 @@ test('a cancelled job releases its disposable workspace while the receipt stays 
 
 test('an observer cannot cancel, duplicate route parameters are rejected, and concurrent duplicates serialize', async (t) => {
   const stateDir = await tempStateDir(t, 'js-guard');
-  const engine = fixtureEngineAdapter();
-  const server = await startServer({
-    stateDir, port: 0, handleSignals: false,
-    openResources: (options) => openHostResources({
-      ...options,
-      engines: devTestRegistry(),
-      sandboxHost: {
-        resolveProfile: fixtureProfileResolver(),
-        withEngine: (_record, use) => use(engine),
-      },
-    }),
+  const engine = fixtureEngineAdapter({ trackDestroyed: true });
+  const server = await startFixtureServer({
+    stateDir,
+    engines: devTestRegistry(['other']),
+    withEngine: (_record, use) => use(engine),
   });
   t.after(async () => { await server.close(); });
   const runner = await enroll(stateDir, server, 'runner');

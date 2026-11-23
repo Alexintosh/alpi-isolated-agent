@@ -18,6 +18,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { resourceRequest } = require('./shared/resource-routes.cjs');
 
 const MAX_CHUNK_BYTES = 32 * 1024;
 const MAX_BYTES = 1024 * 1024 * 1024;
@@ -1350,20 +1351,22 @@ function createHttpApi({
   if (typeof origin !== 'string' || typeof fingerprint !== 'string') {
     clientFail('invalid_input', 'Origin and fingerprint are required.');
   }
-  const call = (method, requestPath, body) =>
-    requestJson({
+  const call = (name, params, body) => {
+    const route = resourceRequest(name, params);
+    return requestJson({
       origin,
       fingerprint,
-      method,
-      path: requestPath,
+      method: route.method,
+      path: route.path,
       credential,
       body,
       timeoutMs,
     });
+  };
 
   return {
     beginUpload(input) {
-      return call('POST', '/v1/artifacts', {
+      return call('beginUpload', {}, {
         requestId: normalizeUuid(input.requestId),
         totalLength: input.totalLength,
         sha256: input.sha256,
@@ -1371,22 +1374,22 @@ function createHttpApi({
     },
     appendChunk(input) {
       return call(
-        'POST',
-        `/v1/artifacts/${normalizeUuid(input.artifactId)}/chunks`,
+        'appendChunk',
+        { artifactId: normalizeUuid(input.artifactId) },
         { offset: input.offset, data: input.data }
       );
     },
     finishUpload(input) {
       return call(
-        'POST',
-        `/v1/artifacts/${normalizeUuid(input.artifactId)}/finish`,
+        'finishUpload',
+        { artifactId: normalizeUuid(input.artifactId) },
         {}
       );
     },
     getArtifact(input) {
       return call(
-        'GET',
-        `/v1/artifacts/${normalizeUuid(input.artifactId)}`,
+        'getArtifact',
+        { artifactId: normalizeUuid(input.artifactId) },
         undefined
       );
     },
@@ -1396,20 +1399,20 @@ function createHttpApi({
         clientFail('invalid_input', 'Invalid chunk offset.');
       }
       return call(
-        'GET',
-        `/v1/artifacts/${id}/chunks/${input.offset}`,
+        'readChunk',
+        { artifactId: id, offset: String(input.offset) },
         undefined
       );
     },
     acknowledge(input) {
       return call(
-        'POST',
-        `/v1/artifacts/${normalizeUuid(input.artifactId)}/acknowledge`,
+        'acknowledge',
+        { artifactId: normalizeUuid(input.artifactId) },
         {}
       );
     },
     registerJobOutput(input) {
-      return call('POST', `/v1/jobs/${normalizeUuid(input.jobId)}/outputs`, {
+      return call('registerJobOutput', { jobId: normalizeUuid(input.jobId) }, {
         requestId: normalizeUuid(input.requestId),
         totalLength: input.totalLength,
         sha256: input.sha256,
@@ -1419,8 +1422,8 @@ function createHttpApi({
     },
     getJobArtifacts(input) {
       return call(
-        'GET',
-        `/v1/jobs/${normalizeUuid(input.jobId)}/outputs`,
+        'getJobArtifacts',
+        { jobId: normalizeUuid(input.jobId) },
         undefined
       );
     },
