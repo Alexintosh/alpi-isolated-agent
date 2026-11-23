@@ -2305,7 +2305,7 @@ class WorkStore {
       if (!job) notFound();
       return this.db
         .prepare('SELECT * FROM job_artifacts WHERE job_id = ?')
-        .all(jobId)
+        .all(id)
         .map(jobArtifactReceipt);
     } catch (error) {
       throw translateError(error);

@@ -410,3 +410,149 @@ test('job output registration enforces role, body shape and job scope', async (t
   assert.equal(baseDir.length > 0, true);
 });
 
+// The registerJobOutput replay branch is the subtle part of the route: a
+// replay of a lost reply must resume the stored upload instead of starting a
+// second artifact, and it must never republish bytes that disagree with the
+// declared digest. This matrix pins the three replay outcomes:
+//   (a) exact replay of a completed registration returns the same receipt;
+//   (b) replay that resumes an interrupted upload with differing suffix
+//       bytes fails digest_mismatch at finish and republishes nothing;
+//   (c) replay with changed metadata (sha256 or length) conflicts at begin,
+//       before any byte handling.
+test('registerJobOutput replay: exact replay is idempotent, differing suffix bytes fail at finish, changed metadata conflicts at begin', async (t) => {
+  const { patchBytes } = await buildBaseAndPatch(t);
+  const stateDir = await tempStateDir(t, 'bvp-replay');
+  const server = await startServer({
+    stateDir, port: 0, handleSignals: false,
+    openResources: (options) => openHostResources({
+      ...options,
+      engines: devTestRegistry(),
+      sandboxHost: {
+        resolveProfile: fixtureProfileResolver(),
+        withEngine: (_record, use) => use(fixtureEngineAdapter()),
+      },
+    }),
+  });
+  t.after(async () => { await server.close(); });
+  const runner = await enroll(stateDir, server, 'runner');
+
+  const sandbox = await runner.client.requestResource('createSandbox', {}, {
+    requestId: randomUUID(), engine: 'fixture', profile: 'dev',
+  });
+  const job = await runner.client.requestResource('submitJob',
+    { sandboxId: sandbox.sandboxId },
+    { requestId: randomUUID(), engine: 'fixture', payload: { prompt: 'replay' } });
+
+  const declared = {
+    totalLength: patchBytes.length,
+    sha256: recomputeDigest(patchBytes),
+    label: PATCH_LABEL,
+    data: patchBytes.toString('base64'),
+  };
+
+  // (a) An exact replay of a completed registration is idempotent: the
+  // identical receipt comes back and no second artifact row appears.
+  const requestId = randomUUID();
+  const first = await runner.client.requestResource('registerJobOutput',
+    { jobId: job.jobId }, { requestId, ...declared });
+  assert.equal(first.requestId, requestId);
+  assert.match(first.artifactId, /^[0-9a-f-]{36}$/);
+  assert.equal(first.sha256, declared.sha256);
+  assert.equal(first.totalLength, declared.totalLength);
+  const replay = await runner.client.requestResource('registerJobOutput',
+    { jobId: job.jobId }, { requestId, ...declared });
+  assert.deepEqual(replay, first);
+  const receiptsAfterReplay = await runner.artifacts.listJobOutputs({ jobId: job.jobId });
+  assert.equal(receiptsAfterReplay.length, 1);
+  assert.equal(receiptsAfterReplay[0].artifactId, first.artifactId);
+
+  // (c) A replay of the same request key with changed metadata conflicts at
+  // begin, before any byte is read or stored: a changed declared sha256 and
+  // a changed declared totalLength are both request-key reuse conflicts.
+  await assert.rejects(
+    runner.client.requestResource('registerJobOutput', { jobId: job.jobId }, {
+      requestId, ...declared, sha256: recomputeDigest(Buffer.from('differing')),
+    }),
+    { code: 'HTTP_STATUS', statusCode: 409, resourceCode: 'conflict' }
+  );
+  await assert.rejects(
+    runner.client.requestResource('registerJobOutput', { jobId: job.jobId }, {
+      requestId, ...declared,
+      totalLength: declared.totalLength - 1,
+      data: patchBytes.subarray(0, declared.totalLength - 1).toString('base64'),
+    }),
+    { code: 'HTTP_STATUS', statusCode: 409, resourceCode: 'conflict' }
+  );
+
+  // (b) A replay that resumes an interrupted upload with differing suffix
+  // bytes fails digest_mismatch at finish and republishes nothing. The
+  // interrupted first attempt is prepared at the store level: its request
+  // fingerprint and a matching byte prefix are durable, while the reply and
+  // the finish never happened. The route replay must resume from the stored
+  // prefix (a full re-append from offset 0 would fail as a chunk conflict,
+  // not as a digest mismatch) and the finish re-hash must reject the
+  // assembled bytes because their suffix differs from the declared digest.
+  const interruptedRequestId = randomUUID();
+  const prefixLength = Math.floor(patchBytes.length / 2);
+  const preparer = openArtifactStore(stateDir);
+  let interrupted;
+  try {
+    interrupted = preparer.beginUpload({
+      project: PROJECT, requestId: interruptedRequestId,
+      totalLength: declared.totalLength, sha256: declared.sha256,
+    });
+    preparer.appendChunk({
+      project: PROJECT, artifactId: interrupted.artifactId,
+      offset: 0, data: patchBytes.subarray(0, prefixLength).toString('base64'),
+    });
+  } finally {
+    preparer.close();
+  }
+  assert.equal(interrupted.state, 'uploading');
+
+  const tampered = Buffer.from(patchBytes);
+  tampered[prefixLength] = tampered[prefixLength] ^ 0x20;
+  assert.notEqual(tampered.toString('base64'), declared.data);
+  await assert.rejects(
+    runner.client.requestResource('registerJobOutput', { jobId: job.jobId }, {
+      requestId: interruptedRequestId, ...declared,
+      data: tampered.toString('base64'),
+    }),
+    { code: 'HTTP_STATUS', statusCode: 422, resourceCode: 'digest_mismatch' }
+  );
+
+  // Nothing was republished: the interrupted artifact failed closed with its
+  // chunk bytes discarded, the job receipt list is unchanged, and the exact
+  // bytes registered in (a) remain the job's only published output.
+  const peerArtifacts = openArtifactStore(stateDir);
+  const peerWork = openWorkStore(stateDir);
+  try {
+    const failed = peerArtifacts.getArtifact({
+      project: PROJECT, artifactId: interrupted.artifactId,
+    });
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.chunkCount, 0);
+    assert.equal(failed.publishedAt, null);
+    const published = peerArtifacts.listArtifacts(PROJECT)
+      .filter(entry => entry.state === 'published');
+    assert.deepEqual(published.map(entry => entry.artifactId), [first.artifactId]);
+    const receipts = peerWork.getJobArtifacts(
+      { project: PROJECT, clientId: 'peer-reader', role: 'runner' }, job.jobId);
+    assert.deepEqual(receipts.map(entry => entry.artifactId), [first.artifactId]);
+    // The store queries the same normalized job id it validated: a padded
+    // id resolves the same receipts instead of silently missing them.
+    const padded = peerWork.getJobArtifacts(
+      { project: PROJECT, clientId: 'peer-reader', role: 'runner' },
+      `  ${job.jobId}  `);
+    assert.deepEqual(padded.map(entry => entry.artifactId), [first.artifactId]);
+  } finally {
+    peerArtifacts.close();
+    peerWork.close();
+  }
+  const stillReadable = await runner.artifacts.readPatchBytes({
+    jobId: job.jobId, artifactId: first.artifactId,
+    totalLength: first.totalLength, sha256: first.sha256,
+  });
+  assert.ok(stillReadable.data.equals(patchBytes), 'the registered bytes are unchanged');
+});
+
