@@ -7,10 +7,15 @@
 // short, safe tool messages. Nothing here interprets guest or server payload
 // data; every result is untrusted output for the caller.
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// JSON-Schema patterns compile without flags, so case-insensitivity is
+// spelled out in the source: the server route regex accepts both cases and
+// local validation must not fail closed on uppercase UUIDs.
+const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/i;
 const ENGINE_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
 const MAX_PAYLOAD_JSON_BYTES = 16 * 1024;
-const MAX_EVENT_PAGE = 128;
+// The shared events route bounds its page to 100 events; advertising a
+// larger client maximum would silently do nothing beyond the server bound.
+const MAX_EVENT_PAGE = 100;
 
 const uuidField = (description) => ({
   type: 'string', description: description + ' At most 36 UTF-8 bytes.',
@@ -57,8 +62,10 @@ const JOB_TOOL_DEFINITIONS = Object.freeze([
     name: 'alpi_job_events',
     description:
       'Read a bounded page of ordered job events after an exclusive cursor. ' +
-      'Pass the returned nextSeq as after on the next read; reset or gap flags ' +
-      'mean the cursor no longer matches the retained stream.',
+      'Pass the returned nextSeq as after on the next read; when limit trims ' +
+      'the server page, nextSeq tracks the last returned event so resuming ' +
+      'skips nothing. Reset or gap flags mean the cursor no longer matches ' +
+      'the retained stream.',
     inputSchema: Object.freeze({
       type: 'object',
       properties: Object.freeze({
@@ -260,7 +267,17 @@ function createJobWorkTools(client) {
             });
             if (input.limit !== undefined && page && Array.isArray(page.events) &&
                 page.events.length > input.limit) {
-              return result({ ...page, events: page.events.slice(0, input.limit) });
+              const events = page.events.slice(0, input.limit);
+              // The shared route's nextSeq tracks its own full page. The
+              // trimmed result must resume from the last event it actually
+              // returned, or a caller following nextSeq would silently skip
+              // the trimmed tail. firstSeq, lastSeq, gap and reset describe
+              // the retained stream, which the trim does not change.
+              return result({
+                ...page,
+                events,
+                nextSeq: events[events.length - 1].seq,
+              });
             }
             return result(page);
           }

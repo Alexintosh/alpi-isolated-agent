@@ -739,3 +739,80 @@ test('job tools map client failures to short safe messages', async () => {
   await harness.done;
 });
 
+test('job events trim a larger page without skipping the trimmed tail', async () => {
+  // Stand-in for the shared route: server pages hold three events and
+  // nextSeq tracks the last event of the full page, exactly like
+  // publicEvents does for the packaged getEvents route.
+  const stream = Array.from({ length: 7 }, (_, index) => ({
+    type: 'job.log', seq: index + 1, jobId: ID, createdAt: `t${index + 1}`,
+  }));
+  const requests = [];
+  const client = {
+    requestResource: async (name, params) => {
+      assert.equal(name, 'getEvents');
+      const after = Number(params.after);
+      const events = stream.filter((event) => event.seq > after).slice(0, 3);
+      requests.push({ after, pageEvents: events.map((event) => event.seq) });
+      return {
+        events,
+        nextSeq: events.at(-1)?.seq ?? 7,
+        firstSeq: 1, lastSeq: 7, gap: false, reset: false,
+      };
+    },
+  };
+  const harness = jobHarness(client);
+  const call = (id, args) => harness.send({
+    jsonrpc: '2.0', id, method: 'tools/call',
+    params: { name: 'alpi_job_events', arguments: args },
+  });
+
+  let cursor = 0;
+  const seen = [];
+  for (let id = 110; ; id += 1) {
+    call(id, { jobId: ID, after: cursor, limit: 2 });
+    const response = await harness.waitForId(id);
+    assert.ok(!response.result.isError, response.result.content?.[0]?.text);
+    const page = response.result.structuredContent;
+    assert.ok(page.events.length <= 2);
+    if (page.events.length === 2) {
+      // A trimmed page resumes at the last event it actually returned.
+      assert.equal(page.nextSeq, page.events.at(-1).seq);
+    }
+    seen.push(...page.events.map((event) => event.seq));
+    cursor = page.nextSeq;
+    if (page.events.length === 0) break;
+  }
+  assert.deepEqual(seen, [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(cursor, 7);
+  assert.deepEqual(requests.map((request) => request.after), [0, 2, 4, 6, 7]);
+  harness.end();
+  await harness.done;
+});
+
+test('job tools accept uppercase UUIDs like the server routes do', async () => {
+  const UPPER = 'ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB';
+  const calls = [];
+  const client = {
+    requestResource: async (name, params, body) => {
+      calls.push([name, params, body]);
+      return { jobId: UPPER, disposition: 'acknowledged' };
+    },
+  };
+  const harness = jobHarness(client);
+  const call = (id, name, args) => harness.send({
+    jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+  });
+  call(115, 'alpi_job_submit', { sandboxId: UPPER, engine: 'fixture', requestId: UPPER });
+  const submit = await harness.waitForId(115);
+  assert.ok(!submit.result.isError, submit.result.content?.[0]?.text);
+  call(116, 'alpi_job_get', { jobId: UPPER });
+  const got = await harness.waitForId(116);
+  assert.ok(!got.result.isError, got.result.content?.[0]?.text);
+  assert.deepEqual(calls, [
+    ['submitJob', { sandboxId: UPPER }, { requestId: UPPER, engine: 'fixture' }],
+    ['getJob', { jobId: UPPER }, undefined],
+  ]);
+  harness.end();
+  await harness.done;
+});
+

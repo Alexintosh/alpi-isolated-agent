@@ -271,6 +271,54 @@ test('the paired MCP bridge serves the job workflow on an explicit test engine',
     assert.ok(mismatch.result.content[0].text.includes('engine_identity_conflict'),
       mismatch.result.content[0].text);
 
+    // A second durable event, appended through the real store, gives the
+    // events read a page-boundary continuation to prove: with limit below
+    // the page, the first read must resume at the last returned event so
+    // the appended event is observed instead of silently skipped.
+    const writer = openWorkStore(stateDir);
+    try {
+      writer.appendEvent(
+        { project: PROJECT, clientId: 'peer-writer', role: 'runner' },
+        { type: 'job.log', jobId: job.jobId, data: { text: 'continuation marker' } },
+      );
+    } finally {
+      writer.close();
+    }
+
+    const paged = await toolsCall(9, 'alpi_job_events',
+      { jobId: job.jobId, after: 0, limit: 1 });
+    assert.ok(!paged.result.isError, JSON.stringify(paged.result));
+    assert.deepEqual(
+      paged.result.structuredContent.events.map((event) => event.type),
+      ['job.submitted'],
+    );
+    assert.equal(paged.result.structuredContent.nextSeq, 1);
+
+    const continued = await toolsCall(10, 'alpi_job_events',
+      { jobId: job.jobId, after: paged.result.structuredContent.nextSeq, limit: 1 });
+    assert.ok(!continued.result.isError, JSON.stringify(continued.result));
+    assert.deepEqual(
+      continued.result.structuredContent.events.map((event) => event.type),
+      ['job.log'],
+    );
+    assert.equal(continued.result.structuredContent.nextSeq, 2);
+
+    const drained = await toolsCall(11, 'alpi_job_events',
+      { jobId: job.jobId, after: continued.result.structuredContent.nextSeq, limit: 1 });
+    assert.ok(!drained.result.isError, JSON.stringify(drained.result));
+    assert.deepEqual(drained.result.structuredContent.events, []);
+    assert.equal(drained.result.structuredContent.nextSeq, 2);
+
+    // Uppercase UUIDs are valid to the server routes; the bridge must accept
+    // them too instead of failing closed with a local argument error. The
+    // not-found verdict proves the request crossed local validation.
+    const upperGet = await toolsCall(12, 'alpi_job_get', {
+      jobId: 'ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB',
+    });
+    assert.equal(upperGet.result.isError, true);
+    assert.ok(upperGet.result.content[0].text.includes('not_found'),
+      upperGet.result.content[0].text);
+
     mcp.stdin.end();
     await once(mcp, 'close');
   } finally {
