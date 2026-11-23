@@ -7,14 +7,31 @@
 // short, safe tool messages. Nothing here interprets guest or server payload
 // data; every result is untrusted output for the caller.
 
+// ---- Validation constants ----
+// Hand-rolled, dependency-free bounds mirroring the packaged server
+// routes: local validation admits exactly what the server would (or
+// rejects early what it never could) without importing server code.
+
 // JSON-Schema patterns compile without flags, so case-insensitivity is
-// spelled out in the source: the server route regex accepts both cases and
-// local validation must not fail closed on uppercase UUIDs.
+// spelled out in the source: the server route regex accepts both cases
+// (job-service.cjs uses the same shape with the /i flag) and local
+// validation must not fail closed on uppercase UUIDs.
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/i;
+
+// Engine identifiers use the server's own ENGINE_ID_PATTERN
+// (job-service.cjs), so a locally rejected engine can never be admitted.
 const ENGINE_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
+
+// Job payloads travel inside the submit request body, which the daemon
+// bounds as a whole (MAX_BODY_BYTES in daemon.cjs) before the work store
+// applies its own payload bound (MAX_JSON_BYTES in work-store.cjs). The
+// local cap bounds what the tool serializes before any round trip; the
+// server remains the admission authority.
 const MAX_PAYLOAD_JSON_BYTES = 16 * 1024;
-// The shared events route bounds its page to 100 events; advertising a
-// larger client maximum would silently do nothing beyond the server bound.
+
+// The shared events route takes no caller limit: it pages at most
+// DEFAULT_POLL_LIMIT = 100 events (work-store.cjs), so a larger client
+// maximum would silently do nothing beyond the server bound.
 const MAX_EVENT_PAGE = 100;
 
 const uuidField = (description) => ({
@@ -233,12 +250,52 @@ function failure(error) {
   };
 }
 
+// One projection per advertised tool, keyed by tool name. Each handler is
+// a thin, stateless shaping of one shared client route: input is already
+// validated, results are the server's own projection, and the run wrapper
+// below maps failures. Nothing here interprets guest or server payload
+// data.
+const JOB_TOOL_HANDLERS = Object.freeze({
+  alpi_job_submit: async (client, input) => {
+    const body = { requestId: input.requestId, engine: input.engine };
+    if (input.payload !== undefined) body.payload = input.payload;
+    return result(await client.requestResource(
+      'submitJob', { sandboxId: input.sandboxId }, body));
+  },
+  alpi_job_get: async (client, input) =>
+    result(await client.requestResource('getJob', { jobId: input.jobId })),
+  alpi_job_events: async (client, input) => {
+    const page = await client.requestResource('getEvents', {
+      jobId: input.jobId, after: String(input.after ?? 0),
+    });
+    if (input.limit !== undefined && page && Array.isArray(page.events) &&
+        page.events.length > input.limit) {
+      const events = page.events.slice(0, input.limit);
+      // The shared route's nextSeq tracks its own full page. The
+      // trimmed result must resume from the last event it actually
+      // returned, or a caller following nextSeq would silently skip
+      // the trimmed tail. firstSeq, lastSeq, gap and reset describe
+      // the retained stream, which the trim does not change.
+      return result({
+        ...page,
+        events,
+        nextSeq: events[events.length - 1].seq,
+      });
+    }
+    return result(page);
+  },
+  alpi_job_lookup: async (client, input) =>
+    result(await client.requestResource('lookupJob', {}, { requestId: input.requestId })),
+});
+
 function createJobWorkTools(client) {
   if (!client || typeof client.requestResource !== 'function') {
     throw new Error('Invalid job work tool client.');
   }
   const tools = new Map();
   for (const definition of JOB_TOOL_DEFINITIONS) {
+    const handler = JOB_TOOL_HANDLERS[definition.name];
+    if (!handler) throw new Error('Missing job work tool handler.');
     tools.set(definition.name, {
       definition,
       run: async (args) => {
@@ -252,37 +309,7 @@ function createJobWorkTools(client) {
           };
         }
         try {
-          if (definition.name === 'alpi_job_submit') {
-            const body = { requestId: input.requestId, engine: input.engine };
-            if (input.payload !== undefined) body.payload = input.payload;
-            return result(await client.requestResource(
-              'submitJob', { sandboxId: input.sandboxId }, body));
-          }
-          if (definition.name === 'alpi_job_get') {
-            return result(await client.requestResource('getJob', { jobId: input.jobId }));
-          }
-          if (definition.name === 'alpi_job_events') {
-            const page = await client.requestResource('getEvents', {
-              jobId: input.jobId, after: String(input.after ?? 0),
-            });
-            if (input.limit !== undefined && page && Array.isArray(page.events) &&
-                page.events.length > input.limit) {
-              const events = page.events.slice(0, input.limit);
-              // The shared route's nextSeq tracks its own full page. The
-              // trimmed result must resume from the last event it actually
-              // returned, or a caller following nextSeq would silently skip
-              // the trimmed tail. firstSeq, lastSeq, gap and reset describe
-              // the retained stream, which the trim does not change.
-              return result({
-                ...page,
-                events,
-                nextSeq: events[events.length - 1].seq,
-              });
-            }
-            return result(page);
-          }
-          return result(await client.requestResource(
-            'lookupJob', {}, { requestId: input.requestId }));
+          return await handler(client, input);
         } catch (error) {
           return failure(error);
         }

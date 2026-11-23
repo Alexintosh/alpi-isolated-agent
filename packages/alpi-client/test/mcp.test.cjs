@@ -789,6 +789,82 @@ test('job events trim a larger page without skipping the trimmed tail', async ()
   await harness.done;
 });
 
+test('job events pass the server page through unchanged at the trim boundaries', async () => {
+  // The shared getEvents route takes no caller limit: it pages at most
+  // DEFAULT_POLL_LIMIT = 100 events (work-store.cjs) and, for a non-empty
+  // page, sets nextSeq to the last event it returned. The tool trims only
+  // when that page exceeds the requested limit, so when limit === page and
+  // at the advertised cap the server page must arrive untouched, nextSeq
+  // included. Each read is an independent boundary scenario over its own
+  // coherent stream.
+  const log = (seq) => ({ type: 'job.log', seq, jobId: ID, createdAt: `t${seq}` });
+  const scenarios = [
+    {
+      // Exact limit: five events remain and limit is 5, so the page
+      // length equals the limit. No trim runs and the server's own
+      // nextSeq (the last event it returned) is kept.
+      after: 4, limit: 5,
+      page: {
+        events: [5, 6, 7, 8, 9].map(log),
+        nextSeq: 9, firstSeq: 1, lastSeq: 9, gap: false, reset: false,
+      },
+    },
+    {
+      // Limit above page: the last two events meet a maximum limit. A
+      // server page can never exceed the 100-event route bound, so no
+      // trim is possible and the page passes through.
+      after: 7, limit: 100,
+      page: {
+        events: [8, 9].map(log),
+        nextSeq: 9, firstSeq: 1, lastSeq: 9, gap: false, reset: false,
+      },
+    },
+    {
+      // Limit at the cap against a full server page: the route pages at
+      // 100 events, so even its own full page equals the advertised
+      // maximum and the trim branch stays unreachable.
+      after: 0, limit: 100,
+      page: {
+        events: Array.from({ length: 100 }, (_, index) => log(index + 1)),
+        nextSeq: 100, firstSeq: 1, lastSeq: 105, gap: false, reset: false,
+      },
+    },
+  ];
+  const harness = jobHarness({
+    requestResource: async (name, params) => {
+      assert.equal(name, 'getEvents');
+      const scenario = scenarios.find((entry) => entry.after === Number(params.after));
+      assert.ok(scenario, 'unexpected events cursor ' + params.after);
+      return scenario.page;
+    },
+  });
+  const listing = await harness.waitForId(90);
+  const eventsSchema = listing.result.tools.find(
+    (tool) => tool.name === 'alpi_job_events').inputSchema.properties.limit;
+  // The advertised maximum equals the server page bound, which is what
+  // makes the cap boundary above airtight.
+  assert.equal(eventsSchema.maximum, 100);
+
+  const call = (id, args) => harness.send({
+    jsonrpc: '2.0', id, method: 'tools/call',
+    params: { name: 'alpi_job_events', arguments: args },
+  });
+  const callIds = [];
+  let nextId = 120;
+  for (const scenario of scenarios) {
+    callIds.push(nextId);
+    call(nextId, { jobId: ID, after: scenario.after, limit: scenario.limit });
+    nextId += 1;
+  }
+  for (const [index, callId] of callIds.entries()) {
+    const response = await harness.waitForId(callId);
+    assert.ok(!response.result.isError, response.result.content?.[0]?.text);
+    assert.deepEqual(response.result.structuredContent, scenarios[index].page);
+  }
+  harness.end();
+  await harness.done;
+});
+
 test('job tools accept uppercase UUIDs like the server routes do', async () => {
   const UPPER = 'ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB';
   const calls = [];
