@@ -237,7 +237,6 @@ test('a job patch is durable, retrievable through the artifact routes, verifiabl
     await restarted.close();
   }
 });
-
 test('job output registration enforces role, body shape and job scope', async (t) => {
   const { baseDir, patchBytes } = await buildBaseAndPatch(t);
   const stateDir = await tempStateDir(t, 'bvp-guard');

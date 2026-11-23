@@ -2290,9 +2290,12 @@ class WorkStore {
   /**
    * Read the job output artifact references, project-scoped.
    *
-   * The rows are written only by `recordJobArtifact` inside the same
-   * transaction that commits the job row update, so a returned reference is
-   * always consistent with the visible job disposition. This is the receipt
+   * The rows are written only by `recordJobArtifact`, which inserts the
+   * job_artifacts row in its own write transaction, scoped by the existing
+   * job row; the insert never updates the job row itself. Each reference is
+   * idempotent on (jobId, artifactId) and conflict-checked on
+   * label/length/digest, so a returned reference is
+   * stable once recorded. This is the receipt
    * source for consumers: it identifies the artifact that a client fetches
    * through the packaged artifact routes.
    */

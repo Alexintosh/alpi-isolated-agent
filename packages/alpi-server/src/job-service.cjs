@@ -40,7 +40,8 @@
  *   and nothing is allocated, so exactly one job row, one job.submitted
  *   event, one workspace and one idempotency receipt ever exist.
  * - Cancellation only advances the durable disposition graph. Because this
- *   milestone dispatches nothing after acknowledgement, a cooperative cancel
+ *   milestone dispatches nothing native after acknowledgement (the explicitly
+ *   opted-in local test fixture hook is the only execution path), a cooperative cancel
  *   completes immediately without claiming any native termination.
  */
 
@@ -150,7 +151,8 @@ function createJobService(options = {}) {
     if (TERMINAL_DISPOSITIONS.has(job.disposition)) {
       return job;
     }
-    // Nothing is dispatched after acknowledgement in this milestone, so the
+    // Nothing native is dispatched after acknowledgement in this milestone (the
+    // explicitly opted-in local test fixture hook is the only execution path), so the
     // cooperative cancel is complete once it is durably recorded. The strict
     // disposition graph keeps the request and the observed state separate.
     store.markJob(principalInput, { jobId, disposition: 'cancelRequested' });
