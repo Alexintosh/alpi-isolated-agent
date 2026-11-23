@@ -8,9 +8,9 @@
 // data; every result is untrusted output for the caller.
 
 // ---- Validation constants ----
-// Hand-rolled, dependency-free bounds mirroring the packaged server
-// routes: local validation admits exactly what the server would (or
-// rejects early what it never could) without importing server code.
+// Hand-rolled, dependency-free bounds following the packaged server
+// routes without importing server code, with a deliberately tighter
+// 16 KiB local payload cap that fails closed before the server's 64 KiB bounds.
 
 // JSON-Schema patterns compile without flags, so case-insensitivity is
 // spelled out in the source: the server route regex accepts both cases
@@ -22,11 +22,12 @@ const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // (job-service.cjs), so a locally rejected engine can never be admitted.
 const ENGINE_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
 
-// Job payloads travel inside the submit request body, which the daemon
-// bounds as a whole (MAX_BODY_BYTES in daemon.cjs) before the work store
-// applies its own payload bound (MAX_JSON_BYTES in work-store.cjs). The
-// local cap bounds what the tool serializes before any round trip; the
-// server remains the admission authority.
+// Job payloads travel inside the submit request body, bounded as a whole
+// by the resource POST route's inline 64 * 1024 limit (daemon.cjs), then
+// by the work store's 64 KiB payload bound (MAX_JSON_BYTES in work-store.cjs).
+// The daemon's MAX_BODY_BYTES = 8192 applies only to pairing enrollment.
+// The deliberately tighter 16 KiB local cap bounds serialization before
+// any round trip; the server remains the admission authority.
 const MAX_PAYLOAD_JSON_BYTES = 16 * 1024;
 
 // The shared events route takes no caller limit: it pages at most
