@@ -434,4 +434,3 @@ test('registerJobOutput replay: exact replay is idempotent, differing suffix byt
   });
   assert.ok(stillReadable.data.equals(patchBytes), 'the registered bytes are unchanged');
 });
-
